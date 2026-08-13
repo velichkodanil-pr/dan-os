@@ -60,6 +60,21 @@ card once TRAVELON_TOKEN is set, habits appear in the evening check-in.
   (create/delete) STAYS denied. Scope added: `calendar.events` → **both
   accounts need /connect_google re-consent with the NEW checkbox**.
 - Migration `c3d4e5f60718` (pending_cal_actions). Tests: **59 passed**.
+- LIVE VERIFIED: Danylo enabled the Calendar API, re-consented, calendar
+  questions answer with real events; RSVP slice deployed (07941d4).
+
+### Calendar event creation (R4b slice 1, «Розробляй по плану далі»)
+
+«Постав зустріч з Юрою завтра о 15» → preview card → button = L3 confirm →
+event lands in the chosen account's primary calendar:
+
+- Extraction: cal_action=create + cal_title/cal_start/cal_duration_min
+  (default 60, clamp 15..480); no time → honest ask-back, nothing staged.
+- Past start → ask-back; multi-account → one button per account (≤3);
+  no invitees by design (inviting people = communication, stays out).
+- Policy `calendar.create` L3 allowed; `calendar.write` (edit/delete of
+  existing events) still denied. Idempotent; reject never touches Google.
+- Migration `d4e5f60819aa` (pending_cal_creates). Tests: **64 passed**.
 
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 

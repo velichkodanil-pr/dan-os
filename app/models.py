@@ -218,6 +218,18 @@ class PendingCalAction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PendingCalCreate(Base):
+    """New calendar event awaiting L3 confirmation (own calendars only)."""
+    __tablename__ = "pending_cal_creates"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(Text)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed|done|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Goal(Base):
     """Coach (R4): a mid-term goal Danylo tracks with DAN.OS."""
     __tablename__ = "goals"

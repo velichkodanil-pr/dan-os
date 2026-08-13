@@ -138,6 +138,7 @@ async def cmd_start(message: Message) -> None:
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
+        "• «постав зустріч з Юрою завтра о 15» → подія в календарі (з підтвердженням)\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
         "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
@@ -611,6 +612,30 @@ async def _send_cal_action_cards(message: Message, actions: list) -> None:
             reply_markup=kb)
 
 
+async def _send_cal_create_card(message: Message, pending, accounts: list) -> None:
+    import html as _html
+    from zoneinfo import ZoneInfo as _zi
+    tz = _zi(settings.tz_name)
+    start = pending.start_at.astimezone(tz)
+    end = pending.end_at.astimezone(tz)
+    when = f"{start.strftime('%a %d.%m %H:%M')}–{end.strftime('%H:%M')}"
+    if len(accounts) == 1:
+        rows = [[InlineKeyboardButton(text="✅ Створити подію",
+                                      callback_data=f"ce:{pending.id}:0")]]
+    else:
+        rows = [[InlineKeyboardButton(text=f"📅 У {email}",
+                                      callback_data=f"ce:{pending.id}:{i}")]
+                for i, email in accounts[:3]]
+    rows.append([InlineKeyboardButton(text="❌ Не треба",
+                                      callback_data=f"cq:{pending.id}")])
+    await message.answer(
+        f"➕ <b>Нова подія в календарі?</b>\n"
+        f"📅 {_html.escape(pending.title)}\n🕐 {when}\n\n"
+        "<i>Без запрошених — лише твій календар. Нічого не створю без "
+        "підтвердження.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
 async def _process_note(message: Message, text: str, prefix: str = "") -> None:
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")
@@ -629,6 +654,10 @@ async def _process_note(message: Message, text: str, prefix: str = "") -> None:
         return
     if outcome.kind == "cal_actions" and outcome.cal_actions:
         await _send_cal_action_cards(message, outcome.cal_actions)
+        return
+    if outcome.kind == "cal_create" and outcome.cal_create:
+        await _send_cal_create_card(message, outcome.cal_create,
+                                    outcome.cal_accounts or [])
         return
     import html as _html
     if outcome.kind == "note":
@@ -897,6 +926,29 @@ async def on_callback(cb: CallbackQuery) -> None:
                 await orch.reject_cal_action(db, user_id=user_id, action_id=ref)
                 await cb.message.edit_reply_markup(reply_markup=None)
                 await cb.answer("Скасовано, нічого не міняв")
+            elif action == "ce":
+                idx = int(parts[2]) if len(parts) > 2 else 0
+                status, email = await orch.confirm_cal_create(
+                    db, user_id=user_id, create_id=ref, account_index=idx)
+                if status == "done":
+                    lines = (cb.message.text or "").split("\n")
+                    what = lines[1] if len(lines) > 1 else "подію"
+                    when = lines[2] if len(lines) > 2 else ""
+                    await cb.message.edit_text(
+                        f"✅ Створено: {what}\n{when}\n📧 {email}")
+                    await cb.answer("Подія в календарі ✅")
+                elif status == "already":
+                    await cb.message.edit_reply_markup(reply_markup=None)
+                    await cb.answer("Уже створено раніше ✅")
+                elif status in ("no_google", "no_scope"):
+                    await cb.answer("Бракує прав на події — /connect_google "
+                                    "(постав усі галочки)", show_alert=True)
+                else:
+                    await cb.answer(str(status))
+            elif action == "cq":
+                await orch.reject_cal_create(db, user_id=user_id, create_id=ref)
+                await cb.message.edit_reply_markup(reply_markup=None)
+                await cb.answer("Добре, не створюю")
             elif action == "hb":
                 from app.core import coach
                 status = await coach.toggle_habit(db, user_id=user_id, habit_id=ref)

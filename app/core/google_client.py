@@ -328,6 +328,34 @@ async def calendar_find_events(access_token: str, query: str,
     return unique[:3]
 
 
+async def calendar_create_event(access_token: str, *, title: str,
+                                start: datetime, end: datetime,
+                                calendar_id: str = "primary") -> str:
+    """Create a simple event (no invitees) on the account's calendar.
+    Returns the event htmlLink ('' if absent). Raises CalendarAccessError on
+    401/403 so the caller can point at the missing consent checkbox."""
+    from urllib.parse import quote
+    body = {
+        "summary": title,
+        "start": {"dateTime": start.isoformat(), "timeZone": settings.tz_name},
+        "end": {"dateTime": end.isoformat(), "timeZone": settings.tz_name},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://www.googleapis.com/calendar/v3/calendars/"
+            f"{quote(calendar_id, safe='')}/events",
+            headers={"Authorization": f"Bearer {access_token}"}, json=body)
+    if resp.status_code in (401, 403):
+        logger.error("calendar create denied: %s %s", resp.status_code,
+                     resp.text[:150])
+        raise CalendarAccessError(str(resp.status_code))
+    if resp.status_code not in (200, 201):
+        logger.error("calendar create failed: %s %s", resp.status_code,
+                     resp.text[:150])
+        raise RuntimeError(f"calendar create {resp.status_code}")
+    return resp.json().get("htmlLink", "")
+
+
 def respond_in_attendees(attendees: list[dict], response: str,
                          email: str = "") -> list[dict] | None:
     """New attendees list with MY responseStatus changed; None if I'm not there."""

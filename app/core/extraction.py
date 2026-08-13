@@ -29,9 +29,12 @@ class ExtractResult:
     remind_at: datetime | None = None
     memory_text: str | None = None
     reply: str | None = None
-    cal_action: str | None = None  # decline | accept | tentative
-    cal_query: str | None = None  # words to find the event by
+    cal_action: str | None = None  # decline | accept | tentative | create
+    cal_query: str | None = None  # words to find the event by (respond actions)
     cal_date: datetime | None = None  # day hint for the search window
+    cal_title: str | None = None  # new-event title (create)
+    cal_start: datetime | None = None  # new-event start (create)
+    cal_duration_min: int = 60  # new-event length (create)
 
 
 class ExtractionProvider(Protocol):
@@ -55,9 +58,12 @@ _PROMPT = """Ти — DAN.OS, особиста AI-операційна сист�
  "remind_at":"ISO8601 з таймзоною або null",
  "memory_text":"факт вартий запам'ятовування або null",
  "reply":"коротка відповідь користувачу або null",
- "cal_action":"decline|accept|tentative або null",
+ "cal_action":"decline|accept|tentative|create або null",
  "cal_query":"ключові слова назви події або null",
- "cal_date":"ISO8601 дата дня події або null"}}
+ "cal_date":"ISO8601 дата дня події або null",
+ "cal_title":"назва нової події або null",
+ "cal_start":"ISO8601 з таймзоною — початок нової події, або null",
+ "cal_duration_min":60}}
 
 Правила:
 - intent=task: є доручення/справа/нагадування ("нагадай", "треба", "запиши задачу", "подзвонити завтра").
@@ -68,7 +74,13 @@ _PROMPT = """Ти — DAN.OS, особиста AI-операційна сист�
   (cal_action=decline); "прийми запрошення", "підтверди участь" (cal_action=accept);
   "можливо буду" (cal_action=tentative). cal_query = слова з назви події
   (наприклад "маркетинг"), cal_date = день події, якщо названий.
-  Створення/видалення подій — НЕ intent=calendar (це task).
+- intent=calendar + cal_action=create: користувач просить ДОДАТИ подію/зустріч у
+  календар ("постав зустріч", "створи подію", "додай у календар", "запиши в
+  календар"). cal_title = назва ("Зустріч з Юрою"), cal_start = початок ISO8601
+  з таймзоною, cal_duration_min = тривалість (не сказано — 60). Якщо час не
+  названий взагалі — intent=chat і перепитай у reply, на коли ставити.
+  Видалення/редагування чужих полів події — НЕ підтримується (intent=chat,
+  чесно скажи).
 - "завтра о 10" → конкретна дата-час у таймзоні {tz}. Якщо час не сказано для задачі з датою — due_at 09:00.
 - remind_at: коли нагадати. Якщо є due_at, а окремий час нагадування не сказано — remind_at = due_at.
 - title: 3-8 слів, інфінітив ("Подзвонити в банк").
@@ -139,8 +151,6 @@ def _parse(raw: str, original: str) -> ExtractResult:
     intent = data.get("intent") or "note"
     if intent not in ("task", "note", "chat", "calendar"):
         intent = "note"
-    if intent == "calendar" and not data.get("cal_query"):
-        intent = "chat"  # nothing to search by — let the chat engine ask back
 
     def _dt(key):
         v = data.get(key)
@@ -152,13 +162,24 @@ def _parse(raw: str, original: str) -> ExtractResult:
             return None
 
     cal_action = data.get("cal_action")
-    if cal_action not in ("decline", "accept", "tentative"):
+    if cal_action not in ("decline", "accept", "tentative", "create"):
         cal_action = "decline" if intent == "calendar" else None
+    if intent == "calendar":
+        if cal_action == "create" and not (data.get("cal_title") and _dt("cal_start")):
+            intent = "chat"  # not enough to stage an event — ask back
+        elif cal_action != "create" and not data.get("cal_query"):
+            intent = "chat"  # nothing to search by — let the chat engine ask back
+    try:
+        duration = max(15, min(int(data.get("cal_duration_min") or 60), 480))
+    except (TypeError, ValueError):
+        duration = 60
     title = data.get("title") or (original.strip()[:80] if intent == "task" else None)
     return ExtractResult(
         intent=intent, title=title, due_at=_dt("due_at"), remind_at=_dt("remind_at"),
         memory_text=data.get("memory_text"), reply=data.get("reply"),
         cal_action=cal_action, cal_query=data.get("cal_query"), cal_date=_dt("cal_date"),
+        cal_title=data.get("cal_title"), cal_start=_dt("cal_start"),
+        cal_duration_min=duration,
     )
 
 
@@ -171,7 +192,23 @@ _CAL_STRIP_RE = re.compile(
     r"підтверди( мою)? участь( у| в| на)?|^(на|у|в|з|зі)\s|завтра|сьогодні")
 
 
+_CAL_CREATE_RE = re.compile(
+    r"постав зустріч|створи подію|додай (в|у) календар|запиши (в|у) календар")
+
+
 def _mock_calendar(low: str, now: datetime) -> "ExtractResult | None":
+    if _CAL_CREATE_RE.search(low):
+        hh = 10
+        m = re.search(r"о\s*(\d{1,2})", low)
+        if m:
+            hh = int(m.group(1))
+        day = now + timedelta(days=1) if "завтра" in low else now
+        start = day.replace(hour=hh, minute=0, second=0, microsecond=0)
+        title = _CAL_CREATE_RE.sub(" ", low)
+        title = re.sub(r"завтра|сьогодні|о\s*\d{1,2}(:\d{2})?", " ", title)
+        title = " ".join(title.split()).strip().capitalize() or "Зустріч"
+        return ExtractResult(intent="calendar", cal_action="create",
+                             cal_title=title, cal_start=start)
     action = None
     if _CAL_DECLINE_RE.search(low):
         action = "decline"

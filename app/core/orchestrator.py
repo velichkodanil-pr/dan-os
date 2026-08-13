@@ -50,11 +50,13 @@ def _check(action: str) -> str:
 
 @dataclass
 class NoteOutcome:
-    kind: str  # duplicate | proposal | note | chat | cal_actions | error
+    kind: str  # duplicate | proposal | note | chat | cal_actions | cal_create | error
     proposal: Proposal | None = None
     reply: str | None = None
     memory_saved: bool = False
     cal_actions: list | None = None  # PendingCalAction rows awaiting confirmation
+    cal_create: object | None = None  # PendingCalCreate awaiting confirmation
+    cal_accounts: list | None = None  # (index, email) choices for cal_create
 
 
 class Orchestrator:
@@ -202,12 +204,104 @@ class Orchestrator:
 
     # ---------- calendar: respond to own participation (L3) ----------
 
+    async def _propose_cal_create(self, db: AsyncSession, *, user_id: int,
+                                  ext) -> NoteOutcome:
+        """Stage a new-event proposal (no write until the button press)."""
+        from datetime import timedelta
+        from app.core import google_client
+        from app.models import PendingCalCreate
+        accounts = await google_client.get_accounts(db, user_id)
+        if not accounts:
+            return NoteOutcome(kind="chat", reply="Спершу підключи Google: /connect_google")
+        if ext.cal_start.tzinfo is None:
+            ext.cal_start = ext.cal_start.replace(tzinfo=ZoneInfo(settings.tz_name))
+        if ext.cal_start < datetime.now(timezone.utc).astimezone(ext.cal_start.tzinfo):
+            return NoteOutcome(kind="chat", reply=(
+                "Цей час уже минув — назви майбутній час, і я поставлю подію."))
+        pending = PendingCalCreate(
+            user_id=user_id, title=ext.cal_title[:200], start_at=ext.cal_start,
+            end_at=ext.cal_start + timedelta(minutes=ext.cal_duration_min))
+        db.add(pending)
+        await db.flush()
+        await audit(db, actor=f"user:{user_id}", action="calendar.create_proposed",
+                    resource_type="cal_create", resource_id=pending.id,
+                    policy_level="L3", title=pending.title[:80])
+        return NoteOutcome(kind="cal_create", cal_create=pending,
+                           cal_accounts=[(i, c.account_email)
+                                         for i, c in enumerate(accounts)])
+
+    async def confirm_cal_create(self, db: AsyncSession, *, user_id: int,
+                                 create_id: uuid.UUID,
+                                 account_index: int = 0) -> tuple[str, str]:
+        """Returns (status, account_email). Button press IS the L3 confirmation."""
+        _guard_owner(user_id)
+        _check("calendar.create")
+        from app.core import google_client
+        from app.models import PendingCalCreate
+        pending = await db.get(PendingCalCreate, create_id, with_for_update=True)
+        if pending is None or pending.user_id != user_id:
+            return "not_found", ""
+        if pending.status == "done":
+            await db.commit()
+            return "already", ""
+        if pending.status != "proposed":
+            await db.commit()
+            return pending.status, ""
+        accounts = await google_client.get_accounts(db, user_id)
+        if not accounts or account_index >= len(accounts):
+            await db.commit()
+            return "no_google", ""
+        cred = accounts[account_index]
+        access = await google_client.access_for(db, cred)
+        if not access:
+            await db.commit()
+            return "no_google", cred.account_email
+        try:
+            await google_client.calendar_create_event(
+                access, title=pending.title, start=pending.start_at,
+                end=pending.end_at)
+        except google_client.CalendarAccessError:
+            await db.commit()
+            return "no_scope", cred.account_email
+        except Exception:
+            logger.exception("calendar create failed")
+            await db.commit()
+            return "error", cred.account_email
+        pending.status = "done"
+        await audit(db, actor=f"user:{user_id}", action="calendar.created",
+                    resource_type="cal_create", resource_id=pending.id,
+                    policy_level="L3", title=pending.title[:80],
+                    account=cred.account_email)
+        await db.commit()
+        return "done", cred.account_email
+
+    async def reject_cal_create(self, db: AsyncSession, *, user_id: int,
+                                create_id: uuid.UUID) -> str:
+        _guard_owner(user_id)
+        from app.models import PendingCalCreate
+        pending = await db.get(PendingCalCreate, create_id, with_for_update=True)
+        if pending is None or pending.user_id != user_id:
+            return "not_found"
+        if pending.status == "proposed":
+            pending.status = "rejected"
+            await audit(db, actor=f"user:{user_id}", action="calendar.create_rejected",
+                        resource_type="cal_create", resource_id=pending.id,
+                        policy_level="L3")
+        await db.commit()
+        return "rejected"
+
     async def _propose_cal_actions(self, db: AsyncSession, *, user_id: int,
                                    ext) -> NoteOutcome:
         """Find matching events and stage RSVP proposals (no writes yet)."""
         from app.core import google_client
         from app.models import PendingCalAction
         _check("calendar.read")
+        if ext.cal_action == "create":
+            if not (ext.cal_title and ext.cal_start):
+                return NoteOutcome(kind="chat", reply=(
+                    "Скажи, що за подія і на коли — наприклад: "
+                    "«постав зустріч з Юрою завтра о 15»."))
+            return await self._propose_cal_create(db, user_id=user_id, ext=ext)
         if not ext.cal_query:
             return NoteOutcome(kind="chat", reply=(
                 "Уточни, будь ласка, яку саме подію маєш на увазі — "

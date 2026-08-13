@@ -48,7 +48,8 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "reminder.cancel": ("L2", True, False),
     # L3/L4 — external writes/communication
     "calendar.respond": ("L3", True, True),  # OWN attendance RSVP (preview+confirm)
-    "calendar.write": ("L3", False, True),  # creating/deleting events stays denied
+    "calendar.create": ("L3", True, True),  # new event, own calendar, no invitees
+    "calendar.write": ("L3", False, True),  # editing/deleting events stays denied
     "email.draft": ("L3", True, True),  # draft-only (preview+confirm); SENDING stays denied
     "email.send": ("L4", False, True),
     "crm.write": ("L4", False, True),
