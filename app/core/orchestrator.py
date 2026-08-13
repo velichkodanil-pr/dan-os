@@ -54,13 +54,14 @@ def _check(action: str) -> str:
 
 @dataclass
 class NoteOutcome:
-    kind: str  # duplicate | proposal | note | chat | cal_actions | cal_create | error
+    kind: str  # duplicate | proposal | note | chat | cal_actions | cal_create | new_draft | error
     proposal: Proposal | None = None
     reply: str | None = None
     memory_saved: bool = False
     cal_actions: list | None = None  # PendingCalAction rows awaiting confirmation
     cal_create: object | None = None  # PendingCalCreate awaiting confirmation
-    cal_accounts: list | None = None  # (index, email) choices for cal_create
+    cal_accounts: list | None = None  # (index, email) choices for cal_create/draft
+    draft: object | None = None  # PendingDraft (compose-new) awaiting confirmation
 
 
 class Orchestrator:
@@ -201,6 +202,11 @@ class Orchestrator:
 
         if ext.intent == "calendar":
             outcome = await self._propose_cal_actions(db, user_id=user_id, ext=ext)
+            await db.commit()
+            return outcome
+
+        if ext.intent == "email" and ext.email_to:
+            outcome = await self._propose_new_email(db, user_id=user_id, ext=ext)
             await db.commit()
             return outcome
 
@@ -685,6 +691,47 @@ class Orchestrator:
         return True
 
     # ---------- email drafts (L3: preview + confirm, draft-only) ----------
+
+    async def _propose_new_email(self, db: AsyncSession, *, user_id: int,
+                                 ext) -> NoteOutcome:
+        """Stage a NEW letter (not a reply) as a PendingDraft. No sending —
+        the button creates a Gmail DRAFT in the chosen account."""
+        from app.core import google_client
+        from app.models import PendingDraft
+        accounts = await google_client.get_accounts(db, user_id)
+        if not accounts:
+            return NoteOutcome(kind="chat",
+                               reply="Спершу підключи Google: /connect_google")
+        draft = PendingDraft(
+            user_id=user_id, to_addr=ext.email_to.strip()[:200],
+            subject=(ext.email_subject or "Лист від Данила").strip()[:200],
+            body=(ext.email_body or "").strip()[:5000] or "Привіт!",
+            credential_id=accounts[0].id if len(accounts) == 1 else None)
+        db.add(draft)
+        await db.flush()
+        await audit(db, actor=f"user:{user_id}", action="draft.proposed",
+                    resource_type="draft", resource_id=draft.id, policy_level="L3",
+                    to=draft.to_addr, subject=draft.subject, kind="new")
+        return NoteOutcome(kind="new_draft", draft=draft,
+                           cal_accounts=[(i, c.account_email)
+                                         for i, c in enumerate(accounts)])
+
+    async def set_draft_account(self, db: AsyncSession, *, user_id: int,
+                                draft_id: uuid.UUID, account_index: int) -> str:
+        """Bind the pending draft to one of the connected accounts."""
+        _guard_owner(user_id)
+        from app.core import google_client
+        from app.models import PendingDraft
+        draft = await db.get(PendingDraft, draft_id, with_for_update=True)
+        if draft is None or draft.user_id != user_id:
+            return "not_found"
+        accounts = await google_client.get_accounts(db, user_id)
+        if account_index >= len(accounts):
+            await db.commit()
+            return "no_google"
+        draft.credential_id = accounts[account_index].id
+        await db.commit()
+        return "ok"
 
     async def propose_draft(self, db: AsyncSession, *, user_id: int, query: str):
         """Find the email, compose a reply draft with Haiku, store as proposed."""

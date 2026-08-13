@@ -35,6 +35,9 @@ class ExtractResult:
     cal_title: str | None = None  # new-event title (create)
     cal_start: datetime | None = None  # new-event start (create)
     cal_duration_min: int = 60  # new-event length (create)
+    email_to: str | None = None  # compose-new-email: recipient address
+    email_subject: str | None = None
+    email_body: str | None = None
 
 
 class ExtractionProvider(Protocol):
@@ -52,7 +55,7 @@ _PROMPT = """Ти — DAN.OS, особиста AI-операційна сист�
 {profile_block}{history_block}
 
 Проаналізуй повідомлення користувача і поверни СТРОГО один JSON-об'єкт без markdown:
-{{"intent":"task|note|chat|calendar",
+{{"intent":"task|note|chat|calendar|email",
  "title":"коротка назва задачі або null",
  "due_at":"ISO8601 з таймзоною або null",
  "remind_at":"ISO8601 з таймзоною або null",
@@ -63,7 +66,10 @@ _PROMPT = """Ти — DAN.OS, особиста AI-операційна сист�
  "cal_date":"ISO8601 дата дня події або null",
  "cal_title":"назва нової події або null",
  "cal_start":"ISO8601 з таймзоною — початок нової події, або null",
- "cal_duration_min":60}}
+ "cal_duration_min":60,
+ "email_to":"email-адреса отримувача або null",
+ "email_subject":"тема листа або null",
+ "email_body":"текст листа або null"}}
 
 Правила:
 - intent=task: є доручення/справа/нагадування ("нагадай", "треба", "запиши задачу", "подзвонити завтра").
@@ -81,6 +87,12 @@ _PROMPT = """Ти — DAN.OS, особиста AI-операційна сист�
   названий взагалі — intent=chat і перепитай у reply, на коли ставити.
   Видалення/редагування чужих полів події — НЕ підтримується (intent=chat,
   чесно скажи).
+- intent=email: користувач просить НАПИСАТИ ЛИСТ ("напиши лист", "склади
+  email", "надішли листа на adresa@..."). email_to = адреса (якщо адреси нема —
+  intent=chat і перепитай кому). Якщо сказано «з текстом X» — email_body РІВНО X;
+  інакше склади доречний текст від імені Данила (коротко, ввічливо, без
+  вигадок). email_subject: як сказано, або коротка доречна тема. Лист буде
+  лише ЧЕРНЕТКОЮ — нічого не надсилається без Данила.
 - "завтра о 10" → конкретна дата-час у таймзоні {tz}. Якщо час не сказано для задачі з датою — due_at 09:00.
 - remind_at: коли нагадати. Якщо є due_at, а окремий час нагадування не сказано — remind_at = due_at.
 - title: 3-8 слів, інфінітив ("Подзвонити в банк").
@@ -149,7 +161,7 @@ def _parse(raw: str, original: str) -> ExtractResult:
         logger.warning("Extraction parse failed; falling back to note")
         data = {}
     intent = data.get("intent") or "note"
-    if intent not in ("task", "note", "chat", "calendar"):
+    if intent not in ("task", "note", "chat", "calendar", "email"):
         intent = "note"
 
     def _dt(key):
@@ -164,6 +176,8 @@ def _parse(raw: str, original: str) -> ExtractResult:
     cal_action = data.get("cal_action")
     if cal_action not in ("decline", "accept", "tentative", "create"):
         cal_action = "decline" if intent == "calendar" else None
+    if intent == "email" and not (data.get("email_to") and "@" in str(data.get("email_to"))):
+        intent = "chat"  # no address -> ask back
     if intent == "calendar":
         if cal_action == "create" and not (data.get("cal_title") and _dt("cal_start")):
             intent = "chat"  # not enough to stage an event — ask back
@@ -180,6 +194,8 @@ def _parse(raw: str, original: str) -> ExtractResult:
         cal_action=cal_action, cal_query=data.get("cal_query"), cal_date=_dt("cal_date"),
         cal_title=data.get("cal_title"), cal_start=_dt("cal_start"),
         cal_duration_min=duration,
+        email_to=data.get("email_to"), email_subject=data.get("email_subject"),
+        email_body=data.get("email_body"),
     )
 
 
@@ -194,6 +210,23 @@ _CAL_STRIP_RE = re.compile(
 
 _CAL_CREATE_RE = re.compile(
     r"постав зустріч|створи подію|додай (в|у) календар|запиши (в|у) календар")
+
+
+_EMAIL_RE = re.compile(r"напиши лист|склади (лист|email)|надішли лист")
+_ADDR_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_BODY_RE = re.compile(r"з текстом\s+(.+?)(?:\s+на\s+[\w.+-]+@|$)", re.DOTALL)
+
+
+def _mock_email(text: str, low: str) -> "ExtractResult | None":
+    if not _EMAIL_RE.search(low):
+        return None
+    addr = _ADDR_RE.search(text)
+    if not addr:
+        return ExtractResult(intent="chat", reply="Кому надіслати? Дай адресу.")
+    body = _BODY_RE.search(text)
+    return ExtractResult(intent="email", email_to=addr.group(0),
+                         email_subject="Лист від Данила",
+                         email_body=body.group(1).strip() if body else "Привіт!")
 
 
 def _mock_calendar(low: str, now: datetime) -> "ExtractResult | None":
@@ -238,6 +271,9 @@ class MockExtractionProvider:
         tz = ZoneInfo(settings.tz_name)
         now = datetime.now(tz)
         low = text.lower()
+        em = _mock_email(text, low)
+        if em is not None:
+            return em
         cal = _mock_calendar(low, now)
         if cal is not None:
             return cal

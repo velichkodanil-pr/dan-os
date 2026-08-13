@@ -155,7 +155,7 @@ async def cmd_start(message: Message) -> None:
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
-        "• /reply — чернетка відповіді на лист\n"
+        "• «напиши лист на adresa@…» → чернетка нового листа · /reply — відповідь\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
         f"• бриф {settings.brief_time} · чек-ін {settings.checkin_time} · "
@@ -945,6 +945,26 @@ async def _process_note(message: Message, text: str, prefix: str = "",
         await _send_cal_create_card(message, outcome.cal_create,
                                     outcome.cal_accounts or [])
         return
+    if outcome.kind == "new_draft" and outcome.draft:
+        import html as _html
+        d = outcome.draft
+        accounts = outcome.cal_accounts or []
+        if len(accounts) <= 1:
+            rows = [[InlineKeyboardButton(text="💾 Створити чернетку в Gmail",
+                                          callback_data=f"dm:{d.id}")]]
+        else:
+            rows = [[InlineKeyboardButton(text=f"💾 З {email}",
+                                          callback_data=f"de:{d.id}:{i}")]
+                    for i, email in accounts[:3]]
+        rows.append([InlineKeyboardButton(text="❌ Відхилити",
+                                          callback_data=f"dx:{d.id}")])
+        await message.answer(
+            f"📧 <b>Новий лист (чернетка)</b>\n<b>Кому:</b> {_html.escape(d.to_addr)}\n"
+            f"<b>Тема:</b> {_html.escape(d.subject)}\n\n{_html.escape(d.body[:2500])}\n\n"
+            "<i>Нічого не надсилаю — створю лише чернетку в Gmail, "
+            "надішлеш сам.</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
     import html as _html
     if outcome.kind == "note":
         await message.answer(
@@ -1172,6 +1192,21 @@ async def on_callback(cb: CallbackQuery) -> None:
                 if status in ("created", "already"):
                     await cb.message.edit_reply_markup(reply_markup=None)
                     await cb.answer("Чернетка в Gmail ✅ (нічого не надіслано)", show_alert=True)
+                elif status == "no_google":
+                    await cb.answer("Онови доступ: /connect_google", show_alert=True)
+                else:
+                    await cb.answer(str(status))
+            elif action == "de":  # compose-new draft: pick account, then create
+                idx = int(parts[2]) if len(parts) > 2 else 0
+                status = await orch.set_draft_account(
+                    db, user_id=user_id, draft_id=ref, account_index=idx)
+                if status == "ok":
+                    status = await orch.approve_draft(db, user_id=user_id,
+                                                      draft_id=ref)
+                if status in ("created", "already"):
+                    await cb.message.edit_reply_markup(reply_markup=None)
+                    await cb.answer("Чернетка в Gmail ✅ (нічого не надіслано)",
+                                    show_alert=True)
                 elif status == "no_google":
                     await cb.answer("Онови доступ: /connect_google", show_alert=True)
                 else:

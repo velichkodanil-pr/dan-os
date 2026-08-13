@@ -134,3 +134,50 @@ async def test_xlsx_each_sheet_is_own_document(db):
     from app.core import rag
     chunks = await rag.retrieve(db, user_id=OWNER, query="логін Toco пароль")
     assert any("i.k@travelon.to" in c.text for c in chunks)
+
+
+# ---------- compose new email draft ----------
+
+@pytest.mark.asyncio
+async def test_compose_new_email_flow(db, monkeypatch):
+    from app.core import google_client
+    from app.core.orchestrator import Orchestrator
+    from app.models import GoogleCredential
+    cred = GoogleCredential(user_id=OWNER, account_email="me@gmail.com",
+                            label="me", refresh_token_enc="enc")
+    db.add(cred)
+    await db.commit()
+
+    orch = Orchestrator()
+    out = await orch.handle_note(
+        db, user_id=OWNER, dedupe_key="em-1",
+        text="напиши лист з текстом Привіт! на velichko.danil@gmail.com")
+    assert out.kind == "new_draft"
+    d = out.draft
+    assert d.to_addr == "velichko.danil@gmail.com"
+    assert d.body == "Привіт!"
+    assert d.credential_id == cred.id  # single account bound automatically
+
+    created = {}
+
+    async def fake_access(_db, _c):
+        return "tok"
+
+    async def fake_create(access, *, to_addr, subject, body, thread_id="",
+                          in_reply_to="", references=""):
+        created.update(to=to_addr, subject=subject, body=body)
+        return "draft_id_1"
+    monkeypatch.setattr(google_client, "access_for", fake_access)
+    monkeypatch.setattr(google_client, "gmail_create_draft", fake_create)
+
+    assert await orch.approve_draft(db, user_id=OWNER, draft_id=d.id) == "created"
+    assert created["to"] == "velichko.danil@gmail.com" and created["body"] == "Привіт!"
+    # idempotent
+    assert await orch.approve_draft(db, user_id=OWNER, draft_id=d.id) == "already"
+
+
+@pytest.mark.asyncio
+async def test_compose_email_no_address_asks_back(db):
+    from app.core.extraction import MockExtractionProvider
+    ext = await MockExtractionProvider().extract("напиши лист Юрі про трансфери")
+    assert ext.intent == "chat" and "адресу" in ext.reply
