@@ -140,6 +140,7 @@ async def cmd_start(message: Message) -> None:
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
         "• «постав зустріч з Юрою завтра о 15» → подія в календарі (з підтвердженням)\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
+        "• 🎙 транскрипт зустрічі (vtt/srt із Zoom) → підсумок, рішення і задачі\n"
         "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
         "• /travelon — пульс заявок TravelON 🧳\n"
@@ -492,18 +493,55 @@ async def cmd_kb(message: Message) -> None:
 
 # ---------- knowledge intake: files & forwards ----------
 
-ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md")
+ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md", ".vtt", ".srt")
+
+
+async def _handle_transcript_file(message: Message, name: str, text: str) -> None:
+    import html as _html
+    await message.answer("📝 Читаю транскрипт і готую підсумок…")
+    async with database.session() as db:
+        out = await orch.handle_transcript(
+            db, user_id=message.from_user.id, title=name, text=text,
+            source_ref=name)
+    if out["ingest"].status == "duplicate":
+        await message.answer("📚 Цей транскрипт уже розібраний раніше ✅")
+        return
+    if out["ingest"].status != "indexed":
+        await message.answer("📄 Не вдалося обробити транскрипт, спробуй ще раз.")
+        return
+    digest = out["digest"]
+    if not digest:
+        await message.answer(
+            f"📚 Додав транскрипт у базу знань ({out['ingest'].chunks} фр.), "
+            "але підсумок скласти не вдалося — можеш спитати мене про зміст.")
+        return
+    lines = [f"📝 <b>Підсумок зустрічі</b> · {_html.escape(name)}",
+             _html.escape(digest["summary"])]
+    if digest["decisions"]:
+        lines.append("\n✅ <b>Рішення:</b>")
+        lines += [f" • {_html.escape(d)}" for d in digest["decisions"]]
+    others = [a for a in digest["actions"] if a["who"] != "me"]
+    if others:
+        lines.append("\n👥 <b>Домовленості інших:</b>")
+        lines += [f" • {_html.escape(a['who_name'] or 'Хтось')}: "
+                  f"{_html.escape(a['title'])}" for a in others]
+    lines.append(f"\n📚 У базі знань ({out['ingest'].chunks} фр.) — можеш питати про зміст.")
+    await message.answer("\n".join(lines))
+    for p in out["proposals"]:
+        await message.answer(proposal_card(p), reply_markup=_proposal_kb(p.id, p.version))
 
 
 @router.message(F.document)
 async def on_document(message: Message) -> None:
     if not _is_owner(message):
         return
+    from app.core import meetings
     from app.core.ingest import IngestError, extract_text, ingest_document
     doc = message.document
     name = (doc.file_name or "file").strip()
     if not name.lower().endswith(ALLOWED_DOC_EXT):
-        await message.answer("Підтримую pdf, docx, txt, md — цей формат поки ні.")
+        await message.answer("Підтримую pdf, docx, txt, md і транскрипти vtt/srt — "
+                             "цей формат поки ні.")
         return
     if doc.file_size and doc.file_size > 15 * 1024 * 1024:
         await message.answer("Файл завеликий (ліміт 15 МБ)")
@@ -514,6 +552,9 @@ async def on_document(message: Message) -> None:
         async with httpx.AsyncClient(timeout=120) as client:
             data = (await client.get(url)).content
         text = extract_text(name, data)
+        if meetings.looks_like_transcript(name):
+            await _handle_transcript_file(message, name, text)
+            return
         async with database.session() as db:
             result = await ingest_document(
                 db, user_id=message.from_user.id, title=name, text=text,

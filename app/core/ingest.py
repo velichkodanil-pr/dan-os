@@ -25,17 +25,52 @@ MAX_CHARS = 400_000
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
 
-ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md"}
+ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt"}
 
 
 class IngestError(Exception):
     pass
 
 
+_TS_RE = re.compile(r"-->")
+_CUE_NUM_RE = re.compile(r"^\d+$")
+_SPEAKER_RE = re.compile(r"^([^:\n]{1,60}):\s*(.+)$", re.DOTALL)
+
+
+def parse_subtitles(data: bytes) -> str:
+    """WEBVTT/SRT (Zoom meeting transcripts) -> clean 'Speaker: text' lines.
+
+    Drops headers, cue numbers and timestamps; merges consecutive cues of the
+    same speaker so the transcript reads as a dialogue, not subtitle spam."""
+    raw = data.decode("utf-8", "ignore").replace("\r\n", "\n")
+    lines: list[tuple[str, str]] = []  # (speaker, text)
+    for line in raw.split("\n"):
+        line = line.strip().lstrip("﻿")
+        if (not line or line.upper().startswith(("WEBVTT", "NOTE", "STYLE"))
+                or _TS_RE.search(line) or _CUE_NUM_RE.match(line)):
+            continue
+        m = _SPEAKER_RE.match(line)
+        speaker, text = (m.group(1).strip(), m.group(2).strip()) if m else ("", line)
+        if lines and lines[-1][0] == speaker:
+            prev_speaker, prev_text = lines[-1]
+            if text not in prev_text[-len(text) * 2:]:  # skip verbatim repeats
+                lines[-1] = (prev_speaker, f"{prev_text} {text}")
+        else:
+            lines.append((speaker, text))
+    out = [f"{s}: {t}" if s else t for s, t in lines]
+    return "\n".join(out)
+
+
 def extract_text(filename: str, data: bytes) -> str:
     name = filename.lower()
     if len(data) > MAX_DOC_BYTES:
         raise IngestError("Файл завеликий (ліміт 15 МБ)")
+    if name.endswith((".vtt", ".srt")):
+        text = parse_subtitles(data)
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        if len(text) < 20:
+            raise IngestError("У транскрипті не знайшлося тексту")
+        return text[:MAX_CHARS]
     if name.endswith(".pdf"):
         try:
             from pypdf import PdfReader

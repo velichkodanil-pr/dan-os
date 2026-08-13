@@ -91,6 +91,21 @@ per day; 7-day range requests time out). Reworked before first prod use:
 - Verified live: pulse 22.8s (26/82 orders, 513 arrivals/7d, 47 debtors),
   brief line 9.7s. TRAVELON_TOKEN set on Railway. Tests: **66 passed**.
 
+### Meeting transcripts v1 (R4b slice 2)
+
+Send a Zoom transcript file (.vtt/.srt) to the bot → knowledge base +
+summary + decisions + action items:
+
+- parse_subtitles(): WEBVTT/SRT -> clean "Speaker: text" dialogue (headers,
+  cue numbers, timestamps dropped; consecutive same-speaker cues merged).
+- meetings.meeting_digest(): Haiku -> {summary, decisions[], actions[]}
+  (transcript is DATA; injected instructions ignored; max 6 actions, no
+  invented deadlines). Digest failure -> KB-only ingest, honest message.
+- Actions with who=me become NORMAL task proposals (✅/✏️/❌ cards, same
+  policy/audit); others' commitments listed informationally. Duplicate
+  upload => no re-digest, no duplicate proposals (raw-event dedupe anchor
+  on content hash). Zoom API auto-pull stays a candidate. Tests: **72**.
+
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 
 - /drive: list Drive folders → index pdf/docx/txt/md + Google Docs (read-only,

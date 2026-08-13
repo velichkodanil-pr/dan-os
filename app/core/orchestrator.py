@@ -202,6 +202,71 @@ class Orchestrator:
         await db.commit()
         return NoteOutcome(kind="chat", reply=reply)
 
+    # ---------- meeting transcripts (R4b) ----------
+
+    async def handle_transcript(self, db: AsyncSession, *, user_id: int,
+                                title: str, text: str,
+                                source_ref: str = "") -> dict:
+        """Ingest a meeting transcript, summarize it, stage action proposals.
+
+        Returns {"ingest": IngestResult, "digest": dict|None,
+                 "proposals": [Proposal]}. Duplicate upload => no re-digest,
+        no duplicate proposals (raw-event dedupe is the second safety net)."""
+        _guard_owner(user_id)
+        actor = f"user:{user_id}"
+        from app.core import meetings
+        from app.core.ingest import ingest_document
+        result = await ingest_document(
+            db, user_id=user_id, title=title, text=text,
+            source_type="meeting_transcript", source_ref=source_ref)
+        out: dict = {"ingest": result, "digest": None, "proposals": []}
+        if result.status != "indexed" or result.document is None:
+            return out
+
+        digest = await meetings.meeting_digest(text)
+        out["digest"] = digest
+        if not digest:
+            return out
+
+        # dedupe anchor for the proposals batch (unique per content hash)
+        _check("raw_event.create")
+        event = RawEvent(event_type="meeting.transcript",
+                         dedupe_key=f"tr:{result.document.content_hash[:100]}",
+                         user_id=user_id,
+                         payload={"title": title[:200]})
+        db.add(event)
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            return out  # already proposed once for this exact transcript
+        await audit(db, actor=actor, action="transcript.digested",
+                    resource_type="document", resource_id=result.document.id,
+                    policy_level="L1", actions=len(digest["actions"]))
+
+        for a in digest["actions"]:
+            if a["who"] != "me":
+                continue
+            _check("proposal.create")
+            due_iso = None
+            if a.get("due"):
+                try:
+                    due_iso = datetime.fromisoformat(a["due"]).isoformat()
+                except ValueError:
+                    due_iso = None
+            proposal = Proposal(
+                raw_event_id=event.id, user_id=user_id, kind="task",
+                payload={"title": a["title"], "due_at": due_iso,
+                         "remind_at": due_iso, "memory_text": None})
+            db.add(proposal)
+            await db.flush()
+            await audit(db, actor=actor, action="proposal.created",
+                        resource_type="proposal", resource_id=proposal.id,
+                        policy_level="L1", title=a["title"], source="transcript")
+            out["proposals"].append(proposal)
+        await db.commit()
+        return out
+
     # ---------- calendar: respond to own participation (L3) ----------
 
     async def _propose_cal_create(self, db: AsyncSession, *, user_id: int,

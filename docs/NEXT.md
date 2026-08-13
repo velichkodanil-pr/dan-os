@@ -15,7 +15,9 @@ Remaining live checks:
 
 ## Round 4b — next candidates (in plan order)
 
-- Zoom/meeting transcripts into the knowledge base.
+- ~~Zoom/meeting transcripts~~ — DONE v1 (file upload .vtt/.srt → summary +
+  decisions + action proposals). v2 candidate: Zoom API auto-pull after
+  each meeting (needs a Zoom Server-to-Server OAuth app from Danylo).
 - TTS replies (optional); Mini App: goal creation + travelon tab.
 - Android app groundwork (same API as Mini App).
 
