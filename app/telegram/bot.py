@@ -242,18 +242,22 @@ def _forward_title(message: Message) -> str:
     return "Переслане повідомлення"
 
 
-@router.message(F.forward_origin, F.text)
+@router.message(F.forward_origin, F.text | F.caption)
 async def on_forward(message: Message) -> None:
     if not _is_owner(message):
         return
     from app.core.ingest import ingest_document
+    content = message.text or message.caption or ""
+    if len(content.strip()) < 25:
+        await message.answer("У пересилці замало тексту, щоб її зберегти.")
+        return
     title = _forward_title(message)
     try:
         async with database.session() as db:
             result = await ingest_document(
                 db, user_id=message.from_user.id,
                 title=f"{title} ({message.date.strftime('%d.%m.%Y')})",
-                text=message.text, source_type="telegram_forward",
+                text=content, source_type="telegram_forward",
                 source_ref=str(message.message_id))
     except Exception:
         logger.exception("forward ingest failed")
@@ -317,6 +321,25 @@ async def on_text(message: Message) -> None:
                     message.from_user.id if message.from_user else "?")
         return
     await _process_note(message, message.text)
+
+
+@router.message(F.caption)
+async def on_media_caption(message: Message) -> None:
+    """Photo/video sent directly with a caption — process the caption as a note."""
+    if not _is_owner(message):
+        return
+    await _process_note(message, message.caption)
+
+
+@router.message()
+async def on_other(message: Message) -> None:
+    """Unsupported content — say so instead of silence."""
+    if not _is_owner(message):
+        return
+    await message.answer(
+        "Це медіа я поки не вмію читати 🙈\n"
+        "Розумію: текст, голосові, документи (pdf/docx/txt/md) і пересилки "
+        "з текстом чи підписом.")
 
 
 # ---------- callbacks ----------
