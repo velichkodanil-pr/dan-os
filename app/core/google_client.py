@@ -89,11 +89,30 @@ async def exchange_code(code: str) -> dict:
     return resp.json()
 
 
-async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> None:
+async def _account_email(access_token: str) -> str:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+            headers={"Authorization": f"Bearer {access_token}"})
+    resp.raise_for_status()
+    return resp.json().get("emailAddress", "").lower()
+
+
+async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
+    """Adds/updates ONE Google account (multi-account). Returns the account email."""
+    from sqlalchemy import select
     refresh = tokens.get("refresh_token")
     if not refresh:
         raise ValueError("Google did not return a refresh_token")
-    cred = await db.get(GoogleCredential, user_id) or GoogleCredential(user_id=user_id)
+    email = await _account_email(tokens.get("access_token", ""))
+    if not email:
+        raise ValueError("Could not resolve account email")
+    cred = (await db.execute(select(GoogleCredential).where(
+        GoogleCredential.user_id == user_id,
+        GoogleCredential.account_email == email))).scalar_one_or_none()
+    if cred is None:
+        cred = GoogleCredential(user_id=user_id, account_email=email,
+                                label=email.split("@")[0][:32])
     cred.refresh_token_enc = _fernet().encrypt(refresh.encode()).decode()
     cred.access_token = tokens.get("access_token", "")
     cred.access_expires_at = datetime.now(timezone.utc) + timedelta(
@@ -101,12 +120,18 @@ async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> None:
     cred.scopes = tokens.get("scope", SCOPES)
     db.add(cred)
     await db.commit()
+    return email
 
 
-async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
-    cred = await db.get(GoogleCredential, user_id)
-    if cred is None:
-        return None
+async def get_accounts(db: AsyncSession, user_id: int) -> list[GoogleCredential]:
+    from sqlalchemy import select
+    return list((await db.execute(
+        select(GoogleCredential).where(GoogleCredential.user_id == user_id)
+        .order_by(GoogleCredential.created_at))).scalars().all())
+
+
+async def access_for(db: AsyncSession, cred: GoogleCredential) -> str | None:
+    """Fresh access token for one account (refreshes if needed)."""
     now = datetime.now(timezone.utc)
     if cred.access_token and cred.access_expires_at and cred.access_expires_at > now:
         return cred.access_token
@@ -119,13 +144,20 @@ async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
             "grant_type": "refresh_token",
         })
     if resp.status_code != 200:
-        logger.error("Google token refresh failed: %s %s", resp.status_code, resp.text[:200])
+        logger.error("Google token refresh failed (%s): %s %s",
+                     cred.account_email, resp.status_code, resp.text[:200])
         return None
     tokens = resp.json()
     cred.access_token = tokens["access_token"]
     cred.access_expires_at = now + timedelta(seconds=int(tokens.get("expires_in", 3600)) - 60)
     await db.commit()
     return cred.access_token
+
+
+async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
+    """Back-compat: token of the FIRST connected account."""
+    accounts = await get_accounts(db, user_id)
+    return await access_for(db, accounts[0]) if accounts else None
 
 
 # ---------- read-only data ----------

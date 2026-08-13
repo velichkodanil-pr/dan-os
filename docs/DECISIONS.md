@@ -2,6 +2,16 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Multi-account Google (Danylo's request)
+
+- google_credentials keyed by (user, account_email) with uuid PK; account email
+  resolved via Gmail profile at token exchange; label = mail local part.
+- Aggregation policy: brief/digest merge all accounts (tagged when >1);
+  /reply drafts in the account that owns the found email (credential_id on the
+  pending draft); /drive operates on an explicitly selected account (app_state).
+- Deploy process change: Danylo pushes himself in GitHub Desktop; Claude's
+  pipeline ends at the prepared local commit (no computer-use pushes).
+
 ## 2026-08-13 — Round 3b
 
 - Google scopes extended to gmail.compose + drive.readonly (one re-consent via

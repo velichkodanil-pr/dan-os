@@ -30,25 +30,35 @@ async def morning_brief(db: AsyncSession, user_id: int, today_data: dict) -> str
     now = datetime.now(tz)
     lines = [f"☀️ <b>Бриф — {WEEKDAYS[now.weekday()]}, {now.strftime('%d.%m')}</b>"]
 
-    access = None
+    accounts = []
     if settings.google_client_id:
         try:
-            access = await google_client.get_access_token(db, user_id)
+            accounts = await google_client.get_accounts(db, user_id)
         except Exception:
-            logger.exception("google access failed for brief")
+            logger.exception("google accounts lookup failed for brief")
 
-    if access:
-        events = await google_client.calendar_today(access)
-        if events:
-            lines.append("\n📆 <b>Календар:</b>")
-            lines += [f" • {_fmt_event_time(e['start'], e['all_day'])} — {e['summary']}"
-                      for e in events[:8]]
-        else:
-            lines.append("\n📆 Календар: подій немає")
-        emails = await google_client.gmail_recent(access)
-        if emails:
+    if accounts:
+        multi = len(accounts) > 1
+        cal_lines: list[str] = []
+        mail_lines: list[str] = []
+        for cred in accounts:
+            try:
+                access = await google_client.access_for(db, cred)
+                if not access:
+                    continue
+                tag = f" ·{cred.label}" if multi else ""
+                for e in (await google_client.calendar_today(access))[:8]:
+                    cal_lines.append(
+                        f" • {_fmt_event_time(e['start'], e['all_day'])} — {e['summary']}{tag}")
+                for m in await google_client.gmail_recent(access, limit=3 if multi else 5):
+                    mail_lines.append(f" • {m['from']}: {m['subject']}{tag}")
+            except Exception:
+                logger.exception("brief: account %s failed", cred.account_email)
+        lines.append("\n📆 <b>Календар:</b>" if cal_lines else "\n📆 Календар: подій немає")
+        lines += cal_lines[:10]
+        if mail_lines:
             lines.append("\n📬 <b>Пошта за ніч:</b>")
-            lines += [f" • {m['from']}: {m['subject']}" for m in emails[:5]]
+            lines += mail_lines[:8]
     else:
         lines.append("\n📆 Google не підключено — /connect_google, і бриф буде "
                      "з календарем та поштою")

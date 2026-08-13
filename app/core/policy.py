@@ -37,6 +37,7 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "memory.reject": ("L2", True, True),
     "memory.supersede": ("L2", True, True),
     "google.connect": ("L2", True, True),  # OAuth consent IS the confirmation
+    "google.disconnect": ("L2", True, True),
     "reminder.schedule": ("L2", True, False),  # follows an approved task
     "reminder.cancel": ("L2", True, False),
     # L3/L4 — external writes/communication: NOT SUPPORTED in round 1

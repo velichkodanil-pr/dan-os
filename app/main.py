@@ -112,10 +112,11 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
     try:
         tokens = await google_client.exchange_code(code)
         async with database.session() as db:
-            await google_client.store_tokens(db, user_id, tokens)
+            email = await google_client.store_tokens(db, user_id, tokens)
+            total = len(await google_client.get_accounts(db, user_id))
             await audit(db, actor=f"user:{user_id}", action="google.connected",
                         resource_type="connector", resource_id="google",
-                        policy_level="L2", scopes=tokens.get("scope", ""))
+                        policy_level="L2", email=email, scopes=tokens.get("scope", ""))
             await db.commit()
     except Exception:
         logger.exception("OAuth exchange failed")
@@ -124,8 +125,10 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
     if bot:
         try:
             await bot.send_message(
-                user_id, "🔐 Google підключено ✅ Календар і пошта тепер у брифі — "
-                         "спробуй /brief")
+                user_id,
+                f"🔐 Google-акаунт <b>{email}</b> підключено ✅ (усього: {total})\n"
+                "Бриф і дайджест тепер збирають усі акаунти. Додати ще: "
+                "/connect_google · керування: /accounts")
         except Exception:
             logger.exception("notify failed")
     return HTMLResponse(_OAUTH_OK_HTML.format(

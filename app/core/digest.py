@@ -40,20 +40,33 @@ async def _rank_with_haiku(emails: list[dict]) -> str | None:
 
 
 async def build_digest(db, user_id: int) -> str | None:
-    """Returns HTML digest or None when there is nothing to send."""
+    """Returns HTML digest across all connected accounts, or None when quiet."""
     if not settings.google_client_id:
         return None
     try:
-        access = await google_client.get_access_token(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id)
     except Exception:
-        logger.exception("digest: google access failed")
+        logger.exception("digest: accounts lookup failed")
         return None
-    if not access:
+    if not accounts:
         return None
-    emails = await google_client.gmail_recent(access, hours=7, limit=8)
+    multi = len(accounts) > 1
+    emails: list[dict] = []
+    for cred in accounts:
+        try:
+            access = await google_client.access_for(db, cred)
+            if not access:
+                continue
+            for m in await google_client.gmail_recent(access, hours=7,
+                                                      limit=5 if multi else 8):
+                if multi:
+                    m = {**m, "from": f"{m['from']} ·{cred.label}"}
+                emails.append(m)
+        except Exception:
+            logger.exception("digest: account %s failed", cred.account_email)
     if not emails:
         return None
-    ranked = await _rank_with_haiku(emails)
+    ranked = await _rank_with_haiku(emails[:12])
     if not ranked:
-        ranked = "\n".join(f"• {m['from']} — {m['subject']}" for m in emails)
+        ranked = "\n".join(f"• {m['from']} — {m['subject']}" for m in emails[:12])
     return f"📬 <b>Поштовий дайджест</b>\n{ranked}"

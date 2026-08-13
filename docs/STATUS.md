@@ -13,7 +13,12 @@ _Last verified: 2026-08-13 (round 3b implementation session)_
   suggestions (coverage map v1); reported gaps marked resolved.
 - Scopes now calendar.readonly + gmail.readonly + gmail.compose + drive.readonly
   → requires ONE /connect_google re-consent.
-- Tests: **28 passed**. Migration `f75ba5fb32c6` (pending_drafts).
+- **Multi-account Google**: every /connect_google adds another account
+  (upsert by user+email); brief/digest aggregate all accounts (·label tags);
+  /reply searches every account and drafts in the one that owns the email;
+  /drive asks which account; /accounts lists/disconnects. Old single-account
+  credentials table recreated (re-consent was required anyway).
+- Tests: **30 passed**. Migrations `f75ba5fb32c6` + `a1b2c3d4e5f6`.
 
 Gate: Danylo re-consents, /drive indexes a folder, /reply creates a Gmail draft,
 Sunday report arrives.

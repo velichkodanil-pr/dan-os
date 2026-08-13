@@ -128,6 +128,7 @@ async def cmd_start(message: Message) -> None:
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
         "• /drive — індексувати папку Google Drive · /reply — чернетка відповіді на лист\n"
+        "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
         f"• бриф {settings.brief_time} · чек-ін {settings.checkin_time} · "
         f"дайджест {settings.digest_times} · тижневий звіт нд {settings.weekly_time}"
@@ -182,14 +183,39 @@ async def cmd_ping(message: Message) -> None:
     await message.answer("pong ✅")
 
 
-@router.message(Command("drive"))
-async def cmd_drive(message: Message) -> None:
-    if not _is_owner(message):
-        return
+async def _set_drive_account(user_id: int, cred_id: str) -> None:
+    from app.models import AppState
     async with database.session() as db:
-        access = await google_client.get_access_token(db, message.from_user.id)
+        state = await db.get(AppState, f"drive_acc_{user_id}") or AppState(
+            key=f"drive_acc_{user_id}")
+        state.value = cred_id
+        db.add(state)
+        await db.commit()
+
+
+async def _drive_account(db, user_id: int):
+    """Selected (or only) Google account for Drive operations."""
+    from app.models import AppState
+    accounts = await google_client.get_accounts(db, user_id)
+    if not accounts:
+        return None
+    state = await db.get(AppState, f"drive_acc_{user_id}")
+    if state:
+        for c in accounts:
+            if str(c.id) == state.value:
+                return c
+    return accounts[0]
+
+
+async def _show_drive_folders(message: Message, user_id: int) -> None:
+    async with database.session() as db:
+        cred = await _drive_account(db, user_id)
+        if cred is None:
+            await message.answer("Спершу підключи Google: /connect_google")
+            return
+        access = await google_client.access_for(db, cred)
     if not access:
-        await message.answer("Спершу підключи Google: /connect_google")
+        await message.answer("Не зміг оновити доступ — спробуй /connect_google")
         return
     try:
         folders = await google_client.drive_list_folders(access)
@@ -199,14 +225,52 @@ async def cmd_drive(message: Message) -> None:
             "(додались права читання Drive і створення чернеток).")
         return
     if not folders:
-        await message.answer("Папок у Drive не знайшов.")
+        await message.answer(f"Папок у Drive ({cred.account_email}) не знайшов.")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📁 {f['name'][:40]}", callback_data=f"dr:{f['id']}")]
         for f in folders[:15]])
     await message.answer(
-        "Обери папку Drive — проіндексую з неї pdf/docx/txt/md і Google Docs "
-        "(лише читання):", reply_markup=kb)
+        f"📧 Акаунт: <b>{cred.account_email}</b>\nОбери папку Drive — проіндексую "
+        "pdf/docx/txt/md і Google Docs (лише читання):", reply_markup=kb)
+
+
+@router.message(Command("drive"))
+async def cmd_drive(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    async with database.session() as db:
+        accounts = await google_client.get_accounts(db, message.from_user.id)
+    if not accounts:
+        await message.answer("Спершу підключи Google: /connect_google")
+        return
+    if len(accounts) == 1:
+        await _set_drive_account(message.from_user.id, str(accounts[0].id))
+        await _show_drive_folders(message, message.from_user.id)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📧 {c.account_email}", callback_data=f"da:{c.id}")]
+        for c in accounts])
+    await message.answer("З якого акаунта індексуємо Drive?", reply_markup=kb)
+
+
+@router.message(Command("accounts"))
+async def cmd_accounts(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    async with database.session() as db:
+        accounts = await google_client.get_accounts(db, message.from_user.id)
+    if not accounts:
+        await message.answer("Підключених Google-акаунтів немає. Додати: /connect_google")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"❌ Відключити {c.account_email}",
+                              callback_data=f"ga:{c.id}")]
+        for c in accounts])
+    listing = "\n".join(f" • {c.account_email}" for c in accounts)
+    await message.answer(
+        f"📧 <b>Google-акаунти ({len(accounts)}):</b>\n{listing}\n\n"
+        "➕ Додати ще один: /connect_google", reply_markup=kb)
 
 
 @router.message(Command("reply"))
@@ -434,7 +498,8 @@ async def _index_drive_folder(cb: CallbackQuery, user_id: int, folder_id: str) -
     await cb.answer("Індексую папку…")
     try:
         async with database.session() as db:
-            access = await google_client.get_access_token(db, user_id)
+            cred = await _drive_account(db, user_id)
+            access = await google_client.access_for(db, cred) if cred else None
         if not access:
             await cb.message.answer("Спершу /connect_google")
             return
@@ -486,6 +551,28 @@ async def on_callback(cb: CallbackQuery) -> None:
         ref = uuid.UUID(parts[1])
     except (IndexError, ValueError):
         await cb.answer("Невідома дія")
+        return
+
+    if action == "da":  # pick Drive account, then show folders
+        await _set_drive_account(user_id, str(ref))
+        await cb.answer()
+        await _show_drive_folders(cb.message, user_id)
+        return
+    if action == "ga":  # disconnect a Google account
+        from app.models import GoogleCredential
+        async with database.session() as db:
+            cred = await db.get(GoogleCredential, ref)
+            if cred and cred.user_id == user_id:
+                from app.core.audit import audit
+                await audit(db, actor=f"user:{user_id}", action="google.disconnected",
+                            resource_type="connector", resource_id=cred.id,
+                            policy_level="L2", email=cred.account_email)
+                await db.delete(cred)
+                await db.commit()
+                await cb.answer("Відключено")
+                await cb.message.edit_text(f"❌ {cred.account_email} відключено")
+            else:
+                await cb.answer("Не знайдено")
         return
 
     try:

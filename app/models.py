@@ -117,9 +117,13 @@ class UserState(Base):
 
 
 class GoogleCredential(Base):
-    """OAuth tokens for Google (refresh token encrypted with Fernet)."""
+    """OAuth tokens for one Google account (multi-account; Fernet-encrypted)."""
     __tablename__ = "google_credentials"
-    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    __table_args__ = (UniqueConstraint("user_id", "account_email", name="uq_gcred_user_email"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    account_email: Mapped[str] = mapped_column(String(255))
+    label: Mapped[str] = mapped_column(String(64), default="")  # short tag, e.g. mail local part
     refresh_token_enc: Mapped[str] = mapped_column(Text)
     access_token: Mapped[str] = mapped_column(Text, default="")
     access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -184,6 +188,7 @@ class PendingDraft(Base):
     thread_id: Mapped[str] = mapped_column(Text, default="")
     in_reply_to: Mapped[str] = mapped_column(Text, default="")
     references: Mapped[str] = mapped_column(Text, default="")
+    credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed|created|rejected
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

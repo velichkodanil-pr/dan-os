@@ -361,10 +361,18 @@ class Orchestrator:
         from app.core import google_client
         from app.core.extraction import haiku_text
         from app.models import PendingDraft
-        access = await google_client.get_access_token(db, user_id)
-        if not access:
+        accounts = await google_client.get_accounts(db, user_id)
+        if not accounts:
             return "no_google", None
-        email = await google_client.gmail_find_message(access, query)
+        email, found_cred = None, None
+        for cred in accounts:  # search every connected account, first hit wins
+            access = await google_client.access_for(db, cred)
+            if not access:
+                continue
+            email = await google_client.gmail_find_message(access, query)
+            if email:
+                found_cred = cred
+                break
         if not email:
             return "not_found", None
         profile = (await db.execute(
@@ -388,7 +396,8 @@ class Orchestrator:
         draft = PendingDraft(
             user_id=user_id, to_addr=email["from"], subject=subject, body=body,
             thread_id=email["thread_id"], in_reply_to=email["message_id"],
-            references=email["references"])
+            references=email["references"],
+            credential_id=found_cred.id if found_cred else None)
         db.add(draft)
         await db.flush()
         await audit(db, actor=f"user:{user_id}", action="draft.proposed",
@@ -412,7 +421,14 @@ class Orchestrator:
         if draft.status != "proposed":
             await db.commit()
             return draft.status
-        access = await google_client.get_access_token(db, user_id)
+        access = None
+        if draft.credential_id:
+            from app.models import GoogleCredential
+            cred = await db.get(GoogleCredential, draft.credential_id)
+            if cred is not None:
+                access = await google_client.access_for(db, cred)
+        if not access:
+            access = await google_client.get_access_token(db, user_id)
         if not access:
             await db.commit()
             return "no_google"
