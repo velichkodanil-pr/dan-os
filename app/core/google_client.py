@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
-SCOPES = ("https://www.googleapis.com/auth/calendar.readonly "
+SCOPES = ("openid email "
+          "https://www.googleapis.com/auth/calendar.readonly "
           "https://www.googleapis.com/auth/gmail.readonly "
           "https://www.googleapis.com/auth/gmail.compose "
           "https://www.googleapis.com/auth/drive.readonly")
@@ -89,13 +90,40 @@ async def exchange_code(code: str) -> dict:
     return resp.json()
 
 
-async def _account_email(access_token: str) -> str:
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-            headers={"Authorization": f"Bearer {access_token}"})
-    resp.raise_for_status()
-    return resp.json().get("emailAddress", "").lower()
+def _decode_id_token_email(id_token: str) -> str:
+    """Email from the id_token payload (token came straight from Google over TLS)."""
+    import base64
+    import json as jsonlib
+    try:
+        payload = id_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = jsonlib.loads(base64.urlsafe_b64decode(payload))
+        return (data.get("email") or "").lower()
+    except Exception:
+        return ""
+
+
+async def _account_email(tokens: dict) -> str:
+    """Resolve the account email robustly: id_token -> userinfo -> gmail profile."""
+    email = _decode_id_token_email(tokens.get("id_token", ""))
+    if email:
+        return email
+    access = tokens.get("access_token", "")
+    for url in ("https://www.googleapis.com/oauth2/v2/userinfo",
+                "https://gmail.googleapis.com/gmail/v1/users/me/profile"):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {access}"})
+            if resp.status_code == 200:
+                d = resp.json()
+                email = (d.get("email") or d.get("emailAddress") or "").lower()
+                if email:
+                    return email
+            else:
+                logger.warning("account email via %s -> %s", url, resp.status_code)
+        except Exception:
+            logger.exception("account email lookup failed via %s", url)
+    return ""
 
 
 async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
@@ -104,7 +132,7 @@ async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
     refresh = tokens.get("refresh_token")
     if not refresh:
         raise ValueError("Google did not return a refresh_token")
-    email = await _account_email(tokens.get("access_token", ""))
+    email = await _account_email(tokens)
     if not email:
         raise ValueError("Could not resolve account email")
     cred = (await db.execute(select(GoogleCredential).where(
