@@ -30,20 +30,33 @@ ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv", "
 
 def _xlsx_to_text(data: bytes) -> str:
     """Workbook -> text: every sheet titled, every ROW an atomic paragraph
-    (credential/contact tables must never split between name and login)."""
+    (credential/contact tables must never split between name and login).
+
+    Google-exported xlsx often carries WRONG dimension metadata; read_only
+    iter_rows silently stops at the declared bound and drops the sheet tail —
+    exactly where password sections live. reset_dimensions() forces a full
+    scan to the real end of each sheet."""
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts: list[str] = []
+    total = 0
     for ws in wb.worksheets:
+        try:
+            ws.reset_dimensions()  # trust actual cells, not declared bounds
+        except Exception:
+            pass
         rows: list[str] = []
         for row in ws.iter_rows(values_only=True):
             cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
             if cells:
                 rows.append(" | ".join(cells))
-            if len(rows) >= 5000:  # sanity cap per sheet
+                total += len(rows[-1])
+            if len(rows) >= 20000 or total > 2_400_000:  # sanity caps
                 break
         if rows:
             parts.append(f"== Аркуш: {ws.title} ==\n\n" + "\n\n".join(rows))
+        if total > 2_400_000:
+            break
     wb.close()
     return "\n\n".join(parts)
 
@@ -196,6 +209,30 @@ async def ingest_document(
                 resource_id=doc.id, policy_level="L1", title=title, chunks=len(chunks))
     await db.commit()
     return IngestResult(status="indexed", document=doc, chunks=len(chunks))
+
+
+async def delete_stale_versions(db: AsyncSession, *, user_id: int,
+                                source_ref: str, keep_doc_ids: set) -> int:
+    """Drop older ingested versions of the same Drive file (truncated extracts,
+    first-tab csv exports) so retrieval sees ONE current version. Chunks go via
+    FK cascade. Returns how many stale documents were removed."""
+    if not source_ref:
+        return 0
+    stale = (await db.execute(
+        select(Document).where(Document.user_id == user_id,
+                               Document.source_type == "drive",
+                               Document.source_ref == source_ref))).scalars().all()
+    removed = 0
+    for doc in stale:
+        if doc.id not in keep_doc_ids:
+            await db.delete(doc)
+            removed += 1
+    if removed:
+        await audit(db, actor=f"user:{user_id}", action="ingest.stale_removed",
+                    resource_type="document", resource_id=source_ref[:60],
+                    removed=removed)
+    await db.commit()
+    return removed
 
 
 PART_CHARS = 350_000

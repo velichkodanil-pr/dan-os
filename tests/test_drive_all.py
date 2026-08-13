@@ -145,3 +145,52 @@ def test_token_variants_translit():
     v = _token_variants("токо")
     assert "toko" in v and "toco" in v and "ТОКО" in v
     assert _token_variants("anex") == {"anex"}  # latin stays as-is (ILIKE folds)
+
+
+def test_xlsx_broken_dimensions_tail_survives():
+    """Google-exported xlsx lies about dimensions; reset_dimensions must force
+    reading to the REAL end of the sheet (password sections live at the tail)."""
+    import io as _io
+    import re as _re
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DMC"
+    for i in range(60):
+        ws.append([f"Оператор {i}", f"login{i}"])
+    ws.append(["Other", "Toco UA", "https://toco-tour.example", "i.k@t.to", "Secret1"])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    raw = buf.getvalue()
+    # simulate Google's broken metadata: claim the sheet is only 5 rows tall
+    import zipfile as _zf
+    src = _zf.ZipFile(_io.BytesIO(raw))
+    out_buf = _io.BytesIO()
+    with _zf.ZipFile(out_buf, "w", _zf.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            content = src.read(item.filename)
+            if item.filename.startswith("xl/worksheets/sheet"):
+                content = _re.sub(rb'<dimension ref="[^"]*"/>',
+                                  b'<dimension ref="A1:B5"/>', content)
+            dst.writestr(item, content)
+    text = extract_text("dmc.xlsx", out_buf.getvalue())
+    assert "toco-tour.example" in text, "tail beyond declared dimension must survive"
+
+
+@pytest.mark.asyncio
+async def test_delete_stale_versions(db):
+    from app.core.ingest import delete_stale_versions, ingest_document
+    old = await ingest_document(db, user_id=111, title="Файл.xlsx",
+                                text="Стара обрізана версія файла з даними " * 5,
+                                source_type="drive", source_ref="FID1")
+    new = await ingest_document(db, user_id=111, title="Файл.xlsx (ч.1)",
+                                text="Нова повна версія файла з хвостом і паролями " * 5,
+                                source_type="drive", source_ref="FID1")
+    removed = await delete_stale_versions(db, user_id=111, source_ref="FID1",
+                                          keep_doc_ids={new.document.id})
+    assert removed == 1
+    from sqlalchemy import select
+    from app.models import Document
+    left = (await db.execute(select(Document).where(
+        Document.source_ref == "FID1"))).scalars().all()
+    assert [d.id for d in left] == [new.document.id]

@@ -524,12 +524,19 @@ async def _index_all_drive(user_id: int) -> None:
                     name, data = await google_client.drive_download_text_source(
                         access, f)
                     text = extract_text(name, data)
-                    from app.core.ingest import ingest_document_parts
+                    from app.core.ingest import (delete_stale_versions,
+                                                 ingest_document_parts)
                     async with database.session() as db:
                         results = await ingest_document_parts(
                             db, user_id=user_id, title=name, text=text,
                             source_type="drive", source_ref=f["id"],
                             meta={"modifiedTime": f.get("modifiedTime", "")})
+                        keep = {r.document.id for r in results
+                                if r.document is not None}
+                        if keep:  # drop truncated/first-tab leftovers
+                            await delete_stale_versions(
+                                db, user_id=user_id, source_ref=f["id"],
+                                keep_doc_ids=keep)
                     statuses = [r.status for r in results]
                     if "indexed" in statuses:
                         added += 1
