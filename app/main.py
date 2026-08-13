@@ -135,12 +135,23 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
         return HTMLResponse(status_code=500, content=_OAUTH_OK_HTML.format(
             title="Помилка", sub="Не вдалося обміняти код. Спробуй ще раз."))
     if bot:
+        granted = tokens.get("scope", "")
+        missing = [label for key, label in
+                   (("calendar.readonly", "Календар"),
+                    ("gmail.readonly", "Gmail (читання)"),
+                    ("gmail.compose", "Gmail (чернетки)"),
+                    ("drive.readonly", "Drive"))
+                   if key not in granted]
+        msg = (f"🔐 Google-акаунт <b>{email}</b> підключено ✅ (усього: {total})\n"
+               "Бриф і дайджест тепер збирають усі акаунти. Додати ще: "
+               "/connect_google · керування: /accounts")
+        if missing:
+            msg += (f"\n\n⚠️ <b>Без дозволів:</b> {', '.join(missing)}.\n"
+                    "Ці функції для акаунта працювати НЕ будуть. Запусти "
+                    "/connect_google ще раз для цього ж акаунта й постав "
+                    "УСІ галочки на екрані дозволів.")
         try:
-            await bot.send_message(
-                user_id,
-                f"🔐 Google-акаунт <b>{email}</b> підключено ✅ (усього: {total})\n"
-                "Бриф і дайджест тепер збирають усі акаунти. Додати ще: "
-                "/connect_google · керування: /accounts")
+            await bot.send_message(user_id, msg)
         except Exception:
             logger.exception("notify failed")
     return HTMLResponse(_OAUTH_OK_HTML.format(

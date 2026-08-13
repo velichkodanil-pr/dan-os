@@ -26,6 +26,22 @@ _Last verified: 2026-08-13 (round 4 implementation session)_
 Gate: Danylo opens /app from the phone (Today+Memory work), /travelon shows a
 card once TRAVELON_TOKEN is set, habits appear in the evening check-in.
 
+### Hotfix (same day): calendar honesty + chat engine API
+
+- Prod logs showed calendar 403 on BOTH accounts (tokens granted without the
+  calendar checkbox) while the bot confidently answered «порожньо». Now:
+  CalendarAccessError is raised on 401/403 and surfaced — agenda block tells
+  the chat to admit the calendar is unreachable; morning brief prints ⚠️ with
+  the broken account; /accounts shows per-account scope status (📆✉️📝📁 ✅/❌);
+  OAuth callback warns immediately when boxes were left unticked.
+- calendar_range now reads ALL visible calendars (calendarList → merge,
+  dedupe, sort), not just primary — meetings in secondary calendars appear.
+- Short follow-ups («а сьогодні?», ≤40 chars) inherit the calendar trigger
+  from the last two user turns.
+- Chat engine: Sonnet 5 rejected `thinking.enabled` (400 on every message,
+  silent fallback to Haiku one-liners). Switched to `thinking: adaptive` +
+  `output_config.effort` (CHAT_EFFORT=high), verified live. Tests: **51**.
+
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 
 - /drive: list Drive folders → index pdf/docx/txt/md + Google Docs (read-only,

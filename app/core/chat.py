@@ -1,6 +1,6 @@
 """Full chat engine: assistant-grade replies for conversational turns.
 
-Sonnet 5 with extended thinking and the server-side web_search tool — the bot
+Sonnet 5 with adaptive thinking and the server-side web_search tool — the bot
 reasons on every conversational message and can pull fresh facts from the web.
 Falls back to the extractor's short reply on any failure (orchestrator side).
 Task/memory extraction stays on the cheap Haiku call; this engine only talks.
@@ -69,10 +69,11 @@ async def chat_reply(text: str, *, profile: list[str], history: list[tuple[str, 
         "messages": messages,
         "tools": [{"type": "web_search_20250305", "name": "web_search",
                    "max_uses": settings.web_search_max_uses}],
+        # Sonnet 5 thinking API: adaptive + effort (budget_tokens is rejected)
+        "thinking": {"type": "adaptive"},
     }
-    if settings.chat_thinking_budget >= 1024:
-        payload["thinking"] = {"type": "enabled",
-                               "budget_tokens": settings.chat_thinking_budget}
+    if settings.chat_effort:
+        payload["output_config"] = {"effort": settings.chat_effort}
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(

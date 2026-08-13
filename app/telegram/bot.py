@@ -386,6 +386,22 @@ async def cmd_drive(message: Message) -> None:
     await message.answer("З якого акаунта індексуємо Drive?", reply_markup=kb)
 
 
+_SCOPE_LABELS = (("calendar.readonly", "📆 календар"),
+                 ("gmail.readonly", "✉️ пошта"),
+                 ("gmail.compose", "📝 чернетки"),
+                 ("drive.readonly", "📁 Drive"))
+
+
+def _scope_status(scopes: str) -> tuple[str, bool]:
+    """Human line of granted scopes + whether something is missing."""
+    parts, missing = [], False
+    for key, label in _SCOPE_LABELS:
+        ok = key in (scopes or "")
+        missing = missing or not ok
+        parts.append(f"{label} {'✅' if ok else '❌'}")
+    return "   " + " · ".join(parts), missing
+
+
 @router.message(Command("accounts"))
 async def cmd_accounts(message: Message) -> None:
     if not _is_owner(message):
@@ -399,9 +415,18 @@ async def cmd_accounts(message: Message) -> None:
         [InlineKeyboardButton(text=f"❌ Відключити {c.account_email}",
                               callback_data=f"ga:{c.id}")]
         for c in accounts])
-    listing = "\n".join(f" • {c.account_email}" for c in accounts)
+    any_missing = False
+    rows = []
+    for c in accounts:
+        status_line, missing = _scope_status(c.scopes)
+        any_missing = any_missing or missing
+        rows.append(f" • <b>{c.account_email}</b>\n{status_line}")
+    listing = "\n".join(rows)
+    hint = ("\n\n⚠️ Де ❌ — дозволу немає, ця функція для акаунта не працює. "
+            "Виправити: /connect_google, обери ЦЕЙ акаунт і постав УСІ галочки."
+            if any_missing else "")
     await message.answer(
-        f"📧 <b>Google-акаунти ({len(accounts)}):</b>\n{listing}\n\n"
+        f"📧 <b>Google-акаунти ({len(accounts)}):</b>\n{listing}{hint}\n\n"
         "➕ Додати ще один: /connect_google", reply_markup=kb)
 
 

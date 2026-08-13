@@ -190,26 +190,69 @@ async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
 
 # ---------- read-only data ----------
 
-async def calendar_range(access_token: str, start: datetime, end: datetime) -> list[dict]:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            headers={"Authorization": f"Bearer {access_token}"},
-            params={"timeMin": start.isoformat(), "timeMax": end.isoformat(),
-                    "singleEvents": "true", "orderBy": "startTime", "maxResults": 25},
-        )
+class CalendarAccessError(Exception):
+    """Calendar API refused (401/403): missing scope or revoked grant.
+    Callers must surface this — an access problem is NOT an empty calendar."""
+
+
+async def _calendar_list(client: httpx.AsyncClient, headers: dict) -> list[dict]:
+    """Visible calendars of the account (primary + selected). Raises on 401/403."""
+    resp = await client.get(
+        "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        headers=headers,
+        params={"maxResults": 20, "fields": "items(id,summary,primary,selected)"})
+    if resp.status_code in (401, 403):
+        logger.error("calendarList denied: %s %s", resp.status_code, resp.text[:150])
+        raise CalendarAccessError(str(resp.status_code))
     if resp.status_code != 200:
-        logger.error("calendar_range failed: %s", resp.status_code)
-        return []
-    events = []
-    for item in resp.json().get("items", []):
-        start_raw = item.get("start", {})
-        events.append({
-            "summary": item.get("summary", "(без назви)"),
-            "start": start_raw.get("dateTime") or start_raw.get("date", ""),
-            "all_day": "date" in start_raw,
-        })
-    return events
+        logger.error("calendarList failed: %s %s", resp.status_code, resp.text[:150])
+        return [{"id": "primary", "primary": True}]
+    items = resp.json().get("items", [])
+    cals = [c for c in items if c.get("primary") or c.get("selected")]
+    return cals or [{"id": "primary", "primary": True}]
+
+
+async def calendar_range(access_token: str, start: datetime, end: datetime) -> list[dict]:
+    """Events across ALL visible calendars of the account (not just primary).
+
+    Raises CalendarAccessError when the token has no calendar scope, so the
+    caller can tell the user the truth instead of claiming "no events".
+    """
+    from urllib.parse import quote
+    headers = {"Authorization": f"Bearer {access_token}"}
+    events: list[dict] = []
+    seen: set[tuple] = set()
+    async with httpx.AsyncClient(timeout=30) as client:
+        for cal in (await _calendar_list(client, headers))[:10]:
+            resp = await client.get(
+                "https://www.googleapis.com/calendar/v3/calendars/"
+                f"{quote(cal.get('id', 'primary'), safe='')}/events",
+                headers=headers,
+                params={"timeMin": start.isoformat(), "timeMax": end.isoformat(),
+                        "singleEvents": "true", "orderBy": "startTime",
+                        "maxResults": 25},
+            )
+            if resp.status_code in (401, 403) and cal.get("primary"):
+                logger.error("calendar events denied: %s %s",
+                             resp.status_code, resp.text[:150])
+                raise CalendarAccessError(str(resp.status_code))
+            if resp.status_code != 200:
+                logger.warning("calendar %s failed: %s", cal.get("summary", "?"),
+                               resp.status_code)
+                continue
+            for item in resp.json().get("items", []):
+                start_raw = item.get("start", {})
+                ev = {
+                    "summary": item.get("summary", "(без назви)"),
+                    "start": start_raw.get("dateTime") or start_raw.get("date", ""),
+                    "all_day": "date" in start_raw,
+                }
+                key = (ev["summary"], ev["start"])
+                if key not in seen:  # same event can live in several calendars
+                    seen.add(key)
+                    events.append(ev)
+    events.sort(key=lambda e: e["start"])
+    return events[:25]
 
 
 async def calendar_today(access_token: str) -> list[dict]:

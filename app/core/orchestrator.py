@@ -102,16 +102,7 @@ class Orchestrator:
         except Exception:
             logger.exception("rag retrieve failed")
 
-        # 3a) calendar context for schedule-ish questions (deterministic trigger)
-        calendar_block = None
-        if _CALENDAR_RE.search(text):
-            from app.core.briefs import agenda_block
-            try:
-                calendar_block = await agenda_block(db, user_id)
-            except Exception:
-                logger.exception("agenda block failed")
-
-        # 3b) context: confirmed profile facts + short dialog window
+        # 3a) context: confirmed profile facts + short dialog window
         profile = (await db.execute(
             select(MemoryItem.content).where(
                 MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
@@ -120,9 +111,23 @@ class Orchestrator:
             select(ChatLog).where(ChatLog.user_id == user_id)
             .order_by(ChatLog.id.desc())
             .limit(max(8, settings.chat_history_window)))).scalars().all()
+        history = [(r.role, r.text) for r in reversed(history_rows)]
+
+        # 3b) calendar context for schedule-ish questions (deterministic trigger);
+        # short follow-ups ("а сьогодні?") inherit the trigger from recent turns
+        calendar_block = None
+        recent_user = [m for role, m in history if role == "user"][-2:]
+        if _CALENDAR_RE.search(text) or (
+                len(text) <= 40 and any(_CALENDAR_RE.search(m) for m in recent_user)):
+            from app.core.briefs import agenda_block
+            try:
+                calendar_block = await agenda_block(db, user_id)
+            except Exception:
+                logger.exception("agenda block failed")
+
         context = {
             "profile": list(profile),
-            "history": [(r.role, r.text) for r in reversed(history_rows)],
+            "history": history,
             "knowledge": (rag.knowledge_block(chunks) or "") + (calendar_block or ""),
         }
 

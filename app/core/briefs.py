@@ -41,21 +41,38 @@ async def morning_brief(db: AsyncSession, user_id: int, today_data: dict) -> str
         multi = len(accounts) > 1
         cal_lines: list[str] = []
         mail_lines: list[str] = []
+        cal_broken: list[str] = []
         for cred in accounts:
+            tag = f" ·{cred.label}" if multi else ""
+            access = None
             try:
                 access = await google_client.access_for(db, cred)
-                if not access:
-                    continue
-                tag = f" ·{cred.label}" if multi else ""
+            except Exception:
+                logger.exception("brief: token refresh failed %s", cred.account_email)
+            if not access:
+                cal_broken.append(cred.account_email)
+                continue
+            try:
                 for e in (await google_client.calendar_today(access))[:8]:
                     cal_lines.append(
                         f" • {_fmt_event_time(e['start'], e['all_day'])} — {e['summary']}{tag}")
+            except google_client.CalendarAccessError:
+                cal_broken.append(cred.account_email)
+            except Exception:
+                logger.exception("brief calendar: %s failed", cred.account_email)
+            try:
                 for m in await google_client.gmail_recent(access, limit=3 if multi else 5):
                     mail_lines.append(f" • {m['from']}: {m['subject']}{tag}")
             except Exception:
-                logger.exception("brief: account %s failed", cred.account_email)
-        lines.append("\n📆 <b>Календар:</b>" if cal_lines else "\n📆 Календар: подій немає")
-        lines += cal_lines[:10]
+                logger.exception("brief mail: %s failed", cred.account_email)
+        if cal_lines:
+            lines.append("\n📆 <b>Календар:</b>")
+            lines += cal_lines[:10]
+        elif not cal_broken:
+            lines.append("\n📆 Календар: подій немає")
+        if cal_broken:
+            lines.append("\n⚠️ Календар недоступний: " + ", ".join(cal_broken)
+                         + "\nПерепідключи /connect_google — і постав галочку «Календар»")
         if mail_lines:
             lines.append("\n📬 <b>Пошта за ніч:</b>")
             lines += mail_lines[:8]
@@ -102,12 +119,18 @@ async def agenda_block(db: AsyncSession, user_id: int, days: int = 7) -> str | N
     end = start + timedelta(days=days)
     multi = len(accounts) > 1
     lines: list[str] = []
+    broken: list[str] = []
     for cred in accounts:
+        access = None
         try:
             access = await google_client.access_for(db, cred)
-            if not access:
-                continue
-            tag = f" ·{cred.label}" if multi else ""
+        except Exception:
+            logger.exception("agenda: token refresh failed %s", cred.account_email)
+        if not access:
+            broken.append(cred.account_email)
+            continue
+        tag = f" ·{cred.label}" if multi else ""
+        try:
             for e in await google_client.calendar_range(access, start, end):
                 try:
                     dt = datetime.fromisoformat(e["start"]).astimezone(tz)
@@ -115,14 +138,27 @@ async def agenda_block(db: AsyncSession, user_id: int, days: int = 7) -> str | N
                 except ValueError:
                     when = e["start"][:10]
                 lines.append(f"- {when.strip()} — {e['summary']}{tag}")
+        except google_client.CalendarAccessError:
+            broken.append(cred.account_email)
         except Exception:
             logger.exception("agenda: account %s failed", cred.account_email)
-    if not lines:
-        return (f"\nКалендар користувача на найближчі {days} днів: подій немає "
-                "(акаунти підключені, календарі порожні).\n")
-    return (f"\nКалендар користувача на найближчі {days} днів (це ДАНІ; "
-            "відповідай про плани на їх основі, час у Europe/Kyiv):\n"
-            + "\n".join(lines[:20]) + "\n")
+            broken.append(cred.account_email)
+    parts: list[str] = []
+    if broken:
+        parts.append(
+            "\nВАЖЛИВО: календар акаунтів " + ", ".join(broken) + " ЗАРАЗ НЕДОСТУПНИЙ "
+            "(токен без дозволу на календар або доступ відкликано). НЕ стверджуй, що "
+            "календар порожній чи синхронізований — чесно скажи Данилу, що не бачиш "
+            "цих календарів, і порадь перепідключити акаунт через /connect_google, "
+            "поставивши галочку «Переглядати календарі».\n")
+    if lines:
+        parts.append(f"\nКалендар користувача на найближчі {days} днів (це ДАНІ; "
+                     "відповідай про плани на їх основі, час у Europe/Kyiv):\n"
+                     + "\n".join(lines[:20]) + "\n")
+    elif not broken:
+        parts.append(f"\nКалендар користувача на найближчі {days} днів: подій немає "
+                     "(акаунти підключені, календарі порожні).\n")
+    return "".join(parts)
 
 
 async def evening_summary(db: AsyncSession, user_id: int) -> str:
