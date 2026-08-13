@@ -159,6 +159,41 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
         title="Google підключено ✅", sub="Повертайся в Telegram — DAN.OS уже все бачить."))
 
 
+from pydantic import BaseModel  # noqa: E402
+
+
+class AdminIngestRequest(BaseModel):
+    title: str
+    text: str
+    domain: str = "personal"
+    source_ref: str = ""
+
+
+@app.post("/admin/ingest")
+async def admin_ingest(req: AdminIngestRequest, request: Request):
+    """Cowork knowledge channel: Danylo drops materials in the dev chat,
+    Claude pushes them here -> the bot's knowledge base (same ingest pipeline,
+    same dedupe/provenance). Off unless ADMIN_TOKEN is set; constant-time check."""
+    import hmac as _hmac
+    token = request.headers.get("X-Admin-Token", "")
+    if (not settings.admin_token or not settings.owner_telegram_id
+            or not _hmac.compare_digest(token, settings.admin_token)):
+        return Response(status_code=403)
+    text = req.text.strip()
+    if len(text) < 20:
+        return Response(status_code=400, content="text too short")
+    domain = req.domain if req.domain in ("personal", "travelon", "tech") else "personal"
+    from app.core.ingest import ingest_document
+    async with database.session() as db:
+        result = await ingest_document(
+            db, user_id=settings.owner_telegram_id,
+            title=req.title.strip()[:200] or "Матеріал",
+            text=text, source_type="cowork_upload",
+            source_ref=req.source_ref.strip()[:200], domain=domain)
+    return {"status": result.status, "chunks": result.chunks,
+            "document_id": str(result.document.id) if result.document else None}
+
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request) -> Response:
     if bot is None:

@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # TravelON owner pack: daily debt alert (empty string disables)
     debt_alert_time: str = "10:00"
 
+    # Cowork knowledge channel: enables POST /admin/ingest when set
+    admin_token: str = ""
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""
