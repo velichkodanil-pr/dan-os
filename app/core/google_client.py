@@ -407,7 +407,8 @@ async def calendar_respond(access_token: str, calendar_id: str, event_id: str,
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 GOOGLE_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
-DRIVE_FILE_EXT = (".pdf", ".docx", ".txt", ".md", ".csv", ".tsv")
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+DRIVE_FILE_EXT = (".pdf", ".docx", ".txt", ".md", ".csv", ".tsv", ".xlsx")
 
 
 def drive_indexable(f: dict) -> bool:
@@ -505,8 +506,11 @@ async def drive_list_files(access_token: str, folder_id: str) -> list[dict]:
 
 
 async def drive_download_text_source(access_token: str, file: dict) -> tuple[str, bytes]:
-    """Returns (effective_filename, raw_bytes); Google Docs exported as txt,
-    Google Sheets exported as csv (all sheets' first tab per Drive API)."""
+    """Returns (effective_filename, raw_bytes). Google Docs exported as txt;
+    Google Sheets exported as XLSX — that carries ALL tabs with the existing
+    drive.readonly scope (no Sheets API / extra consent needed). If the
+    workbook is too big for export (~10MB cap), falls back to csv (first tab
+    only — better than nothing)."""
     headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=120) as client:
         mime = file.get("mimeType")
@@ -517,6 +521,13 @@ async def drive_download_text_source(access_token: str, file: dict) -> tuple[str
             resp.raise_for_status()
             return file["name"] + ".txt", resp.content
         if mime == GOOGLE_SHEET_MIME:
+            resp = await client.get(
+                f"https://www.googleapis.com/drive/v3/files/{file['id']}/export",
+                headers=headers, params={"mimeType": XLSX_MIME})
+            if resp.status_code == 200:
+                return file["name"] + ".xlsx", resp.content
+            logger.warning("sheet xlsx export failed (%s) for %s — csv fallback",
+                           resp.status_code, file.get("name", "?"))
             resp = await client.get(
                 f"https://www.googleapis.com/drive/v3/files/{file['id']}/export",
                 headers=headers, params={"mimeType": "text/csv"})

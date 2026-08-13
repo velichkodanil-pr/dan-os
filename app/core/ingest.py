@@ -25,7 +25,27 @@ MAX_CHARS = 400_000
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
 
-ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv"}
+ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv", ".xlsx"}
+
+
+def _xlsx_to_text(data: bytes) -> str:
+    """Workbook -> text: every sheet titled, every ROW an atomic paragraph
+    (credential/contact tables must never split between name and login)."""
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    parts: list[str] = []
+    for ws in wb.worksheets:
+        rows: list[str] = []
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+            if cells:
+                rows.append(" | ".join(cells))
+            if len(rows) >= 5000:  # sanity cap per sheet
+                break
+        if rows:
+            parts.append(f"== Аркуш: {ws.title} ==\n\n" + "\n\n".join(rows))
+    wb.close()
+    return "\n\n".join(parts)
 
 
 class IngestError(Exception):
@@ -86,6 +106,11 @@ def extract_text(filename: str, data: bytes) -> str:
             text = re.sub(r"<[^>]+>", "", xml)
         except Exception as e:
             raise IngestError("Не зміг прочитати DOCX") from e
+    elif name.endswith(".xlsx"):
+        try:
+            text = _xlsx_to_text(data)
+        except Exception as e:
+            raise IngestError("Не зміг прочитати XLSX") from e
     elif name.endswith((".csv", ".tsv")):
         raw = data.decode("utf-8", "ignore")
         # each row becomes a paragraph -> chunker never cuts a row in half

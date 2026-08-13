@@ -540,7 +540,7 @@ async def cmd_drive_all(message: Message) -> None:
         return
     await message.answer(
         f"🗂 Стартую повну індексацію Drive для {len(accounts)} акаунт(ів): "
-        "Google Docs, Google Sheets (перший лист), pdf/docx/txt/md/csv, "
+        "Google Docs, Google Sheets (УСІ вкладки), pdf/docx/xlsx/txt/md/csv, "
         f"до {settings.drive_index_max} файлів на акаунт (найновіші перші). "
         "Це кілька хвилин — відпишу прогрес. Повторний запуск безпечний: "
         "дублікати пропускаються.")
@@ -634,7 +634,7 @@ async def cmd_kb(message: Message) -> None:
 
 # ---------- knowledge intake: files & forwards ----------
 
-ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md", ".vtt", ".srt")
+ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".xlsx")
 
 
 async def _handle_transcript_file(message: Message, name: str, text: str) -> None:
@@ -681,8 +681,8 @@ async def on_document(message: Message) -> None:
     doc = message.document
     name = (doc.file_name or "file").strip()
     if not name.lower().endswith(ALLOWED_DOC_EXT):
-        await message.answer("Підтримую pdf, docx, txt, md і транскрипти vtt/srt — "
-                             "цей формат поки ні.")
+        await message.answer("Підтримую pdf, docx, xlsx, csv, txt, md і "
+                             "транскрипти vtt/srt — цей формат поки ні.")
         return
     if doc.file_size and doc.file_size > 15 * 1024 * 1024:
         await message.answer("Файл завеликий (ліміт 15 МБ)")
