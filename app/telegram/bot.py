@@ -424,6 +424,10 @@ async def on_forward(message: Message) -> None:
 # ---------- notes: text & voice ----------
 
 async def _process_note(message: Message, text: str, prefix: str = "") -> None:
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     dedupe = f"tg:{message.chat.id}:{message.message_id}"
     async with database.session() as db:
         outcome = await orch.handle_note(
@@ -435,10 +439,14 @@ async def _process_note(message: Message, text: str, prefix: str = "") -> None:
                              reply_markup=_proposal_kb(outcome.proposal.id,
                                                        outcome.proposal.version))
         return
+    import html as _html
     if outcome.kind == "note":
-        await message.answer(f"{prefix}🧠 Запам'ятав (кандидат): {outcome.reply}")
+        await message.answer(
+            f"{prefix}🧠 Запам'ятав (кандидат): {_html.escape(outcome.reply or '')}")
         return
-    await message.answer(prefix + (outcome.reply or "Записав ✅"))
+    safe = _html.escape(outcome.reply or "Записав ✅")
+    for i in range(0, len(safe), 3900):  # Telegram message limit
+        await message.answer((prefix if i == 0 else "") + safe[i:i + 3900])
 
 
 @router.message(F.voice)
@@ -461,7 +469,9 @@ async def on_voice(message: Message) -> None:
         logger.exception("voice processing failed")
         await message.answer("🎙 Не вдалося обробити голосове, спробуй ще раз.")
         return
-    await _process_note(message, text, prefix=f"🎙 <i>Розчув:</i> {text}\n\n")
+    import html as _html
+    await _process_note(message, text,
+                        prefix=f"🎙 <i>Розчув:</i> {_html.escape(text)}\n\n")
 
 
 @router.message(F.text & ~F.text.startswith("/"))

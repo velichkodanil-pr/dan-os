@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     digest_times: str = "13:00,18:30"
     weekly_time: str = "19:00"  # Sunday coverage report
 
+    # Full chat engine (real assistant-grade replies)
+    chat_model: str = "claude-sonnet-5"  # set "mock" or empty to disable
+    chat_thinking_budget: int = 1500
+    chat_history_window: int = 24
+    web_search_max_uses: int = 3
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

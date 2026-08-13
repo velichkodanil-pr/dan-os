@@ -118,7 +118,8 @@ class Orchestrator:
             .order_by(MemoryItem.created_at.desc()).limit(12))).scalars().all()
         history_rows = (await db.execute(
             select(ChatLog).where(ChatLog.user_id == user_id)
-            .order_by(ChatLog.id.desc()).limit(8))).scalars().all()
+            .order_by(ChatLog.id.desc())
+            .limit(max(8, settings.chat_history_window)))).scalars().all()
         context = {
             "profile": list(profile),
             "history": [(r.role, r.text) for r in reversed(history_rows)],
@@ -174,9 +175,15 @@ class Orchestrator:
             await db.commit()
             return NoteOutcome(kind="note", memory_saved=True, reply=ext.memory_text)
 
-        reply = ext.reply or "Записав."
-        db.add(ChatLog(user_id=user_id, role="user", text=text[:1000]))
-        db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1000]))
+        # conversational turn -> full chat engine (Sonnet + thinking + web search);
+        # extractor's short reply is only the fallback
+        from app.core.chat import chat_reply
+        reply = await chat_reply(
+            text, profile=context["profile"], history=context["history"],
+            knowledge=context["knowledge"])
+        reply = reply or ext.reply or "Записав."
+        db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
+        db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))
         if not chunks and rag.looks_like_question(text):
             await rag.log_gap(db, user_id=user_id, question=text)  # coverage map (R3b)
         await db.commit()

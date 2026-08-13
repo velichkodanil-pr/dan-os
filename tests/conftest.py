@@ -13,6 +13,7 @@ os.environ.update({
     "OWNER_TELEGRAM_ID": "111",
     "TELEGRAM_BOT_TOKEN": "",
     "TZ_NAME": "Europe/Kyiv",
+    "CHAT_MODEL": "mock",
 })
 
 import pytest  # noqa: E402
