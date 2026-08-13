@@ -28,6 +28,34 @@ CHUNK_OVERLAP = 120
 ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv", ".xlsx"}
 
 
+def xlsx_to_sheets(data: bytes) -> list[tuple[str, str]]:
+    """Workbook -> [(sheet_title, text)]. Each SHEET becomes its own document
+    downstream, so a mega-workbook can never crowd its later tabs out of the
+    index (the DMC-passwords lesson). Rows stay atomic paragraphs."""
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    sheets: list[tuple[str, str]] = []
+    for ws in wb.worksheets:
+        try:
+            ws.reset_dimensions()  # Google exports lie about dimensions
+        except Exception:
+            pass
+        rows: list[str] = []
+        total = 0
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+            if cells:
+                line = " | ".join(cells)
+                rows.append(line)
+                total += len(line)
+            if len(rows) >= 20000 or total > 1_500_000:
+                break
+        if rows:
+            sheets.append((ws.title, "\n\n".join(rows)))
+    wb.close()
+    return sheets
+
+
 def _xlsx_to_text(data: bytes) -> str:
     """Workbook -> text: every sheet titled, every ROW an atomic paragraph
     (credential/contact tables must never split between name and login).
@@ -233,6 +261,32 @@ async def delete_stale_versions(db: AsyncSession, *, user_id: int,
                     removed=removed)
     await db.commit()
     return removed
+
+
+async def ingest_xlsx_by_sheets(
+    db: AsyncSession, *, user_id: int, filename: str, data: bytes,
+    source_type: str, source_ref: str = "", domain: str = "personal",
+    meta: dict | None = None,
+) -> list[IngestResult]:
+    """Every sheet -> its own document «файл · аркуш "Назва"» (parts if huge)."""
+    try:
+        sheets = xlsx_to_sheets(data)
+    except Exception as e:
+        raise IngestError("Не зміг прочитати XLSX") from e
+    if not sheets:
+        raise IngestError("У таблиці не знайшлося тексту")
+    base = filename.rsplit(".", 1)[0][:120]
+    results: list[IngestResult] = []
+    for sheet_title, text in sheets:
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        if len(text) < 20:
+            continue
+        title = f"{base} · аркуш «{sheet_title[:40]}»"
+        results.extend(await ingest_document_parts(
+            db, user_id=user_id, title=title, text=text,
+            source_type=source_type, source_ref=source_ref,
+            domain=domain, meta=meta))
+    return results
 
 
 PART_CHARS = 350_000

@@ -215,12 +215,12 @@ class Orchestrator:
             await db.commit()
             return NoteOutcome(kind="note", memory_saved=True, reply=ext.memory_text)
 
-        # conversational turn -> full chat engine (Sonnet + thinking + web search);
+        # conversational turn -> agentic chat engine (tools + thinking + web);
         # extractor's short reply is only the fallback
         from app.core.chat import chat_reply
         reply = await chat_reply(
-            text, profile=context["profile"], history=context["history"],
-            knowledge=context["knowledge"])
+            text, db=db, user_id=user_id, profile=context["profile"],
+            history=context["history"], knowledge=context["knowledge"])
         reply = reply or ext.reply or "Записав."
         db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
         db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))

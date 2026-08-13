@@ -1,0 +1,176 @@
+"""Tools the chat engine can call on its own (agentic bot, R5).
+
+The model DECIDES what it needs and reaches for it — no more hardcoded
+regex triggers deciding for it. READ-ONLY tools only: every executor passes
+the deterministic policy (L0) before touching data; anything that WRITES
+stays behind the existing preview-card flows. Tool output is DATA.
+"""
+import json
+import logging
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.policy import evaluate
+
+logger = logging.getLogger(__name__)
+
+TOOL_DEFS = [
+    {"name": "search_knowledge",
+     "description": "Пошук у базі знань Данила (документи, таблиці, транскрипти, "
+                    "пересилки; гібридний — семантика + точні збіги). Використовуй "
+                    "для питань про його файли, логіни/доступи, договори, нотатки.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "запит у вільній формі"}},
+         "required": ["query"]}},
+    {"name": "get_calendar",
+     "description": "Події з УСІХ підключених Google-календарів на N днів уперед.",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}},
+         "required": []}},
+    {"name": "get_recent_mail",
+     "description": "Останні листи з усіх Gmail-акаунтів (відправник, тема, "
+                    "фрагмент). Використовуй на «що нового в пошті?».",
+     "input_schema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "minimum": 1, "maximum": 15, "default": 8}},
+         "required": []}},
+    {"name": "search_mail",
+     "description": "Знайти конкретний лист у Gmail за запитом (відправник, тема, "
+                    "слова). Повертає повний текст найрелевантнішого листа.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "get_tasks",
+     "description": "Відкриті задачі Данила (з дедлайнами) і цілі/звички.",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "travelon_pulse",
+     "description": "Бізнес-пульс TravelON: нові заявки, заїзди на 7 днів, борги.",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "travelon_order",
+     "description": "Картка заявки TravelON за номером (статус, готель, дати, "
+                    "сума, борг).",
+     "input_schema": {"type": "object", "properties": {
+         "order_no": {"type": "string"}}, "required": ["order_no"]}},
+]
+
+_POLICY = {"search_knowledge": "note.read", "get_calendar": "calendar.read",
+           "get_recent_mail": "gmail.read", "search_mail": "gmail.read",
+           "get_tasks": "today.read", "travelon_pulse": "travelon.read",
+           "travelon_order": "travelon.read"}
+
+
+async def _t_search_knowledge(db, user_id, args):
+    from app.core import rag
+    chunks = await rag.retrieve(db, user_id=user_id,
+                                query=str(args.get("query", ""))[:300], k=8)
+    if not chunks:
+        return {"found": 0, "note": "нічого не знайдено в базі знань"}
+    return {"found": len(chunks),
+            "chunks": [{"source": c.title,
+                        "date": c.created_at.strftime("%d.%m.%Y"),
+                        "text": c.text[:700]} for c in chunks]}
+
+
+async def _t_get_calendar(db, user_id, args):
+    from app.core.briefs import agenda_block
+    days = min(max(int(args.get("days") or 7), 1), 30)
+    block = await agenda_block(db, user_id, days=days)
+    return {"agenda": block or "Google-акаунти не підключені"}
+
+
+async def _t_get_recent_mail(db, user_id, args):
+    from app.core import google_client
+    limit = min(max(int(args.get("limit") or 8), 1), 15)
+    accounts = await google_client.get_accounts(db, user_id)
+    if not accounts:
+        return {"error": "Google не підключено (/connect_google)"}
+    out, broken = [], []
+    for cred in accounts:
+        try:
+            access = await google_client.access_for(db, cred)
+            if not access:
+                broken.append(cred.account_email)
+                continue
+            for m in await google_client.gmail_recent(access, hours=48, limit=limit):
+                out.append({**m, "account": cred.account_email})
+        except Exception:
+            logger.exception("mail tool: %s failed", cred.account_email)
+            broken.append(cred.account_email)
+    result = {"messages": out[:limit * 2]}
+    if broken:
+        result["unavailable_accounts"] = broken
+    return result
+
+
+async def _t_search_mail(db, user_id, args):
+    from app.core import google_client
+    query = str(args.get("query", ""))[:200]
+    accounts = await google_client.get_accounts(db, user_id)
+    if not accounts:
+        return {"error": "Google не підключено (/connect_google)"}
+    for cred in accounts:
+        try:
+            access = await google_client.access_for(db, cred)
+            if not access:
+                continue
+            email = await google_client.gmail_find_message(access, query)
+            if email:
+                return {"account": cred.account_email, "from": email["from"],
+                        "subject": email["subject"], "body": email["body"][:2000]}
+        except Exception:
+            logger.exception("search_mail: %s failed", cred.account_email)
+    return {"found": False, "note": "лист не знайдено"}
+
+
+async def _t_get_tasks(db, user_id, args):
+    from app.core import coach
+    from app.models import Task
+    tasks = (await db.execute(
+        select(Task).where(Task.user_id == user_id, Task.status == "open")
+        .order_by(Task.due_at.asc().nulls_last()).limit(20))).scalars().all()
+    goals = await coach.list_goals(db, user_id)
+    habits = await coach.habits_overview(db, user_id)
+    return {"open_tasks": [{"title": t.title,
+                            "due": t.due_at.isoformat() if t.due_at else None}
+                           for t in tasks],
+            "goals": [g.title for g in goals],
+            "habits": [{"title": h["title"], "week": f"{h['week_count']}/{h['week_days']}"}
+                       for h in habits]}
+
+
+async def _t_travelon_pulse(db, user_id, args):
+    from app.core import travelon
+    if not travelon.configured():
+        return {"error": "TravelON не підключено"}
+    data = await travelon.pulse_data(db)
+    return data or {"error": "звіт тимчасово недоступний"}
+
+
+async def _t_travelon_order(db, user_id, args):
+    from app.core import travelon
+    if not travelon.configured():
+        return {"error": "TravelON не підключено"}
+    order = await travelon.fetch_order(str(args.get("order_no", "")).strip())
+    return {"card": travelon.order_card(order)} if order else {"found": False}
+
+
+_EXECUTORS = {"search_knowledge": _t_search_knowledge,
+              "get_calendar": _t_get_calendar,
+              "get_recent_mail": _t_get_recent_mail,
+              "search_mail": _t_search_mail,
+              "get_tasks": _t_get_tasks,
+              "travelon_pulse": _t_travelon_pulse,
+              "travelon_order": _t_travelon_order}
+
+
+async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str:
+    """Execute one read-tool under policy; ALWAYS returns a JSON string."""
+    action = _POLICY.get(name)
+    if action is None or not evaluate(action).allowed:
+        return json.dumps({"error": f"інструмент {name} не дозволено"},
+                          ensure_ascii=False)
+    try:
+        result = await _EXECUTORS[name](db, user_id, args or {})
+    except Exception:
+        logger.exception("tool %s failed", name)
+        result = {"error": "інструмент тимчасово не спрацював"}
+    return json.dumps(result, ensure_ascii=False, default=str)[:8000]

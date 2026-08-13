@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     digest_times: str = "13:00,18:30"
     weekly_time: str = "19:00"  # Sunday coverage report
 
-    # Full chat engine (real assistant-grade replies)
+    # Full chat engine (agentic: model reaches for data via tools)
     chat_model: str = "claude-sonnet-5"  # set "mock" or empty to disable
-    chat_effort: str = "high"  # adaptive-thinking effort: low|medium|high|max
+    chat_effort: str = "high"  # adaptive-thinking effort (sonnet 5+)
+    chat_thinking_budget: int = 1500  # budget-style thinking (opus 4.x)
     chat_history_window: int = 24
     web_search_max_uses: int = 3
 
