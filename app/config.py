@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # Cowork knowledge channel: enables POST /admin/ingest when set
     admin_token: str = ""
 
+    # Full-Drive indexing cap per account per run (/drive_all)
+    drive_index_max: int = 300
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

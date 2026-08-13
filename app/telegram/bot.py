@@ -154,7 +154,8 @@ async def cmd_start(message: Message) -> None:
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
-        "• /drive — індексувати папку Google Drive · /reply — чернетка відповіді на лист\n"
+        "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
+        "• /reply — чернетка відповіді на лист\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
         f"• бриф {settings.brief_time} · чек-ін {settings.checkin_time} · "
@@ -423,7 +424,9 @@ async def cmd_drive(message: Message) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📧 {c.account_email}", callback_data=f"da:{c.id}")]
         for c in accounts])
-    await message.answer("З якого акаунта індексуємо Drive?", reply_markup=kb)
+    await message.answer("З якого акаунта індексуємо Drive?\n"
+                         "<i>(або /drive_all — одразу все з усіх акаунтів)</i>",
+                         reply_markup=kb)
 
 
 _SCOPE_LABELS = (("calendar.readonly", "📆 календар"),
@@ -440,6 +443,94 @@ def _scope_status(scopes: str) -> tuple[str, bool]:
         missing = missing or not ok
         parts.append(f"{label} {'✅' if ok else '❌'}")
     return "   " + " · ".join(parts), missing
+
+
+async def _index_all_drive(user_id: int) -> None:
+    """Background job: index every indexable file across ALL Google accounts.
+    Hash-dedupe makes re-runs cheap; progress lands in the owner chat."""
+    from app.core.ingest import IngestError, extract_text, ingest_document
+    try:
+        async with database.session() as db:
+            accounts = await google_client.get_accounts(db, user_id)
+        grand = {"added": 0, "dups": 0, "failed": 0}
+        for cred in accounts:
+            async with database.session() as db:
+                cred = await db.merge(cred)
+                access = await google_client.access_for(db, cred)
+            if not access:
+                await bot_instance.send_message(
+                    user_id, f"⚠️ {cred.account_email}: не зміг оновити доступ — "
+                    "перепідключи /connect_google")
+                continue
+            try:
+                files = await google_client.drive_list_all(
+                    access, settings.drive_index_max)
+            except Exception:
+                logger.exception("drive_list_all failed")
+                await bot_instance.send_message(
+                    user_id, f"⚠️ {cred.account_email}: не зміг прочитати Drive")
+                continue
+            added = dups = failed = 0
+            for i, f in enumerate(files, 1):
+                try:
+                    name, data = await google_client.drive_download_text_source(
+                        access, f)
+                    text = extract_text(name, data)
+                    async with database.session() as db:
+                        result = await ingest_document(
+                            db, user_id=user_id, title=name, text=text,
+                            source_type="drive", source_ref=f["id"])
+                    if result.status == "indexed":
+                        added += 1
+                    elif result.status == "duplicate":
+                        dups += 1
+                    else:
+                        failed += 1
+                except (IngestError, Exception):
+                    failed += 1
+                if i % 50 == 0:
+                    await bot_instance.send_message(
+                        user_id, f"🗂 {cred.account_email}: {i}/{len(files)} "
+                        f"(нових {added})…")
+            grand["added"] += added
+            grand["dups"] += dups
+            grand["failed"] += failed
+            await bot_instance.send_message(
+                user_id, f"📧 <b>{cred.account_email}</b>: файлів {len(files)} · "
+                f"додано {added} · вже було {dups} · пропущено {failed}")
+        await bot_instance.send_message(
+            user_id,
+            f"🗂 <b>Індексація Drive завершена.</b> Нових документів: "
+            f"{grand['added']} (дублікатів {grand['dups']}).\n"
+            "Тепер просто питай: «який логін до …», «де договір з …», "
+            "«що в файлі …» — знайду і процитую джерело.")
+    except Exception:
+        logger.exception("drive_all failed")
+        try:
+            await bot_instance.send_message(
+                user_id, "🗂 Індексація перервалась помилкою — запусти "
+                "/drive_all ще раз (все, що встиг, уже збережено).")
+        except Exception:
+            pass
+
+
+@router.message(Command("drive_all"))
+async def cmd_drive_all(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    import asyncio as _asyncio
+    async with database.session() as db:
+        accounts = await google_client.get_accounts(db, message.from_user.id)
+    if not accounts:
+        await message.answer("Спершу підключи Google: /connect_google")
+        return
+    await message.answer(
+        f"🗂 Стартую повну індексацію Drive для {len(accounts)} акаунт(ів): "
+        "Google Docs, Google Sheets (перший лист), pdf/docx/txt/md/csv, "
+        f"до {settings.drive_index_max} файлів на акаунт (найновіші перші). "
+        "Це кілька хвилин — відпишу прогрес. Повторний запуск безпечний: "
+        "дублікати пропускаються.")
+    _asyncio.create_task(_index_all_drive(message.from_user.id))
 
 
 @router.message(Command("accounts"))

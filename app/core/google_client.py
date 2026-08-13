@@ -406,7 +406,52 @@ async def calendar_respond(access_token: str, calendar_id: str, event_id: str,
 # ---------- drive (read-only) ----------
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
-DRIVE_FILE_EXT = (".pdf", ".docx", ".txt", ".md")
+GOOGLE_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+DRIVE_FILE_EXT = (".pdf", ".docx", ".txt", ".md", ".csv", ".tsv")
+
+
+def drive_indexable(f: dict) -> bool:
+    """Is this Drive file worth indexing? Docs/Sheets natively; plus known
+    text formats under 15MB. Everything else (media, binaries) is skipped."""
+    mime = f.get("mimeType", "")
+    if mime in (GOOGLE_DOC_MIME, GOOGLE_SHEET_MIME):
+        return True
+    if not f.get("name", "").lower().endswith(DRIVE_FILE_EXT):
+        return False
+    try:
+        return int(f.get("size") or 0) <= 15 * 1024 * 1024
+    except (TypeError, ValueError):
+        return False
+
+
+async def drive_list_all(access_token: str, max_files: int = 300) -> list[dict]:
+    """Whole-Drive listing (newest first), filtered to indexable files."""
+    files: list[dict] = []
+    page_token: str | None = None
+    async with httpx.AsyncClient(timeout=60) as client:
+        while len(files) < max_files:
+            params = {"q": "trashed=false",
+                      "fields": "nextPageToken,files(id,name,mimeType,size)",
+                      "pageSize": 100, "orderBy": "modifiedTime desc"}
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await client.get(
+                "https://www.googleapis.com/drive/v3/files",
+                headers={"Authorization": f"Bearer {access_token}"}, params=params)
+            if resp.status_code != 200:
+                logger.error("drive_list_all failed: %s %s",
+                             resp.status_code, resp.text[:120])
+                break
+            data = resp.json()
+            for f in data.get("files", []):
+                if drive_indexable(f):
+                    files.append(f)
+                    if len(files) >= max_files:
+                        break
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+    return files
 
 
 async def drive_list_folders(access_token: str) -> list[dict]:
@@ -442,15 +487,23 @@ async def drive_list_files(access_token: str, folder_id: str) -> list[dict]:
 
 
 async def drive_download_text_source(access_token: str, file: dict) -> tuple[str, bytes]:
-    """Returns (effective_filename, raw_bytes); Google Docs are exported as txt."""
+    """Returns (effective_filename, raw_bytes); Google Docs exported as txt,
+    Google Sheets exported as csv (all sheets' first tab per Drive API)."""
     headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=120) as client:
-        if file.get("mimeType") == GOOGLE_DOC_MIME:
+        mime = file.get("mimeType")
+        if mime == GOOGLE_DOC_MIME:
             resp = await client.get(
                 f"https://www.googleapis.com/drive/v3/files/{file['id']}/export",
                 headers=headers, params={"mimeType": "text/plain"})
             resp.raise_for_status()
             return file["name"] + ".txt", resp.content
+        if mime == GOOGLE_SHEET_MIME:
+            resp = await client.get(
+                f"https://www.googleapis.com/drive/v3/files/{file['id']}/export",
+                headers=headers, params={"mimeType": "text/csv"})
+            resp.raise_for_status()
+            return file["name"] + ".csv", resp.content
         resp = await client.get(
             f"https://www.googleapis.com/drive/v3/files/{file['id']}",
             headers=headers, params={"alt": "media"})

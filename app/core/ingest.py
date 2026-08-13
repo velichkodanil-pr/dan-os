@@ -25,7 +25,7 @@ MAX_CHARS = 400_000
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
 
-ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt"}
+ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv"}
 
 
 class IngestError(Exception):
@@ -86,10 +86,15 @@ def extract_text(filename: str, data: bytes) -> str:
             text = re.sub(r"<[^>]+>", "", xml)
         except Exception as e:
             raise IngestError("Не зміг прочитати DOCX") from e
+    elif name.endswith((".csv", ".tsv")):
+        raw = data.decode("utf-8", "ignore")
+        # each row becomes a paragraph -> chunker never cuts a row in half
+        # (critical for credential/contact tables: the row IS the fact)
+        text = "\n\n".join(line for line in raw.splitlines() if line.strip())
     elif name.endswith((".txt", ".md")):
         text = data.decode("utf-8", "ignore")
     else:
-        raise IngestError("Підтримую pdf, docx, txt, md")
+        raise IngestError("Підтримую pdf, docx, txt, md, csv")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(text) < 20:
