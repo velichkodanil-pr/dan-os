@@ -48,7 +48,8 @@ async def _send_reminder(user_id: int, html: str, task_id: str = "") -> None:
 async def lifespan(_: FastAPI):
     if settings.database_url:
         database.init_engine()
-        scheduler.start(_send_reminder, botmod.send_brief, botmod.send_checkin)
+        scheduler.start(_send_reminder, botmod.send_brief, botmod.send_checkin,
+                        botmod.send_digest)
     else:
         logger.warning("DATABASE_URL is not set — running without persistence.")
     if bot and settings.public_url:

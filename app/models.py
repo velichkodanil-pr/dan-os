@@ -9,12 +9,15 @@ Invariants (see CLAUDE.md):
 import uuid
 from datetime import datetime, timezone
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer,
     String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+EMBED_DIM = 1536
 
 
 def utcnow() -> datetime:
@@ -131,6 +134,43 @@ class AppState(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Document(Base):
+    """Ingested knowledge source (raw -> indexed) with provenance."""
+    __tablename__ = "documents"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    title: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(32))  # telegram_file|telegram_forward|drive|email
+    source_ref: Mapped[str] = mapped_column(Text, default="")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True)  # dedupe
+    status: Mapped[str] = mapped_column(String(16), default="indexed")  # raw|indexed|failed
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list] = mapped_column(Vector(EMBED_DIM))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeGap(Base):
+    """Questions the knowledge base could not answer — feeds the coverage map (R3b)."""
+    __tablename__ = "knowledge_gaps"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    question: Mapped[str] = mapped_column(Text)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ChatLog(Base):

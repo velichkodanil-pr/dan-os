@@ -57,6 +57,15 @@ async def send_checkin(user_id: int) -> None:
                 user_id, f"🧠 {item.content}", reply_markup=_memory_kb(item.id))
 
 
+async def send_digest(user_id: int) -> None:
+    """Mail digest ritual (skips silently when the inbox is quiet)."""
+    from app.core.digest import build_digest
+    async with database.session() as db:
+        text = await build_digest(db, user_id)
+    if text:
+        await bot_instance.send_message(user_id, text)
+
+
 def _is_owner(entity) -> bool:
     return bool(settings.owner_telegram_id and entity.from_user
                 and entity.from_user.id == settings.owner_telegram_id)
@@ -94,9 +103,10 @@ async def cmd_start(message: Message) -> None:
         "Привіт, Данило! <b>DAN.OS</b> · раунд 2 🟢\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
-        "• /today — план · /brief — бриф · /checkin — вечірній розбір\n"
-        "• /connect_google — календар і пошта у брифі\n"
-        f"• ранковий бриф о {settings.brief_time}, чек-ін о {settings.checkin_time}"
+        "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
+        "• /today — план · /brief — бриф · /checkin — розбір · /kb — база знань\n"
+        f"• бриф о {settings.brief_time}, чек-ін о {settings.checkin_time}, "
+        f"пошт. дайджест о {settings.digest_times}"
     )
 
 
@@ -146,6 +156,115 @@ async def cmd_ping(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer("pong ✅")
+
+
+@router.message(Command("kb"))
+async def cmd_kb(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from sqlalchemy import func, select
+    from app.models import Document
+    async with database.session() as db:
+        docs = (await db.execute(
+            select(Document).where(Document.user_id == message.from_user.id)
+            .order_by(Document.created_at.desc()).limit(5))).scalars().all()
+        total = (await db.execute(
+            select(func.count()).select_from(Document)
+            .where(Document.user_id == message.from_user.id))).scalar_one()
+    if not total:
+        await message.answer(
+            "📚 База знань порожня. Перешли мені документ (pdf, docx, txt, md) "
+            "або будь-яке повідомлення — і я запам'ятаю.")
+        return
+    lines = [f"📚 <b>База знань:</b> {total} документ(ів). Останні:"]
+    lines += [f" • {d.title} ({d.chunk_count} фр., {d.created_at.strftime('%d.%m')})"
+              for d in docs]
+    await message.answer("\n".join(lines))
+
+
+# ---------- knowledge intake: files & forwards ----------
+
+ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md")
+
+
+@router.message(F.document)
+async def on_document(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core.ingest import IngestError, extract_text, ingest_document
+    doc = message.document
+    name = (doc.file_name or "file").strip()
+    if not name.lower().endswith(ALLOWED_DOC_EXT):
+        await message.answer("Підтримую pdf, docx, txt, md — цей формат поки ні.")
+        return
+    if doc.file_size and doc.file_size > 15 * 1024 * 1024:
+        await message.answer("Файл завеликий (ліміт 15 МБ)")
+        return
+    try:
+        file = await message.bot.get_file(doc.file_id)
+        url = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file.file_path}"
+        async with httpx.AsyncClient(timeout=120) as client:
+            data = (await client.get(url)).content
+        text = extract_text(name, data)
+        async with database.session() as db:
+            result = await ingest_document(
+                db, user_id=message.from_user.id, title=name, text=text,
+                source_type="telegram_file", source_ref=name)
+    except IngestError as e:
+        await message.answer(f"📄 {e}")
+        return
+    except Exception:
+        logger.exception("document ingest failed")
+        await message.answer("📄 Не вдалося обробити файл, спробуй ще раз.")
+        return
+    if result.status == "duplicate":
+        await message.answer(f"📚 «{name}» вже є в базі знань ✅")
+    else:
+        await message.answer(
+            f"📚 Додав у базу знань: <b>{name}</b> ({result.chunks} фрагментів).\n"
+            "Тепер можеш просто спитати мене про його зміст.")
+
+
+def _forward_title(message: Message) -> str:
+    origin = message.forward_origin
+    try:
+        t = origin.type
+        if t == "user":
+            return f"Пересилка від {origin.sender_user.full_name}"
+        if t == "channel":
+            return f"Пересилка з «{origin.chat.title}»"
+        if t == "hidden_user":
+            return f"Пересилка від {origin.sender_user_name}"
+        if t == "chat":
+            return f"Пересилка з «{origin.sender_chat.title}»"
+    except AttributeError:
+        pass
+    return "Переслане повідомлення"
+
+
+@router.message(F.forward_origin, F.text)
+async def on_forward(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core.ingest import ingest_document
+    title = _forward_title(message)
+    try:
+        async with database.session() as db:
+            result = await ingest_document(
+                db, user_id=message.from_user.id,
+                title=f"{title} ({message.date.strftime('%d.%m.%Y')})",
+                text=message.text, source_type="telegram_forward",
+                source_ref=str(message.message_id))
+    except Exception:
+        logger.exception("forward ingest failed")
+        await message.answer("Не вдалося зберегти пересилку.")
+        return
+    if result.status == "duplicate":
+        await message.answer("📚 Це вже є в базі знань ✅")
+    elif result.status == "indexed":
+        await message.answer(f"📚 Зберіг у базу знань ({title.lower()})")
+    else:
+        await message.answer("Не вийшло проіндексувати цей текст.")
 
 
 # ---------- notes: text & voice ----------

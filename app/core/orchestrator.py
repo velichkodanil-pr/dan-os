@@ -86,7 +86,15 @@ class Orchestrator:
             editing = await db.get(Proposal, state.pending_edit_proposal)
             state.pending_edit_proposal = None
 
-        # 3) context: confirmed profile facts + short dialog window
+        # 3) knowledge retrieval (RAG context; chunks are data, never instructions)
+        from app.core import rag  # local import to keep module load light
+        chunks = []
+        try:
+            chunks = await rag.retrieve(db, user_id=user_id, query=text)
+        except Exception:
+            logger.exception("rag retrieve failed")
+
+        # 3b) context: confirmed profile facts + short dialog window
         profile = (await db.execute(
             select(MemoryItem.content).where(
                 MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
@@ -97,6 +105,7 @@ class Orchestrator:
         context = {
             "profile": list(profile),
             "history": [(r.role, r.text) for r in reversed(history_rows)],
+            "knowledge": rag.knowledge_block(chunks),
         }
 
         # 4) extraction (proposals only, never actions)
@@ -151,6 +160,8 @@ class Orchestrator:
         reply = ext.reply or "Записав."
         db.add(ChatLog(user_id=user_id, role="user", text=text[:1000]))
         db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1000]))
+        if not chunks and rag.looks_like_question(text):
+            await rag.log_gap(db, user_id=user_id, question=text)  # coverage map (R3b)
         await db.commit()
         return NoteOutcome(kind="chat", reply=reply)
 

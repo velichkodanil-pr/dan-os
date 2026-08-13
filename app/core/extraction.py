@@ -81,6 +81,9 @@ def _context_blocks(context: dict | None) -> tuple[str, str]:
             lines = "\n".join(f"{'Користувач' if r == 'user' else 'Ти'}: {t[:200]}"
                               for r, t in history[-8:])
             history_block = f"\nОстанні репліки розмови:\n{lines}\n"
+        knowledge = context.get("knowledge") or ""
+        if knowledge:
+            history_block += knowledge
     return profile_block, history_block
 
 

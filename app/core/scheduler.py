@@ -59,13 +59,16 @@ async def _fire_due(send_message) -> None:
         await db.commit()
 
 
-async def _run_rituals(run_brief, run_checkin) -> None:
+async def _run_rituals(run_brief, run_checkin, run_digest) -> None:
     owner = settings.owner_telegram_id
     if not owner:
         return
     now_local = datetime.now(ZoneInfo(settings.tz_name))
-    for key, time_str, fn in (("brief", settings.brief_time, run_brief),
-                              ("checkin", settings.checkin_time, run_checkin)):
+    rituals = [("brief", settings.brief_time, run_brief),
+               ("checkin", settings.checkin_time, run_checkin)]
+    for t in [x.strip() for x in settings.digest_times.split(",") if x.strip()]:
+        rituals.append((f"digest_{t}", t, run_digest))
+    for key, time_str, fn in rituals:
         async with database.session() as db:
             state = await db.get(AppState, f"last_{key}")
             if not ritual_due(state.value if state else None, now_local, time_str):
@@ -83,19 +86,19 @@ async def _run_rituals(run_brief, run_checkin) -> None:
             await db.commit()
 
 
-async def _loop(send_message, run_brief, run_checkin) -> None:
+async def _loop(send_message, run_brief, run_checkin, run_digest) -> None:
     while True:
         try:
             await _fire_due(send_message)
-            await _run_rituals(run_brief, run_checkin)
+            await _run_rituals(run_brief, run_checkin, run_digest)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
-def start(send_message, run_brief, run_checkin) -> None:
+def start(send_message, run_brief, run_checkin, run_digest) -> None:
     global _task
-    _task = asyncio.create_task(_loop(send_message, run_brief, run_checkin))
+    _task = asyncio.create_task(_loop(send_message, run_brief, run_checkin, run_digest))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

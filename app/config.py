@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     brief_time: str = "07:30"
     checkin_time: str = "21:30"
 
+    # Round 3a: knowledge base + digest
+    embedder: str = "openai"  # openai | mock
+    embed_model: str = "text-embedding-3-small"
+    digest_times: str = "13:00,18:30"
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

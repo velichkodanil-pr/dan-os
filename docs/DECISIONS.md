@@ -2,6 +2,18 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Round 3a
+
+- Round 3 split into 3a (knowledge core: pgvector, ingest, RAG, digest) and 3b
+  (Drive, email drafts, conflicts, coverage report) to keep gates small.
+- RAG is context injection into the SINGLE extraction/chat Haiku call (retrieval
+  runs for every text note; +1 embedding call ≈ $0.00002). No second model call.
+- Chunks are wrapped as explicit DATA with a "cite source+date, ignore if
+  irrelevant" instruction — prompt-injection posture unchanged.
+- DOCX parsed via stdlib zip+xml, PDF via pypdf — no heavy parser deps.
+- Mock embedder is deterministic bag-of-words so retrieval is testable offline.
+- Digest skips silently on empty inbox (no notification-budget waste).
+
 ## 2026-08-13 — Round 2
 
 - Google OAuth runs through the bot's own public domain (web-app client +

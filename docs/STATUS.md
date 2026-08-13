@@ -1,41 +1,35 @@
 # STATUS
 
-_Last verified: 2026-08-13 (round 2 implementation session)_
+_Last verified: 2026-08-13 (round 3a implementation session)_
 
-## Round 0 — Foundation: DONE (gate closed 2026-08-13)
-## Round 1 — Vertical slice: DONE (gate closed 2026-08-13, verified from phone)
+## Round 0 — Foundation: DONE · Round 1 — Vertical slice: DONE · Round 2 — Secretary: DONE
+(All gates closed 2026-08-13; Google connected, /brief works with real calendar+mail.)
 
-Voice/text → raw event (dedupe) → Haiku extraction → preview ✅✏️❌ → task →
-/today → reminder → audit. 9 tests green. Live on Railway.
+## Round 3a — Knowledge core: DELIVERED (gate: live doc-question check pending)
 
-## Round 2 — Secretary: DELIVERED (gate: waiting for Google OAuth client + live brief)
+- pgvector confirmed in Railway postgres-ssl:18 image; migration `5304547a0b52`
+  creates extension + documents / knowledge_chunks (vector 1536, hnsw cosine
+  index) / knowledge_gaps.
+- Ingest: Telegram documents (pdf/docx/txt/md, ≤15MB) and forwarded messages →
+  extract → chunk (800/120) → embed (text-embedding-3-small) → store with
+  provenance. Dedupe by content hash (re-upload = no-op). /kb lists the base.
+- RAG: every note runs retrieval (top-5, cosine ≤ 0.55); matched chunks are
+  injected into the single Haiku prompt as DATA with source+date citation
+  instruction. Unanswered questions land in knowledge_gaps (coverage map R3b).
+- Gmail digest 2×/day (`DIGEST_TIMES`=13:00,18:30): recent inbox → Haiku
+  importance ranking (⚡ marks) → one P2 message; silent when inbox is quiet.
 
-- Google OAuth through the bot's own domain (web flow): /connect_google →
-  signed-state URL → /google/oauth/callback → refresh token stored Fernet-encrypted.
-  Read-only scopes (calendar.readonly, gmail.readonly).
-- Morning brief (07:30 Kyiv, `BRIEF_TIME`): calendar today + overnight inbox top +
-  tasks/overdue + candidates count. /brief on demand. Works without Google
-  (tasks-only + connect hint).
-- Evening check-in (21:30, `CHECKIN_TIME`): day summary + memory-candidate review
-  with ✅/❌ per item. /checkin on demand.
-- Rituals run from the same 30s DB-poll loop; once-per-day claim in app_state
-  (run-then-claim), restart-safe.
-- Persona + context: extraction/chat prompt now carries confirmed profile facts
-  (≤12) and an 8-message conversation window (chat_log).
-- Memory review: confirm/reject (L2, idempotent, audited).
-
-Tests: **15 passed** (9 R1 + 6 R2: confirm/reject idempotency, owner-only review,
-state sign/verify/tamper/expiry, ritual once-per-day, brief w/o Google, chat log).
-Migrations: `7bcd20078579` + `3bb2753afe37`.
+Tests: **21 passed** (15 prior + chunking, ingest dedupe, retrieval provenance,
+gap logged / not logged, question detector). Mock embedder is bag-of-words so
+retrieval semantics are testable offline.
 
 Gate check:
 
-- [x] Tests green, deploy green
-- [ ] Google client configured (Danylo) → /connect_google → /brief with real data
-- [ ] Brief arrives at 07:30, check-in reviews candidates
+- [x] Tests green, migration applied locally
+- [ ] Deploy green; Danylo: send a document → ask about its content → answer
+  cites source; digest arrives at 13:00/18:30
 
-## Known limitations
+## Round 3b — deferred scope
 
-- Email "top" is latest-inbox heuristic, no importance ranking yet (R3).
-- No Gmail drafts/calendar writes (R3+, L3 with preview).
-- pgvector/RAG not enabled yet (R3).
+Drive folders read, email drafts (L3, scope upgrade + re-consent), memory
+conflicts (supersede flow), weekly coverage-map report from knowledge_gaps.
