@@ -10,7 +10,7 @@ import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
 )
 
 from app import db as database
@@ -44,11 +44,22 @@ async def send_brief(user_id: int) -> None:
 
 
 async def send_checkin(user_id: int) -> None:
-    """Evening check-in: summary + memory-candidate review (21:30 ritual)."""
+    """Evening check-in: summary + habits + memory-candidate review (21:30)."""
+    from app.core import coach
     async with database.session() as db:
         summary = await briefs.evening_summary(db, user_id)
         candidates = await briefs.pending_candidates(db, user_id)
+        habits = await coach.habits_overview(db, user_id)
     await bot_instance.send_message(user_id, summary)
+    undone = [h for h in habits if not h["done_today"]]
+    if undone:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"☑️ {h['title'][:30]}",
+                                  callback_data=f"hb:{h['id']}")]
+            for h in undone[:8]])
+        await bot_instance.send_message(
+            user_id, "🏃 <b>Звички сьогодні</b> — що з цього зроблено? "
+            "Тисни, щоб позначити:", reply_markup=kb)
     if candidates:
         await bot_instance.send_message(
             user_id, f"🧠 Розберемо пам'ять — кандидатів: {len(candidates)}")
@@ -123,10 +134,13 @@ async def cmd_start(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer(
-        "Привіт, Данило! <b>DAN.OS</b> · раунд 2 🟢\n\n"
+        "Привіт, Данило! <b>DAN.OS</b> · раунд 4 🟢\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
+        "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
+        "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
+        "• /travelon — пульс заявок TravelON 🧳\n"
         "• /drive — індексувати папку Google Drive · /reply — чернетка відповіді на лист\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
@@ -183,6 +197,122 @@ async def cmd_ping(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer("pong ✅")
+
+
+# ---------- Mini App (R4) ----------
+
+@router.message(Command("app"))
+async def cmd_app(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    if not settings.public_url:
+        await message.answer("Публічний домен ще не готовий — спробуй пізніше.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📱 Відкрити DAN.OS",
+                             web_app=WebAppInfo(url=f"{settings.public_url}/app"))]])
+    await message.answer(
+        "Міні-застосунок: задачі на сьогодні, підтвердження і пам'ять — "
+        "усе кнопками з телефону:", reply_markup=kb)
+
+
+# ---------- coach: goals & habits (R4) ----------
+
+@router.message(Command("goal"))
+async def cmd_goal(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import coach
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Формат: <code>/goal текст цілі</code>\n"
+            "Наприклад: <code>/goal Запустити продажі літа до 1 жовтня</code>\n"
+            "Список: /goals")
+        return
+    async with database.session() as db:
+        goal = await coach.create_goal(db, user_id=message.from_user.id,
+                                       title=parts[1])
+    import html as _html
+    await message.answer(
+        f"🎯 Ціль додано: <b>{_html.escape(goal.title)}</b>\n"
+        "Прогрес питатиму в неділю у тижневому звіті. Список: /goals")
+
+
+@router.message(Command("goals"))
+async def cmd_goals(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import coach
+    async with database.session() as db:
+        goals = await coach.list_goals(db, message.from_user.id)
+    if not goals:
+        await message.answer("Активних цілей немає. Додати: <code>/goal текст</code>")
+        return
+    import html as _html
+    for g in goals:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🏁 Досягнуто", callback_data=f"gd:{g.id}"),
+            InlineKeyboardButton(text="🗑 Зняти", callback_data=f"gx:{g.id}"),
+        ]])
+        await message.answer(f"🎯 {_html.escape(g.title)}", reply_markup=kb)
+
+
+@router.message(Command("habit"))
+async def cmd_habit(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import coach
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Формат: <code>/habit назва звички</code>\n"
+            "Наприклад: <code>/habit Зарядка 15 хв</code>\n"
+            "Відмічати і дивитись тиждень: /habits (і ввечері нагадаю сам)")
+        return
+    async with database.session() as db:
+        habit = await coach.create_habit(db, user_id=message.from_user.id,
+                                         title=parts[1])
+    import html as _html
+    await message.answer(
+        f"🏃 Звичка додана: <b>{_html.escape(habit.title)}</b>\n"
+        "Відмічай у /habits або ввечері в чек-іні.")
+
+
+@router.message(Command("habits"))
+async def cmd_habits(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import coach
+    async with database.session() as db:
+        overview = await coach.habits_overview(db, message.from_user.id)
+    if not overview:
+        await message.answer("Звичок ще немає. Додати: <code>/habit назва</code>")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{'✅' if h['done_today'] else '⬜️'} {h['title'][:28]} · "
+                 f"{h['week_count']}/{h['week_days']}",
+            callback_data=f"hb:{h['id']}")]
+        for h in overview[:10]])
+    await message.answer(
+        "🏃 <b>Звички цього тижня</b> (тисни, щоб відмітити/зняти сьогодні):",
+        reply_markup=kb)
+
+
+@router.message(Command("travelon"))
+async def cmd_travelon(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import travelon
+    if not travelon.configured():
+        await message.answer(
+            "🧳 TravelON ще не підключено — чекаю токен звітів "
+            "(файл danos-travelon-token.txt, змінна TRAVELON_TOKEN).")
+        return
+    await message.answer("🧳 Збираю пульс TravelON…")
+    text = await travelon.pulse_text()
+    await message.answer(text or "Не вдалося отримати звіт, спробуй пізніше.")
 
 
 async def _set_drive_account(user_id: int, cred_id: str) -> None:
@@ -666,6 +796,39 @@ async def on_callback(cb: CallbackQuery) -> None:
                 status = await orch.reject_memory(db, user_id=user_id, item_id=ref)
                 await cb.message.edit_text("🗑 Відкинуто")
                 await cb.answer()
+            elif action == "gd":
+                from app.core import coach
+                status = await coach.set_goal_status(
+                    db, user_id=user_id, goal_id=ref, status="done")
+                if status == "done":
+                    await cb.message.edit_text(
+                        f"🏁 {cb.message.text[2:].strip()} — досягнуто! 🎉")
+                await cb.answer("Вітаю! 🎉" if status == "done" else str(status))
+            elif action == "gx":
+                from app.core import coach
+                status = await coach.set_goal_status(
+                    db, user_id=user_id, goal_id=ref, status="dropped")
+                if status == "dropped":
+                    await cb.message.edit_text(f"🗑 {cb.message.text[2:].strip()} — знято")
+                await cb.answer()
+            elif action == "hb":
+                from app.core import coach
+                status = await coach.toggle_habit(db, user_id=user_id, habit_id=ref)
+                if status in ("done", "undone"):
+                    overview = await coach.habits_overview(db, user_id)
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=f"{'✅' if h['done_today'] else '⬜️'} {h['title'][:28]} · "
+                                 f"{h['week_count']}/{h['week_days']}",
+                            callback_data=f"hb:{h['id']}")]
+                        for h in overview[:10]])
+                    try:
+                        await cb.message.edit_reply_markup(reply_markup=kb)
+                    except Exception:
+                        pass  # markup unchanged or message too old
+                    await cb.answer("Відмічено ✅" if status == "done" else "Знято")
+                else:
+                    await cb.answer(str(status))
             else:
                 await cb.answer("Невідома дія")
     except PolicyDenied as e:

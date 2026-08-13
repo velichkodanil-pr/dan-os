@@ -201,3 +201,37 @@ class ChatLog(Base):
     role: Mapped[str] = mapped_column(String(8))  # user|bot
     text: Mapped[str] = mapped_column(Text)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Goal(Base):
+    """Coach (R4): a mid-term goal Danylo tracks with DAN.OS."""
+    __tablename__ = "goals"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    title: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active|done|dropped
+    target_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Habit(Base):
+    """Coach (R4): a daily habit; done-marks live in habit_log."""
+    __tablename__ = "habits"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class HabitLog(Base):
+    """One row = habit done on that local date (unique per habit+date)."""
+    __tablename__ = "habit_log"
+    __table_args__ = (UniqueConstraint("habit_id", "log_date", name="uq_habitlog_day"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    log_date: Mapped[str] = mapped_column(String(10))  # ISO YYYY-MM-DD in Europe/Kyiv
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

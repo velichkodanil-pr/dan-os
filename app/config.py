@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     chat_history_window: int = 24
     web_search_max_uses: int = 3
 
+    # Round 4: Mini App + TravelON pulse
+    webapp_max_age: int = 3600  # initData freshness window, seconds
+    travelon_token: str = ""  # full-access report token — secret, never logged
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

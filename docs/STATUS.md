@@ -1,6 +1,30 @@
 # STATUS
 
-_Last verified: 2026-08-13 (round 3b implementation session)_
+_Last verified: 2026-08-13 (round 4 implementation session)_
+
+## Round 4 — Expansion: DELIVERED (gate: live phone checks pending)
+
+- **Mini App** (`/app` + menu button "DAN.OS"): one self-contained page,
+  Telegram theme vars, 3 tabs — Сьогодні (tasks ☑️/✕, habits toggle, goals 🏁),
+  Розбір (proposal ✅/❌ + memory candidates, badge counter), Пам'ять (confirmed
+  facts + KB count). Server-side initData HMAC validation (fresh auth_date
+  ≤ WEBAPP_MAX_AGE=3600s, owner-only → 401), API `/webapp/api/overview|act`;
+  actions reuse orchestrator/coach → same policy+audit+idempotency as chat.
+- **Coach**: goals (active|done|dropped) + daily habits with per-day log
+  (unique habit+date, toggle = reversible L2). /goal /goals /habit /habits;
+  evening check-in asks about unfinished habits (buttons); Sunday report shows
+  goals + week counts. Policy: goal.*, habit.* = L2.
+- **TravelON pulse** (read-only, domain travelon): gateway to
+  travelon.to/book/report/xml with TRAVELON_TOKEN env (never logged/stored);
+  store-minimum parse (no passports/names — counts and totals only).
+  /travelon = 7-day card (нові заявки / заїзди / борги); morning brief gets a
+  one-liner. travelon.read = L0; empty <orders/> = valid zero.
+- Migration `b7c8d9e0f1a2` (goals, habits, habit_log). Tests: **46 passed**
+  (initData forge/stale/foreign, goals lifecycle, habit week-count,
+  travelon parser fixtures incl. nil/empty, policy).
+
+Gate: Danylo opens /app from the phone (Today+Memory work), /travelon shows a
+card once TRAVELON_TOKEN is set, habits appear in the evening check-in.
 
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 

@@ -15,6 +15,7 @@ from app.core import google_client, scheduler
 from app.core.audit import audit
 from app.telegram import bot as botmod
 from app.telegram.bot import router as telegram_router
+from app.webapp.routes import router as webapp_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dan_os")
@@ -58,6 +59,16 @@ async def lifespan(_: FastAPI):
                               drop_pending_updates=False,
                               allowed_updates=["message", "callback_query"])
         logger.info("Webhook set to %s", url)
+        if settings.owner_telegram_id:
+            try:  # Mini App on the menu button next to the input field
+                from aiogram.types import MenuButtonWebApp, WebAppInfo
+                await bot.set_chat_menu_button(
+                    chat_id=settings.owner_telegram_id,
+                    menu_button=MenuButtonWebApp(
+                        text="DAN.OS",
+                        web_app=WebAppInfo(url=settings.public_url + "/app")))
+            except Exception:
+                logger.exception("menu button setup failed (non-fatal)")
     elif bot:
         logger.warning("RAILWAY_PUBLIC_DOMAIN is not set — webhook not registered.")
     yield
@@ -67,11 +78,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="DAN.OS", lifespan=lifespan)
+app.include_router(webapp_router)
 
 
 @app.get("/health/live")
 async def health_live() -> dict:
-    return {"status": "ok", "service": "dan-os", "round": 1}
+    return {"status": "ok", "service": "dan-os", "round": 4}
 
 
 @app.get("/health/ready")

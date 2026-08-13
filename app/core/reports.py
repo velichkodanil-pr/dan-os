@@ -59,6 +59,15 @@ async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
 
     lines = ["📊 <b>Тижневий звіт DAN.OS</b>",
              f"Виконано задач: {done} · документів у базі: {docs} · фактів у пам'яті: {facts}"]
+
+    try:  # coach progress (R4)
+        from app.core import coach
+        block = await coach.weekly_block(db, user_id)
+        if block:
+            lines.append(block)
+    except Exception:
+        logger.exception("coach weekly block failed")
+
     if gaps:
         gap_texts = [g.question for g in gaps]
         lines.append(f"\n🕳 <b>Питання без відповіді ({len(gaps)}):</b>")

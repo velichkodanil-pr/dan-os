@@ -1,21 +1,19 @@
 # NEXT — the one authorized round
 
-## Round 4 — Expansion (from month 2)
+## Round 4 — remaining live checks (no new code without Danylo's go)
 
-Scope (Plan v1.1 section 10):
+1. Danylo: open the Mini App (/app or the "DAN.OS" menu button) from the phone —
+   Today shows tasks, Розбір approves a proposal, Пам'ять lists facts.
+2. Danylo: provide TRAVELON_TOKEN (file danos-travelon-token.txt) → set the
+   Railway variable → /travelon returns the pulse card; next morning brief has
+   the 🧳 line.
+3. First evening check-in with habit buttons; Sunday report with goals/habits.
 
-1. Telegram Mini App: Today / Approvals / Memory screens (view + correct facts),
-   server-side init-data validation, typed API client. Backend correctness first.
-2. Travelon read-only pulse: bookings/statuses via existing travelon skills/API
-   through a gateway module (separate `travelon` domain; no CRM writes ever).
-3. Coach/OKR: goals + habits tables, weekly check-in merged into the Sunday
-   report, honest progress framing (no guilt-tripping per spec).
-4. Later in round: Zoom transcripts, wider L3 actions (calendar event creation
-   with preview), TTS replies (optional).
+## Round 4b — candidates (pick after gate closes)
 
-Out of scope: Android app (after Mini App stabilizes), WhatsApp/Instagram,
-Health, crypto, payments, email send.
+- Calendar event creation with preview (L3 widening, calendar.write flow).
+- Zoom/meeting transcripts into the knowledge base.
+- TTS replies (optional); Mini App: goal creation + travelon tab.
+- Android app groundwork (same API as Mini App).
 
-Gate: Mini App shows Today+Memory from the phone; Travelon pulse card arrives;
-first OKR check-in runs; tests extended (init-data validation, domain isolation
-travelon vs personal, goals lifecycle).
+Out of scope: WhatsApp/Instagram, Health, crypto, payments, email send.

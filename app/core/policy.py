@@ -23,6 +23,7 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "task.read": ("L0", True, False),
     "drive.read": ("L0", True, False),
     "gmail.read": ("L0", True, False),
+    "travelon.read": ("L0", True, False),  # read-only XML report, never writes
     # L1 — internal writes: automatic (undo-able)
     "raw_event.create": ("L1", True, False),
     "memory.candidate_create": ("L1", True, False),
@@ -38,6 +39,10 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "memory.supersede": ("L2", True, True),
     "google.connect": ("L2", True, True),  # OAuth consent IS the confirmation
     "google.disconnect": ("L2", True, True),
+    "goal.create": ("L2", True, True),  # the /goal command IS the confirmation
+    "goal.update": ("L2", True, True),
+    "habit.create": ("L2", True, True),
+    "habit.log": ("L2", True, True),  # toggle is reversible
     "reminder.schedule": ("L2", True, False),  # follows an approved task
     "reminder.cancel": ("L2", True, False),
     # L3/L4 — external writes/communication: NOT SUPPORTED in round 1

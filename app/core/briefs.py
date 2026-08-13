@@ -72,6 +72,15 @@ async def morning_brief(db: AsyncSession, user_id: int, today_data: dict) -> str
         lines += [f" • {t.title}" for t in today_due[:8]]
     if not overdue and not today_due:
         lines.append("\n✅ Задач із дедлайном на сьогодні немає")
+
+    try:  # TravelON one-liner (R4, only when the token is configured)
+        from app.core import travelon
+        t_line = await travelon.brief_line()
+        if t_line:
+            lines.append(t_line)
+    except Exception:
+        logger.exception("travelon brief line failed")
+
     if today_data["candidates"]:
         lines.append(f"\n🧠 Кандидатів у пам'ять на розбір: {today_data['candidates']} "
                      "(увечері запитаю)")

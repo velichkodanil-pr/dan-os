@@ -2,6 +2,25 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Round 4 (Mini App, coach, TravelON)
+
+- Mini App = one self-contained HTML served by the same FastAPI service
+  (no separate frontend build/deploy); Telegram theme variables for native look;
+  every API call re-validates initData (HMAC per Telegram spec, auth_date
+  freshness 1h, owner-only). Actions go through the SAME orchestrator methods
+  as chat buttons — no parallel business logic. Memory conflicts stay a chat
+  flow (Mini App shows an alert and defers to the bot).
+- Coach is deterministic (no LLM): goals lifecycle active→done|dropped;
+  habits with one log row per local day, toggle deletes the row (reversible,
+  hence L2 not append-only audit_log — the audit records both log/unlog).
+  Habit prompts merged into the evening check-in; progress into Sunday report
+  (counts only, no guilt-tripping per spec).
+- TravelON: read-only gateway per travelon skill — token only in env, never in
+  logs/DB; store-minimum parse (order no, status, dates, hotel, country,
+  tourist COUNT, totals; no passports/names/payer); domain=travelon;
+  travelon.read=L0; API errors degrade to a friendly message, brief line
+  skips silently. Writes to Travelon: never (not even a policy entry).
+
 ## 2026-08-13 — Multi-account Google (Danylo's request)
 
 - google_credentials keyed by (user, account_email) with uuid PK; account email
