@@ -315,7 +315,8 @@ async def cmd_travelon(message: Message) -> None:
             "(файл danos-travelon-token.txt, змінна TRAVELON_TOKEN).")
         return
     await message.answer("🧳 Збираю пульс TravelON…")
-    text = await travelon.pulse_text()
+    async with database.session() as db:
+        text = await travelon.pulse_text(db)
     await message.answer(text or "Не вдалося отримати звіт, спробуй пізніше.")
 
 
@@ -677,7 +678,35 @@ async def _send_cal_create_card(message: Message, pending, accounts: list) -> No
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-async def _process_note(message: Message, text: str, prefix: str = "") -> None:
+async def _voice_enabled(user_id: int) -> bool:
+    from app.models import AppState
+    async with database.session() as db:
+        state = await db.get(AppState, f"voice_{user_id}")
+    return state.value != "off" if state else True  # default on
+
+
+@router.message(Command("voice"))
+async def cmd_voice(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.models import AppState
+    user_id = message.from_user.id
+    async with database.session() as db:
+        state = await db.get(AppState, f"voice_{user_id}") or AppState(
+            key=f"voice_{user_id}", value="on")
+        state.value = "off" if state.value != "off" else "on"
+        db.add(state)
+        await db.commit()
+        now_on = state.value == "on"
+    await message.answer(
+        "🔊 Голосові відповіді УВІМКНЕНО — на голосове відповім і текстом, "
+        "і голосом (короткі відповіді)." if now_on else
+        "🔇 Голосові відповіді вимкнено — відповідатиму лише текстом. "
+        "Увімкнути знову: /voice")
+
+
+async def _process_note(message: Message, text: str, prefix: str = "",
+                        want_voice: bool = False) -> None:
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")
     except Exception:
@@ -708,6 +737,17 @@ async def _process_note(message: Message, text: str, prefix: str = "") -> None:
     safe = _html.escape(outcome.reply or "Записав ✅")
     for i in range(0, len(safe), 3900):  # Telegram message limit
         await message.answer((prefix if i == 0 else "") + safe[i:i + 3900])
+    if want_voice and outcome.kind == "chat":
+        from app.core import tts
+        if tts.should_speak(outcome.reply or "", True):
+            audio = await tts.synthesize(outcome.reply)
+            if audio:
+                from aiogram.types import BufferedInputFile
+                try:
+                    await message.answer_voice(
+                        BufferedInputFile(audio, filename="dan_os.ogg"))
+                except Exception:
+                    logger.exception("voice reply send failed")
 
 
 @router.message(F.voice)
@@ -732,7 +772,8 @@ async def on_voice(message: Message) -> None:
         return
     import html as _html
     await _process_note(message, text,
-                        prefix=f"🎙 <i>Розчув:</i> {_html.escape(text)}\n\n")
+                        prefix=f"🎙 <i>Розчув:</i> {_html.escape(text)}\n\n",
+                        want_voice=await _voice_enabled(message.from_user.id))
 
 
 @router.message(F.text & ~F.text.startswith("/"))

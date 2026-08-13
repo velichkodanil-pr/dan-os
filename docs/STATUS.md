@@ -91,6 +91,19 @@ per day; 7-day range requests time out). Reworked before first prod use:
 - Verified live: pulse 22.8s (26/82 orders, 513 arrivals/7d, 47 debtors),
   brief line 9.7s. TRAVELON_TOKEN set on Railway. Tests: **66 passed**.
 
+### R4b slice 3: voice replies + Mini App extensions (Zoom API dropped)
+
+- Zoom API auto-pull DROPPED per Danylo. Remaining plan items built instead:
+- TTS voice replies: voice message in -> text reply + voice note (OpenAI
+  gpt-4o-mini-tts, opus). Text ALWAYS sent; voice only when reply ≤ 600
+  chars. /voice toggles per user (default on). Chat-intent replies only.
+- Mini App: add-goal and add-habit inputs right in the Сьогодні tab
+  (habits/goals sections always visible now); new 🧳 Бізнес tab renders the
+  TravelON pulse natively (stat grid + debtor cards + refresh link).
+- TravelON pulse refactored to pulse_data() (JSON) + pulse_text() (chat
+  render) with a 10-min app_state cache — Mini App tab and /travelon share
+  it; first load ~20s, then instant. Tests: **76 passed**.
+
 ### Meeting transcripts v1 (R4b slice 2)
 
 Send a Zoom transcript file (.vtt/.srt) to the bot → knowledge base +

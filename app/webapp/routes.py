@@ -99,15 +99,41 @@ async def overview(x_telegram_init_data: str = Header(default="")) -> dict:
     }
 
 
+@router.get("/webapp/api/travelon")
+async def travelon_tab(x_telegram_init_data: str = Header(default="")) -> dict:
+    """Pulse for the 🧳 tab (app_state-cached; first load can take ~20s)."""
+    _auth(x_telegram_init_data)
+    from app.core import travelon
+    if not travelon.configured():
+        return {"configured": False, "data": None}
+    async with database.session() as db:
+        data = await travelon.pulse_data(db)
+    return {"configured": True, "data": data}
+
+
 class ActRequest(BaseModel):
     action: str
-    id: str
+    id: str = ""
     version: int | None = None
+    text: str = ""
 
 
 @router.post("/webapp/api/act")
 async def act(req: ActRequest, x_telegram_init_data: str = Header(default="")) -> dict:
     user_id = _auth(x_telegram_init_data)
+    if req.action in ("goal_add", "habit_add"):  # id-less creations
+        title = req.text.strip()
+        if not (2 <= len(title) <= 200):
+            raise HTTPException(status_code=400, detail="bad title")
+        try:
+            async with database.session() as db:
+                if req.action == "goal_add":
+                    await coach.create_goal(db, user_id=user_id, title=title)
+                else:
+                    await coach.create_habit(db, user_id=user_id, title=title)
+        except PolicyDenied as e:
+            raise HTTPException(status_code=403, detail=e.decision.reason)
+        return {"status": "created"}
     try:
         ref = uuid.UUID(req.id)
     except ValueError:

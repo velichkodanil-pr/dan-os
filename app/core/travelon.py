@@ -178,14 +178,8 @@ def _sum_by_currency(pairs) -> str:
     return " + ".join(_fmt_money(v, cur) for cur, v in sorted(sums.items())) or "—"
 
 
-async def pulse_text() -> str | None:
-    """Aggregated pulse for /travelon (HTML). None when not configured.
-
-    Volume-aware: this token sees the WHOLE operator flow (100+ orders/day),
-    so the card shows aggregates, and per-order lines only for the most
-    actionable thing — unpaid balances among the nearest check-ins."""
-    if not configured():
-        return None
+async def _pulse_compute() -> dict | None:
+    """Fetch + aggregate the pulse (no cache). None on total failure."""
     tz = ZoneInfo(settings.tz_name)
     today = datetime.now(tz).date()
     week = [today + timedelta(days=i) for i in range(7)]
@@ -196,35 +190,87 @@ async def pulse_text() -> str | None:
             fetch_days(week, by_entry_date=True))
     except Exception:
         logger.exception("travelon pulse failed")
-        return "🧳 TravelON: сервіс звітів зараз недоступний, спробуй пізніше."
-
+        return None
     ct, cy = _active(created_today), _active(created_yest)
     arr = _active(arrivals)
     arr_today = [o for o in arr if o.check_in == today]
     arr_tomorrow = [o for o in arr if o.check_in == today + timedelta(days=1)]
-    tourists = sum(o.tourists for o in arr)
-
-    lines = [f"🧳 <b>TravelON пульс — {today.strftime('%d.%m')}</b>",
-             f"\n📈 <b>Нові заявки:</b> сьогодні {len(ct)} · вчора {len(cy)}",
-             f"💰 Сума за ці два дні: "
-             f"{_sum_by_currency((o.gross_cost, o.currency) for o in ct + cy)}",
-             f"\n🛬 <b>Заїзди:</b> сьогодні {len(arr_today)} · завтра "
-             f"{len(arr_tomorrow)} · за 7 днів {len(arr)} ({tourists} тур.)"]
-
     debtors = sorted((o for o in arr if o.debt and o.debt > 0),
                      key=lambda x: x.check_in or today)
-    if debtors:
-        total = _sum_by_currency((o.debt, o.currency) for o in debtors)
-        lines.append(f"\n💸 <b>Борг у найближчих заїздах:</b> {len(debtors)} "
-                     f"заявок · {total}")
-        for o in debtors[:5]:
-            when = o.check_in.strftime("%d.%m") if o.check_in else "—"
-            lines.append(f" • {when} №{o.order_no} · {o.country or o.hotel or '—'} · "
-                         f"{_fmt_money(o.debt, o.currency)}")
-        if len(debtors) > 5:
-            lines.append(f" • … і ще {len(debtors) - 5}")
+    return {
+        "date": today.strftime("%d.%m"),
+        "created_today": len(ct), "created_yesterday": len(cy),
+        "sum_2d": _sum_by_currency((o.gross_cost, o.currency) for o in ct + cy),
+        "arrivals_today": len(arr_today), "arrivals_tomorrow": len(arr_tomorrow),
+        "arrivals_week": len(arr), "tourists": sum(o.tourists for o in arr),
+        "debt_count": len(debtors),
+        "debt_total": _sum_by_currency((o.debt, o.currency) for o in debtors),
+        "debtors": [{
+            "when": o.check_in.strftime("%d.%m") if o.check_in else "—",
+            "order_no": o.order_no,
+            "where": o.country or o.hotel or "—",
+            "amount": _fmt_money(o.debt, o.currency),
+        } for o in debtors[:8]],
+        "generated_at": datetime.now(tz).strftime("%H:%M"),
+    }
+
+
+async def pulse_data(db=None, max_age: int = 600) -> dict | None:
+    """Aggregated pulse with an app_state cache (the fetch takes ~20s).
+
+    db=None -> no cache (compute directly). Stale or missing cache -> refetch
+    and store. None when not configured or the report API is down."""
+    if not configured():
+        return None
+    if db is None:
+        return await _pulse_compute()
+    import json as _json
+    import time as _time
+    from app.models import AppState
+    state = await db.get(AppState, "travelon_pulse")
+    if state is not None:
+        try:
+            cached = _json.loads(state.value)
+            if _time.time() - cached["ts"] <= max_age:
+                return cached["data"]
+        except (ValueError, KeyError, TypeError):
+            pass
+    data = await _pulse_compute()
+    if data is None:
+        return None
+    state = state or AppState(key="travelon_pulse")
+    state.value = _json.dumps({"ts": _time.time(), "data": data},
+                              ensure_ascii=False)
+    db.add(state)
+    await db.commit()
+    return data
+
+
+async def pulse_text(db=None) -> str | None:
+    """Pulse card for /travelon (HTML). None when not configured."""
+    if not configured():
+        return None
+    data = await pulse_data(db)
+    if data is None:
+        return "🧳 TravelON: сервіс звітів зараз недоступний, спробуй пізніше."
+    lines = [f"🧳 <b>TravelON пульс — {data['date']}</b>",
+             f"\n📈 <b>Нові заявки:</b> сьогодні {data['created_today']} · "
+             f"вчора {data['created_yesterday']}",
+             f"💰 Сума за ці два дні: {data['sum_2d']}",
+             f"\n🛬 <b>Заїзди:</b> сьогодні {data['arrivals_today']} · завтра "
+             f"{data['arrivals_tomorrow']} · за 7 днів {data['arrivals_week']} "
+             f"({data['tourists']} тур.)"]
+    if data["debt_count"]:
+        lines.append(f"\n💸 <b>Борг у найближчих заїздах:</b> "
+                     f"{data['debt_count']} заявок · {data['debt_total']}")
+        for d in data["debtors"][:5]:
+            lines.append(f" • {d['when']} №{d['order_no']} · {d['where']} · "
+                         f"{d['amount']}")
+        if data["debt_count"] > 5:
+            lines.append(f" • … і ще {data['debt_count'] - 5}")
     else:
         lines.append("\n💸 Боргів у найближчих заїздах немає 👌")
+    lines.append(f"\n🕓 Станом на {data['generated_at']}")
     return "\n".join(lines)
 
 

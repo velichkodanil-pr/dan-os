@@ -15,11 +15,13 @@ Remaining live checks:
 
 ## Round 4b — next candidates (in plan order)
 
-- ~~Zoom/meeting transcripts~~ — DONE v1 (file upload .vtt/.srt → summary +
-  decisions + action proposals). v2 candidate: Zoom API auto-pull after
-  each meeting (needs a Zoom Server-to-Server OAuth app from Danylo).
-- TTS replies (optional); Mini App: goal creation + travelon tab.
-- Android app groundwork (same API as Mini App).
+- ~~Zoom/meeting transcripts~~ — DONE v1 (file upload). Zoom API auto-pull:
+  DROPPED by Danylo 2026-08-13 («Zoom далі не розробляй»).
+- ~~TTS replies~~ — DONE (voice in -> text + voice out, /voice toggle).
+- ~~Mini App: goal creation + travelon tab~~ — DONE (add-forms + 🧳 Бізнес).
+- Android app groundwork (same API as Mini App) — the last plan item; needs
+  Danylo's go and a decision on distribution (APK sideload vs Play).
 
 Out of scope: WhatsApp/Instagram, Health, crypto, payments, email send;
-editing/deleting existing calendar events (next explicit ask).
+Zoom API integration (dropped); editing/deleting existing calendar events
+(next explicit ask).

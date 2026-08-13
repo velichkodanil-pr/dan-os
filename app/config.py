@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     webapp_max_age: int = 3600  # initData freshness window, seconds
     travelon_token: str = ""  # full-access report token — secret, never logged
 
+    # Round 4b: voice replies (TTS)
+    tts_model: str = "gpt-4o-mini-tts"
+    tts_voice: str = "ash"
+    tts_max_chars: int = 600  # longer replies stay text-only
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""
