@@ -13,9 +13,25 @@ class Settings(BaseSettings):
     database_url: str = ""
     railway_public_domain: str = ""  # injected by Railway
 
+    # Round 1: providers
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    extractor: str = "haiku"  # haiku | mock
+    transcriber: str = "openai"  # openai | mock
+    model_extract: str = "claude-haiku-4-5"
+    stt_model: str = "gpt-4o-mini-transcribe"
+    tz_name: str = "Europe/Kyiv"
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        url = self.database_url
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url.split("?", 1)[0] if "?sslmode" in url else url
 
 
 @lru_cache
