@@ -54,6 +54,22 @@ async def lifespan(_: FastAPI):
                         botmod.send_debt_alert)
     else:
         logger.warning("DATABASE_URL is not set — running without persistence.")
+    if settings.database_url and bot:
+        try:  # a deploy/restart kills background indexing — say so, not silence
+            from app.models import AppState
+            async with database.session() as db:
+                flag = await db.get(AppState, "drive_all_running")
+                if flag is not None:
+                    owner = int(flag.value or settings.owner_telegram_id or 0)
+                    await db.delete(flag)
+                    await db.commit()
+                    if owner:
+                        await bot.send_message(
+                            owner, "⚠️ Індексацію Drive перервав перезапуск "
+                            "бота (деплой). Усе оброблене збережено — запусти "
+                            "/drive_all ще раз, він продовжить з того ж місця.")
+        except Exception:
+            logger.exception("drive_all interrupted-flag check failed")
     if bot and settings.public_url:
         url = settings.public_url + WEBHOOK_PATH
         await bot.set_webhook(url, secret_token=settings.webhook_secret or None,

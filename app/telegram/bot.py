@@ -445,10 +445,27 @@ def _scope_status(scopes: str) -> tuple[str, bool]:
     return "   " + " · ".join(parts), missing
 
 
+async def _set_flag(key: str, value: str | None) -> None:
+    from app.models import AppState
+    async with database.session() as db:
+        state = await db.get(AppState, key)
+        if value is None:
+            if state is not None:
+                await db.delete(state)
+        else:
+            state = state or AppState(key=key)
+            state.value = value
+            db.add(state)
+        await db.commit()
+
+
 async def _index_all_drive(user_id: int) -> None:
     """Background job: index every indexable file across ALL Google accounts.
-    Hash-dedupe makes re-runs cheap; progress lands in the owner chat."""
+    Hash-dedupe makes re-runs cheap; progress lands in the owner chat.
+    A running-flag survives restarts: if a deploy kills the job, the fresh
+    container tells the owner to re-run instead of silent 'застиг'."""
     from app.core.ingest import IngestError, extract_text, ingest_document
+    await _set_flag("drive_all_running", str(user_id))
     try:
         async with database.session() as db:
             accounts = await google_client.get_accounts(db, user_id)
@@ -484,6 +501,9 @@ async def _index_all_drive(user_id: int) -> None:
                 await bot_instance.send_message(
                     user_id, f"⚠️ {cred.account_email}: не зміг прочитати Drive")
                 continue
+            await bot_instance.send_message(
+                user_id, f"📧 {cred.account_email}: знайшов {len(files)} файлів, "
+                "індексую…")
             added = dups = failed = 0
             for i, f in enumerate(files, 1):
                 try:
@@ -502,16 +522,20 @@ async def _index_all_drive(user_id: int) -> None:
                         failed += 1
                 except (IngestError, Exception):
                     failed += 1
-                if i % 50 == 0:
-                    await bot_instance.send_message(
-                        user_id, f"🗂 {cred.account_email}: {i}/{len(files)} "
-                        f"(нових {added})…")
+                if i % 25 == 0:
+                    try:
+                        await bot_instance.send_message(
+                            user_id, f"🗂 {cred.account_email}: {i}/{len(files)} "
+                            f"(нових {added})…")
+                    except Exception:
+                        logger.exception("progress send failed")
             grand["added"] += added
             grand["dups"] += dups
             grand["failed"] += failed
             await bot_instance.send_message(
                 user_id, f"📧 <b>{cred.account_email}</b>: файлів {len(files)} · "
                 f"додано {added} · вже було {dups} · пропущено {failed}")
+        await _set_flag("drive_all_running", None)
         await bot_instance.send_message(
             user_id,
             f"🗂 <b>Індексація Drive завершена.</b> Нових документів: "
@@ -521,6 +545,7 @@ async def _index_all_drive(user_id: int) -> None:
     except Exception:
         logger.exception("drive_all failed")
         try:
+            await _set_flag("drive_all_running", None)
             await bot_instance.send_message(
                 user_id, "🗂 Індексація перервалась помилкою — запусти "
                 "/drive_all ще раз (все, що встиг, уже збережено).")
