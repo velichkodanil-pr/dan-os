@@ -31,6 +31,35 @@ def looks_like_question(text: str) -> bool:
     return bool(_QUESTION_RE.search(text.strip()))
 
 
+_LOOKUP_RE = re.compile(r"логін|пароль|доступ|реквізит|login|password|iban|єдрпоу",
+                        re.IGNORECASE)
+_WORD_RE = re.compile(r"[\w'-]{4,}", re.UNICODE)
+_STOP = {"який", "яка", "яке", "котрий", "будь", "ласка", "мене", "мені",
+         "логін", "пароль", "доступ", "реквізити", "login", "password", "скажи"}
+
+
+async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
+                        limit: int = 3) -> list[RetrievedChunk]:
+    """Exact-substring fallback for lookup questions: semantic search can lose
+    a credentials ROW to thematically-similar prose; ILIKE on the distinctive
+    tokens (partner/service names) finds the row itself."""
+    tokens = [w for w in _WORD_RE.findall(query.lower()) if w not in _STOP][:4]
+    if not tokens:
+        return []
+    from sqlalchemy import or_
+    cond = or_(*[KnowledgeChunk.text.ilike(f"%{t}%") for t in tokens])
+    rows = (await db.execute(
+        select(KnowledgeChunk.text, Document.title, Document.created_at)
+        .join(Document, Document.id == KnowledgeChunk.document_id)
+        .where(KnowledgeChunk.user_id == user_id, cond)
+        .order_by(Document.created_at.desc())
+        .limit(limit)
+    )).all()
+    return [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
+                           distance=0.0)
+            for r in rows]
+
+
 async def retrieve(db: AsyncSession, *, user_id: int, query: str,
                    k: int = TOP_K) -> list[RetrievedChunk]:
     if len(query.strip()) < 6:
@@ -40,6 +69,7 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
     except Exception:
         logger.exception("query embedding failed")
         return []
+    lookup = bool(_LOOKUP_RE.search(query))
     dist = KnowledgeChunk.embedding.cosine_distance(qvec)
     rows = (await db.execute(
         select(KnowledgeChunk.text, Document.title, Document.created_at,
@@ -47,11 +77,20 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
         .join(Document, Document.id == KnowledgeChunk.document_id)
         .where(KnowledgeChunk.user_id == user_id)
         .order_by(dist)
-        .limit(k)
+        .limit(k + 3 if lookup else k)
     )).all()
-    return [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
-                           distance=float(r.dist))
-            for r in rows if float(r.dist) <= MAX_DISTANCE]
+    out = [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
+                          distance=float(r.dist))
+           for r in rows if float(r.dist) <= MAX_DISTANCE]
+    if lookup:  # credentials/requisites question -> add exact-substring hits
+        try:
+            seen = {c.text for c in out}
+            for hit in await _keyword_hits(db, user_id, query):
+                if hit.text not in seen:
+                    out.insert(0, hit)  # exact matches first — they ARE the answer
+        except Exception:
+            logger.exception("keyword fallback failed")
+    return out[:k + 3]
 
 
 async def log_gap(db: AsyncSession, *, user_id: int, question: str) -> None:

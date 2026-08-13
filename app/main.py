@@ -210,6 +210,28 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
             "document_id": str(result.document.id) if result.document else None}
 
 
+class AdminSearchRequest(BaseModel):
+    query: str
+    k: int = 8
+
+
+@app.post("/admin/search")
+async def admin_search(req: AdminSearchRequest, request: Request):
+    """KB diagnostics for the Cowork channel: what would retrieval see?
+    Same token gate as /admin/ingest; read-only, chunks trimmed."""
+    import hmac as _hmac
+    token = request.headers.get("X-Admin-Token", "")
+    if (not settings.admin_token or not settings.owner_telegram_id
+            or not _hmac.compare_digest(token, settings.admin_token)):
+        return Response(status_code=403)
+    from app.core import rag
+    async with database.session() as db:
+        chunks = await rag.retrieve(db, user_id=settings.owner_telegram_id,
+                                    query=req.query, k=min(req.k, 15))
+    return {"hits": [{"title": c.title, "distance": round(c.distance, 3),
+                      "text": c.text[:400]} for c in chunks]}
+
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request) -> Response:
     if bot is None:

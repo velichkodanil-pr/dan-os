@@ -443,7 +443,7 @@ async def drive_list_all(access_token: str, max_files: int = 300) -> list[dict]:
     async with httpx.AsyncClient(timeout=60) as client:
         while len(files) < max_files:
             params = {"q": "trashed=false",
-                      "fields": "nextPageToken,files(id,name,mimeType,size)",
+                      "fields": "nextPageToken,files(id,name,mimeType,size,modifiedTime)",
                       "pageSize": 100, "orderBy": "modifiedTime desc"}
             if page_token:
                 params["pageToken"] = page_token

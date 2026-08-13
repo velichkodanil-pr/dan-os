@@ -507,21 +507,43 @@ async def _index_all_drive(user_id: int) -> None:
             added = dups = failed = 0
             for i, f in enumerate(files, 1):
                 try:
+                    # fast path: same file id + same modifiedTime -> no download
+                    from sqlalchemy import select as _select
+                    from app.models import Document as _Doc
+                    async with database.session() as db:
+                        prev = (await db.execute(_select(_Doc).where(
+                            _Doc.user_id == user_id,
+                            _Doc.source_type == "drive",
+                            _Doc.source_ref == f["id"])
+                            .limit(1))).scalar_one_or_none()
+                    if (prev is not None and f.get("modifiedTime")
+                            and (prev.meta or {}).get("modifiedTime")
+                            == f["modifiedTime"]):
+                        dups += 1
+                        continue
                     name, data = await google_client.drive_download_text_source(
                         access, f)
                     text = extract_text(name, data)
+                    from app.core.ingest import ingest_document_parts
                     async with database.session() as db:
-                        result = await ingest_document(
+                        results = await ingest_document_parts(
                             db, user_id=user_id, title=name, text=text,
-                            source_type="drive", source_ref=f["id"])
-                    if result.status == "indexed":
+                            source_type="drive", source_ref=f["id"],
+                            meta={"modifiedTime": f.get("modifiedTime", "")})
+                    statuses = [r.status for r in results]
+                    if "indexed" in statuses:
                         added += 1
-                    elif result.status == "duplicate":
+                    elif "duplicate" in statuses:
                         dups += 1
                     else:
                         failed += 1
-                except (IngestError, Exception):
+                except IngestError as e:
                     failed += 1
+                    logger.warning("drive file skipped: %s — %s",
+                                   f.get("name", "?"), e)
+                except Exception:
+                    failed += 1
+                    logger.exception("drive file failed: %s", f.get("name", "?"))
                 if i % 25 == 0:
                     try:
                         await bot_instance.send_message(

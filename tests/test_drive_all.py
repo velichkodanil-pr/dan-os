@@ -79,3 +79,46 @@ def test_drive_indexable_xlsx_and_sheet():
     from app.core.google_client import XLSX_MIME
     assert drive_indexable({"name": "fin.xlsx", "mimeType": XLSX_MIME,
                             "size": "2048"})
+
+
+@pytest.mark.asyncio
+async def test_ingest_document_parts_no_truncation(db):
+    from app.core.ingest import PART_CHARS, ingest_document_parts
+    rows = [f"Рядок даних номер {i} з достатньо довгим текстом усередині"
+            for i in range(9000)]
+    text = "\n\n".join(rows)
+    # the password section analog sits at the very END
+    text += "\n\nOther | Toco UA | https://toco-tour.example | login_toco | Secret1"
+    assert len(text) > PART_CHARS  # would have been truncated before
+    results = await ingest_document_parts(
+        db, user_id=111, title="Доступи.xlsx", text=text,
+        source_type="drive", source_ref="file123",
+        meta={"modifiedTime": "2026-08-13T00:00:00Z"})
+    assert len(results) >= 2
+    assert all(r.status == "indexed" for r in results)
+    from sqlalchemy import select
+    from app.models import KnowledgeChunk
+    tail = (await db.execute(select(KnowledgeChunk).where(
+        KnowledgeChunk.text.ilike("%login_toco%")))).scalars().all()
+    assert tail, "the tail row must survive into the index"
+
+
+@pytest.mark.asyncio
+async def test_rag_keyword_fallback_finds_credential_row(db):
+    from app.core.ingest import ingest_document
+    from app.core import rag
+    await ingest_document(
+        db, user_id=111, title="Доступи (DMC)",
+        text=("== Аркуш: DMC ==\n\nПаролі від інших операторів\n\n"
+              "Other | Toco UA | https://toco-tour.example | i.k@travelon.to | Secret1\n\n"
+              + "\n\n".join(f"Інший рядок {i} про фінанси і платежі" for i in range(40))),
+        source_type="drive", source_ref="dmc1")
+    # thematic decoys that would crowd out the row in pure vector search
+    await ingest_document(
+        db, user_id=111, title="Реєстр передоплат ТОКО",
+        text="\n\n".join(f"ТОКО Україна платіж {i} на суму {i*100} грн, ЄДРПОУ 46140224"
+                         for i in range(40)),
+        source_type="drive", source_ref="reg1")
+    chunks = await rag.retrieve(db, user_id=111, query="який логін до Toco?")
+    joined = " ".join(c.text for c in chunks)
+    assert "i.k@travelon.to" in joined, "keyword fallback must surface the row"

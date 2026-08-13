@@ -111,6 +111,10 @@ def extract_text(filename: str, data: bytes) -> str:
             text = _xlsx_to_text(data)
         except Exception as e:
             raise IngestError("Не зміг прочитати XLSX") from e
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        if len(text) < 20:
+            raise IngestError("У таблиці не знайшлося тексту")
+        return text[:2_000_000]  # big workbooks split into parts at ingest
     elif name.endswith((".csv", ".tsv")):
         raw = data.decode("utf-8", "ignore")
         # each row becomes a paragraph -> chunker never cuts a row in half
@@ -159,6 +163,7 @@ class IngestResult:
 async def ingest_document(
     db: AsyncSession, *, user_id: int, title: str, text: str,
     source_type: str, source_ref: str = "", domain: str = "personal",
+    meta: dict | None = None,
 ) -> IngestResult:
     content_hash = hashlib.sha256(text.strip().lower().encode()).hexdigest()
     existing = (await db.execute(
@@ -176,7 +181,8 @@ async def ingest_document(
 
     doc = Document(user_id=user_id, domain=domain, title=title[:200],
                    source_type=source_type, source_ref=source_ref[:500],
-                   content_hash=content_hash, chunk_count=len(chunks))
+                   content_hash=content_hash, chunk_count=len(chunks),
+                   meta=meta or {})
     db.add(doc)
     try:
         await db.flush()
@@ -190,3 +196,38 @@ async def ingest_document(
                 resource_id=doc.id, policy_level="L1", title=title, chunks=len(chunks))
     await db.commit()
     return IngestResult(status="indexed", document=doc, chunks=len(chunks))
+
+
+PART_CHARS = 350_000
+
+
+async def ingest_document_parts(
+    db: AsyncSession, *, user_id: int, title: str, text: str,
+    source_type: str, source_ref: str = "", domain: str = "personal",
+    meta: dict | None = None,
+) -> list[IngestResult]:
+    """Oversized texts (huge workbooks/exports) become «title (ч.N)» parts —
+    NOTHING gets silently truncated (the tail is where password sections live)."""
+    if len(text) <= PART_CHARS:
+        return [await ingest_document(db, user_id=user_id, title=title, text=text,
+                                      source_type=source_type, source_ref=source_ref,
+                                      domain=domain, meta=meta)]
+    paragraphs = text.split("\n\n")
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    for para in paragraphs:
+        if size + len(para) > PART_CHARS and current:
+            parts.append("\n\n".join(current))
+            current, size = [], 0
+        current.append(para)
+        size += len(para) + 2
+    if current:
+        parts.append("\n\n".join(current))
+    results = []
+    for i, part in enumerate(parts, 1):
+        results.append(await ingest_document(
+            db, user_id=user_id, title=f"{title} (ч.{i})" if len(parts) > 1 else title,
+            text=part, source_type=source_type, source_ref=source_ref,
+            domain=domain, meta=meta))
+    return results
