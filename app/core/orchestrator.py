@@ -18,7 +18,7 @@ from app.config import settings
 from app.core.audit import audit
 from app.core.extraction import ExtractionProvider, get_extractor
 from app.core.policy import PolicyDenied, evaluate
-from app.models import MemoryItem, Proposal, RawEvent, Reminder, Task, UserState
+from app.models import ChatLog, MemoryItem, Proposal, RawEvent, Reminder, Task, UserState
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +86,22 @@ class Orchestrator:
             editing = await db.get(Proposal, state.pending_edit_proposal)
             state.pending_edit_proposal = None
 
-        # 3) extraction (proposals only, never actions)
+        # 3) context: confirmed profile facts + short dialog window
+        profile = (await db.execute(
+            select(MemoryItem.content).where(
+                MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
+            .order_by(MemoryItem.created_at.desc()).limit(12))).scalars().all()
+        history_rows = (await db.execute(
+            select(ChatLog).where(ChatLog.user_id == user_id)
+            .order_by(ChatLog.id.desc()).limit(8))).scalars().all()
+        context = {
+            "profile": list(profile),
+            "history": [(r.role, r.text) for r in reversed(history_rows)],
+        }
+
+        # 4) extraction (proposals only, never actions)
         try:
-            ext = await self.extractor.extract(text)
+            ext = await self.extractor.extract(text, context=context)
         except Exception:
             logger.exception("extraction failed")
             await audit(db, actor=actor, action="extraction", resource_type="raw_event",
@@ -135,8 +148,45 @@ class Orchestrator:
             await db.commit()
             return NoteOutcome(kind="note", memory_saved=True, reply=ext.memory_text)
 
+        reply = ext.reply or "Записав."
+        db.add(ChatLog(user_id=user_id, role="user", text=text[:1000]))
+        db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1000]))
         await db.commit()
-        return NoteOutcome(kind="chat", reply=ext.reply or "Записав.")
+        return NoteOutcome(kind="chat", reply=reply)
+
+    # ---------- memory review ----------
+
+    async def confirm_memory(self, db: AsyncSession, *, user_id: int,
+                             item_id: uuid.UUID) -> str:
+        _guard_owner(user_id)
+        _check("memory.confirm")
+        item = await db.get(MemoryItem, item_id, with_for_update=True)
+        if item is None or item.user_id != user_id:
+            return "not_found"
+        if item.status != "candidate":
+            await db.commit()
+            return item.status
+        item.status = "confirmed"
+        await audit(db, actor=f"user:{user_id}", action="memory.confirmed",
+                    resource_type="memory_item", resource_id=item.id, policy_level="L2")
+        await db.commit()
+        return "confirmed"
+
+    async def reject_memory(self, db: AsyncSession, *, user_id: int,
+                            item_id: uuid.UUID) -> str:
+        _guard_owner(user_id)
+        _check("memory.reject")
+        item = await db.get(MemoryItem, item_id, with_for_update=True)
+        if item is None or item.user_id != user_id:
+            return "not_found"
+        if item.status != "candidate":
+            await db.commit()
+            return item.status
+        item.status = "rejected"
+        await audit(db, actor=f"user:{user_id}", action="memory.rejected",
+                    resource_type="memory_item", resource_id=item.id, policy_level="L2")
+        await db.commit()
+        return "rejected"
 
     # ---------- approvals ----------
 

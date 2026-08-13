@@ -31,6 +31,9 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "task.complete": ("L2", True, True),
     "proposal.reject": ("L2", True, True),
     "proposal.edit": ("L2", True, True),
+    "memory.confirm": ("L2", True, True),
+    "memory.reject": ("L2", True, True),
+    "google.connect": ("L2", True, True),  # read-only scopes; the OAuth consent IS the confirmation
     "reminder.schedule": ("L2", True, False),  # follows an approved task
     "reminder.cancel": ("L2", True, False),
     # L3/L4 — external writes/communication: NOT SUPPORTED in round 1

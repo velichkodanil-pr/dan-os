@@ -15,6 +15,7 @@ from aiogram.types import (
 
 from app import db as database
 from app.config import settings
+from app.core import briefs, google_client
 from app.core.orchestrator import Orchestrator
 from app.core.policy import PolicyDenied
 from app.core.transcription import TranscriptionError, get_transcriber
@@ -23,6 +24,37 @@ from app.telegram.cards import proposal_card, task_created_card, today_card
 logger = logging.getLogger(__name__)
 router = Router()
 orch = Orchestrator()
+
+bot_instance = None  # set by app.main after Bot creation (used by scheduler rituals)
+
+
+def _memory_kb(item_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Запам'ятати", callback_data=f"mo:{item_id}"),
+        InlineKeyboardButton(text="❌ Відкинути", callback_data=f"mx:{item_id}"),
+    ]])
+
+
+async def send_brief(user_id: int) -> None:
+    """Morning brief (used by /brief and the 07:30 ritual)."""
+    async with database.session() as db:
+        today_data = await orch.today(db, user_id=user_id)
+        text = await briefs.morning_brief(db, user_id, today_data)
+    await bot_instance.send_message(user_id, text)
+
+
+async def send_checkin(user_id: int) -> None:
+    """Evening check-in: summary + memory-candidate review (21:30 ritual)."""
+    async with database.session() as db:
+        summary = await briefs.evening_summary(db, user_id)
+        candidates = await briefs.pending_candidates(db, user_id)
+    await bot_instance.send_message(user_id, summary)
+    if candidates:
+        await bot_instance.send_message(
+            user_id, f"🧠 Розберемо пам'ять — кандидатів: {len(candidates)}")
+        for item in candidates:
+            await bot_instance.send_message(
+                user_id, f"🧠 {item.content}", reply_markup=_memory_kb(item.id))
 
 
 def _is_owner(entity) -> bool:
@@ -59,11 +91,12 @@ async def cmd_start(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer(
-        "Привіт, Данило! <b>DAN.OS</b> · раунд 1 🟢\n\n"
-        "Кидай мені текст або голосове:\n"
-        "• «нагадай завтра о 10 подзвонити в банк» → задача з нагадуванням\n"
+        "Привіт, Данило! <b>DAN.OS</b> · раунд 2 🟢\n\n"
+        "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
-        "• /today — план на сьогодні"
+        "• /today — план · /brief — бриф · /checkin — вечірній розбір\n"
+        "• /connect_google — календар і пошта у брифі\n"
+        f"• ранковий бриф о {settings.brief_time}, чек-ін о {settings.checkin_time}"
     )
 
 
@@ -74,6 +107,38 @@ async def cmd_today(message: Message) -> None:
     async with database.session() as db:
         data = await orch.today(db, user_id=message.from_user.id)
     await message.answer(today_card(data))
+
+
+@router.message(Command("brief"))
+async def cmd_brief(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    await send_brief(message.from_user.id)
+
+
+@router.message(Command("checkin"))
+async def cmd_checkin(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    await send_checkin(message.from_user.id)
+
+
+@router.message(Command("connect_google"))
+async def cmd_connect_google(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    if not (settings.google_client_id and settings.google_client_secret):
+        await message.answer(
+            "Google ще не сконфігуровано на сервері — чекаю Client ID/Secret "
+            "(файл danos-google-client.txt)")
+        return
+    url = google_client.auth_url(message.from_user.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔐 Підключити Google", url=url)]])
+    await message.answer(
+        "Тисни кнопку, обери свій акаунт і дозволь доступ (лише читання "
+        "календаря і пошти). Екран «Google hasn't verified this app» — "
+        "це нормально: Advanced → Go to DAN.OS.", reply_markup=kb)
 
 
 @router.message(Command("ping"))
@@ -188,6 +253,15 @@ async def on_callback(cb: CallbackQuery) -> None:
                 status = await orch.cancel_task(db, user_id=user_id, task_id=ref)
                 await cb.message.edit_reply_markup(reply_markup=None)
                 await cb.answer("Скасовано 🚫" if status == "cancelled" else status)
+            elif action == "mo":
+                status = await orch.confirm_memory(db, user_id=user_id, item_id=ref)
+                if status in ("confirmed", "already"):
+                    await cb.message.edit_text(f"🧠✅ {cb.message.text[2:].strip()}")
+                await cb.answer("У пам'яті ✅" if status == "confirmed" else status)
+            elif action == "mx":
+                status = await orch.reject_memory(db, user_id=user_id, item_id=ref)
+                await cb.message.edit_text("🗑 Відкинуто")
+                await cb.answer()
             else:
                 await cb.answer("Невідома дія")
     except PolicyDenied as e:

@@ -111,3 +111,33 @@ class UserState(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     pending_edit_proposal: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class GoogleCredential(Base):
+    """OAuth tokens for Google (refresh token encrypted with Fernet)."""
+    __tablename__ = "google_credentials"
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    refresh_token_enc: Mapped[str] = mapped_column(Text)
+    access_token: Mapped[str] = mapped_column(Text, default="")
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scopes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class AppState(Base):
+    """Small key/value store for ritual bookkeeping (last brief date etc.)."""
+    __tablename__ = "app_state"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ChatLog(Base):
+    """Short conversation window for multi-turn chat context (trimmed reads)."""
+    __tablename__ = "chat_log"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    role: Mapped[str] = mapped_column(String(8))  # user|bot
+    text: Mapped[str] = mapped_column(Text)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

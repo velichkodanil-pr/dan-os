@@ -1,8 +1,8 @@
-"""Reminder scheduler: polls the DB every 30s and fires due reminders.
+"""Reminder scheduler + daily rituals (morning brief, evening check-in).
 
-DB polling (instead of in-memory jobs) survives restarts and redeploys by
-design: a reminder missed while the service was down fires on the next tick,
-marked as late. Firing is idempotent via the status transition UPDATE.
+One 30s DB-polling loop: survives restarts, no in-memory jobs. Rituals are
+claimed in app_state per day (run-then-claim: a crash between send and claim
+may repeat once next tick — preferred over silently losing a brief).
 """
 import asyncio
 import logging
@@ -13,13 +13,23 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.core.audit import audit
-from app.models import Reminder, Task
+from app.models import AppState, Reminder, Task
 from app import db as database
 
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 30
 _task: asyncio.Task | None = None
+
+
+def ritual_due(last_run_date: str | None, now_local: datetime, time_str: str) -> bool:
+    """Pure decision: is the daily ritual due now? (testable)"""
+    try:
+        hh, mm = (int(x) for x in time_str.split(":"))
+    except ValueError:
+        return False
+    target = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return now_local >= target and last_run_date != now_local.date().isoformat()
 
 
 async def _fire_due(send_message) -> None:
@@ -43,26 +53,49 @@ async def _fire_due(send_message) -> None:
                 await send_message(reminder.user_id, text, task_id=str(task.id))
                 reminder.status = "fired"
                 await audit(db, actor="system:scheduler", action="reminder.fired",
-                            resource_type="reminder", resource_id=reminder.id,
-                            late=late)
+                            resource_type="reminder", resource_id=reminder.id, late=late)
             except Exception:
                 logger.exception("reminder send failed; will retry next tick")
         await db.commit()
 
 
-async def _loop(send_message) -> None:
+async def _run_rituals(run_brief, run_checkin) -> None:
+    owner = settings.owner_telegram_id
+    if not owner:
+        return
+    now_local = datetime.now(ZoneInfo(settings.tz_name))
+    for key, time_str, fn in (("brief", settings.brief_time, run_brief),
+                              ("checkin", settings.checkin_time, run_checkin)):
+        async with database.session() as db:
+            state = await db.get(AppState, f"last_{key}")
+            if not ritual_due(state.value if state else None, now_local, time_str):
+                continue
+            try:
+                await fn(owner)
+            except Exception:
+                logger.exception("ritual %s failed; retry next tick", key)
+                continue
+            state = state or AppState(key=f"last_{key}")
+            state.value = now_local.date().isoformat()
+            db.add(state)
+            await audit(db, actor="system:scheduler", action=f"ritual.{key}",
+                        resource_type="ritual", resource_id=key)
+            await db.commit()
+
+
+async def _loop(send_message, run_brief, run_checkin) -> None:
     while True:
         try:
             await _fire_due(send_message)
+            await _run_rituals(run_brief, run_checkin)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
-def start(send_message) -> None:
-    """send_message: async (user_id, html_text, task_id) -> None"""
+def start(send_message, run_brief, run_checkin) -> None:
     global _task
-    _task = asyncio.create_task(_loop(send_message))
+    _task = asyncio.create_task(_loop(send_message, run_brief, run_checkin))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

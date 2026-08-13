@@ -1,38 +1,41 @@
 # STATUS
 
-_Last verified: 2026-08-13 (round 1 implementation session)_
+_Last verified: 2026-08-13 (round 2 implementation session)_
 
-## Round 0 — Foundation: DONE, gate CLOSED (2026-08-13)
+## Round 0 — Foundation: DONE (gate closed 2026-08-13)
+## Round 1 — Vertical slice: DONE (gate closed 2026-08-13, verified from phone)
 
-Bot @danOS_AI_bot live on Railway (dan-os-production.up.railway.app), webhook active,
-owner allowlist set (OWNER_TELEGRAM_ID), deploy pipeline GitHub main → Railway green.
+Voice/text → raw event (dedupe) → Haiku extraction → preview ✅✏️❌ → task →
+/today → reminder → audit. 9 tests green. Live on Railway.
 
-## Round 1 — Vertical slice: DELIVERED (gate: phone check pending)
+## Round 2 — Secretary: DELIVERED (gate: waiting for Google OAuth client + live brief)
 
-Text/voice note → immutable raw event (dedupe) → extraction (Haiku / deterministic mock)
-→ preview card ✅✏️❌ → approve → task → /today → reminder → append-only audit.
+- Google OAuth through the bot's own domain (web flow): /connect_google →
+  signed-state URL → /google/oauth/callback → refresh token stored Fernet-encrypted.
+  Read-only scopes (calendar.readonly, gmail.readonly).
+- Morning brief (07:30 Kyiv, `BRIEF_TIME`): calendar today + overnight inbox top +
+  tasks/overdue + candidates count. /brief on demand. Works without Google
+  (tasks-only + connect hint).
+- Evening check-in (21:30, `CHECKIN_TIME`): day summary + memory-candidate review
+  with ✅/❌ per item. /checkin on demand.
+- Rituals run from the same 30s DB-poll loop; once-per-day claim in app_state
+  (run-then-claim), restart-safe.
+- Persona + context: extraction/chat prompt now carries confirmed profile facts
+  (≤12) and an 8-message conversation window (chat_log).
+- Memory review: confirm/reject (L2, idempotent, audited).
 
-- DB: Postgres via SQLAlchemy async + Alembic (`7bcd20078579` r1 core tables:
-  raw_events, proposals, tasks, reminders, memory_items, audit_log, user_state).
-- Policy L0–L5 deterministic in `app/core/policy.py`; external writes denied; unknown denied.
-- Providers: `ExtractionProvider` (claude-haiku-4-5 | mock), `TranscriptionProvider`
-  (gpt-4o-mini-transcribe | mock). System runs without AI keys in mock mode.
-- Reminders: DB-polling loop (30s), restart-safe, late reminders marked, cancelled with task.
-- Edit flow: ✏️ sets pending state; next message creates proposal v2, v1 superseded.
-- Memory: "запам'ятай …" and approval memory_text create `candidate` items with provenance.
-
-Tests: **9 passed** (replay dedupe, double-approve idempotency, superseded conflict,
-policy denials, non-owner isolation, reminder cancel with task, audit completeness,
-memory candidate, injection-shaped text stays data) + migration up smoke. Local boot
-smoke with DB: `/health/ready` → `db:true`.
+Tests: **15 passed** (9 R1 + 6 R2: confirm/reject idempotency, owner-only review,
+state sign/verify/tamper/expiry, ritual once-per-day, brief w/o Google, chat log).
+Migrations: `7bcd20078579` + `3bb2753afe37`.
 
 Gate check:
 
-- [x] Tests green
-- [ ] Scenario verified from Danylo's phone (voice → card → approve → /today → reminder)
+- [x] Tests green, deploy green
+- [ ] Google client configured (Danylo) → /connect_google → /brief with real data
+- [ ] Brief arrives at 07:30, check-in reviews candidates
 
 ## Known limitations
 
-- Free chat replies are single-turn (no conversation memory) — round 2.
-- Memory candidates accumulate without review UI — evening check-in in round 2.
-- pgvector not verified/enabled yet — round 3.
+- Email "top" is latest-inbox heuristic, no importance ranking yet (R3).
+- No Gmail drafts/calendar writes (R3+, L3 with preview).
+- pgvector/RAG not enabled yet (R3).

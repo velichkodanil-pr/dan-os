@@ -32,11 +32,18 @@ class ExtractResult:
 
 
 class ExtractionProvider(Protocol):
-    async def extract(self, text: str, user_name: str) -> ExtractResult: ...
+    async def extract(self, text: str, user_name: str = "Данило",
+                      context: dict | None = None) -> ExtractResult: ...
 
 
-_PROMPT = """Ти — модуль екстракції особистого асистента DAN.OS користувача {user_name}.
+_PROMPT = """Ти — DAN.OS, особиста AI-операційна система користувача {user_name}:
+секретар, компаньйон, радник, тренер, товариш і колега в одній особі.
 Зараз: {now} ({tz}).
+
+Персона для reply: українською, на «ти», коротко і по суті, дружньо, з легким
+гумором доречно. Чесно визнавай невизначеність. Не вигадуй фактів, цін і дат.
+Ти AI і не приховуєш цього. Не давай медичних/юридичних/фінансових порад як фахівець.
+{profile_block}{history_block}
 
 Проаналізуй повідомлення користувача і поверни СТРОГО один JSON-об'єкт без markdown:
 {{"intent":"task|note|chat",
@@ -62,13 +69,31 @@ _PROMPT = """Ти — модуль екстракції особистого а�
 </message>"""
 
 
+def _context_blocks(context: dict | None) -> tuple[str, str]:
+    profile_block = history_block = ""
+    if context:
+        facts = context.get("profile") or []
+        if facts:
+            profile_block = ("\nЩо ти знаєш про користувача (підтверджена пам'ять):\n"
+                             + "\n".join(f"- {f}" for f in facts[:12]) + "\n")
+        history = context.get("history") or []
+        if history:
+            lines = "\n".join(f"{'Користувач' if r == 'user' else 'Ти'}: {t[:200]}"
+                              for r, t in history[-8:])
+            history_block = f"\nОстанні репліки розмови:\n{lines}\n"
+    return profile_block, history_block
+
+
 class HaikuExtractionProvider:
-    async def extract(self, text: str, user_name: str = "Данило") -> ExtractResult:
+    async def extract(self, text: str, user_name: str = "Данило",
+                      context: dict | None = None) -> ExtractResult:
         tz = ZoneInfo(settings.tz_name)
         now = datetime.now(tz)
+        profile_block, history_block = _context_blocks(context)
         prompt = _PROMPT.format(
             user_name=user_name, now=now.strftime("%A %Y-%m-%d %H:%M"), tz=settings.tz_name,
             text=text[:MAX_INPUT_CHARS],
+            profile_block=profile_block, history_block=history_block,
         )
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -119,7 +144,8 @@ def _parse(raw: str, original: str) -> ExtractResult:
 class MockExtractionProvider:
     """Deterministic extractor for tests/local runs without an AI provider."""
 
-    async def extract(self, text: str, user_name: str = "Данило") -> ExtractResult:
+    async def extract(self, text: str, user_name: str = "Данило",
+                      context: dict | None = None) -> ExtractResult:
         tz = ZoneInfo(settings.tz_name)
         now = datetime.now(tz)
         low = text.lower()

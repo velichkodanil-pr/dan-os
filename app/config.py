@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     stt_model: str = "gpt-4o-mini-transcribe"
     tz_name: str = "Europe/Kyiv"
 
+    # Round 2: Google + rituals
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    cred_key: str = ""  # Fernet key for encrypting stored OAuth tokens
+    brief_time: str = "07:30"
+    checkin_time: str = "21:30"
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

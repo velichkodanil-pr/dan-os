@@ -2,6 +2,21 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Round 2
+
+- Google OAuth runs through the bot's own public domain (web-app client +
+  /google/oauth/callback) — no local scripts; state is HMAC-signed (webhook
+  secret), 15-min TTL, owner-only. Consent screen published to Production
+  immediately (avoids 7-day refresh-token expiry of Testing mode).
+- Refresh tokens stored Fernet-encrypted (`CRED_KEY` env); scopes strictly
+  read-only (calendar.readonly, gmail.readonly) — writes stay L3+ for later rounds.
+- Rituals (brief/check-in) share the 30s DB-poll loop; per-day claim in
+  app_state, run-then-claim (a crash may repeat once; never silently skips).
+- Chat persona lives in the single extraction prompt (no second model call);
+  context = ≤12 confirmed facts + 8-message chat_log window.
+- Memory candidate review statuses: candidate → confirmed | rejected; decided
+  items never flip status (idempotent buttons).
+
 ## 2026-08-13 — Round 1
 
 - Reminders use a DB-polling loop (30s tick, `FOR UPDATE SKIP LOCKED`) instead of

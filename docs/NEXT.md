@@ -1,22 +1,23 @@
 # NEXT — the one authorized round
 
-## Round 2 — Secretary (~1 week)
+## Round 3 — Knowledge (~2-3 weeks)
 
 Scope (Plan v1.1 section 10):
 
-1. Google OAuth (installed-app flow, minimal scopes: Calendar read, Gmail read).
-   App in Production mode from day one (avoid 7-day refresh-token expiry).
-2. Morning brief 07:30 Kyiv: calendar events, top emails overnight, today's tasks,
-   deadlines. One compact message; quiet hours respected.
-3. Evening check-in 21:30 (opt-in): day summary + memory-candidate review
-   (confirm ✅ / reject ❌ per candidate).
-4. Profile memory: confirmed facts injected into extraction/chat context.
-5. Persona: DAN.OS system prompt (TRUTH/MEMORY/PRIVACY/TOOLS/PROACTIVITY/SAFETY
-   structure from docs/product) + multi-turn chat with short conversation window.
-6. /brief command for on-demand brief.
+1. Verify/enable pgvector on the Railway Postgres; embeddings via
+   text-embedding-3-small behind a thin EmbeddingProvider.
+2. Ingest into the knowledge base (raw → indexed): forwarded messages, documents
+   sent to the chat (pdf/docx/txt), selected Drive folders (read-only).
+3. RAG answers with source + date attribution ("звідки ти це знаєш").
+4. Gmail digest 2×/day (P2 bundle) + email drafts as L3 (preview + confirm,
+   draft only — no send).
+5. Memory conflicts: detect contradicting confirmed facts → show both versions →
+   supersede with history.
+6. Coverage map v1: weekly analysis (unanswered questions, repeated manual
+   uploads) → 1-3 source suggestions with value/permissions/risk.
 
-Out of scope: Gmail drafts/send, calendar writes, Drive, RAG, Mini App, Travelon.
+Out of scope: Mini App, Travelon gateway, Zoom, Android, email send, calendar writes.
 
-Gate: brief arrives at 07:30 with real calendar+email data; candidate review works;
-no task lost during the week; tests extended (OAuth token storage, brief builder,
-candidate confirm/reject idempotency).
+Gate: bot answers a question from an ingested document with source; at least one
+useful source suggestion produced; digest arrives twice a day; tests extended
+(ingest dedupe, RAG provenance, conflict flow, digest builder).
