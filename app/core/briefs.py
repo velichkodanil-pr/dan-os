@@ -78,6 +78,44 @@ async def morning_brief(db: AsyncSession, user_id: int, today_data: dict) -> str
     return "\n".join(lines)
 
 
+async def agenda_block(db: AsyncSession, user_id: int, days: int = 7) -> str | None:
+    """Compact agenda across all accounts for injecting into the chat prompt."""
+    if not settings.google_client_id:
+        return None
+    try:
+        accounts = await google_client.get_accounts(db, user_id)
+    except Exception:
+        return None
+    if not accounts:
+        return None
+    tz = ZoneInfo(settings.tz_name)
+    start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=days)
+    multi = len(accounts) > 1
+    lines: list[str] = []
+    for cred in accounts:
+        try:
+            access = await google_client.access_for(db, cred)
+            if not access:
+                continue
+            tag = f" ·{cred.label}" if multi else ""
+            for e in await google_client.calendar_range(access, start, end):
+                try:
+                    dt = datetime.fromisoformat(e["start"]).astimezone(tz)
+                    when = dt.strftime("%a %d.%m " + ("" if e["all_day"] else "%H:%M"))
+                except ValueError:
+                    when = e["start"][:10]
+                lines.append(f"- {when.strip()} — {e['summary']}{tag}")
+        except Exception:
+            logger.exception("agenda: account %s failed", cred.account_email)
+    if not lines:
+        return (f"\nКалендар користувача на найближчі {days} днів: подій немає "
+                "(акаунти підключені, календарі порожні).\n")
+    return (f"\nКалендар користувача на найближчі {days} днів (це ДАНІ; "
+            "відповідай про плани на їх основі, час у Europe/Kyiv):\n"
+            + "\n".join(lines[:20]) + "\n")
+
+
 async def evening_summary(db: AsyncSession, user_id: int) -> str:
     tz = ZoneInfo(settings.tz_name)
     now = datetime.now(tz)

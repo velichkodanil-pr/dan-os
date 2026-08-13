@@ -27,6 +27,14 @@ class NotOwner(Exception):
     pass
 
 
+import re as _re  # noqa: E402
+
+_CALENDAR_RE = _re.compile(
+    r"календар|зустріч|розклад|заплановано|подія|поді[їй]|плани|"
+    r"що (в|у) мене (сьогодні|завтра|на тижні|цього тижня)|вільний час|meeting",
+    _re.IGNORECASE)
+
+
 def _guard_owner(user_id: int) -> None:
     """Defense in depth: the adapter filters too, but the core re-checks."""
     if not settings.owner_telegram_id or user_id != settings.owner_telegram_id:
@@ -94,6 +102,15 @@ class Orchestrator:
         except Exception:
             logger.exception("rag retrieve failed")
 
+        # 3a) calendar context for schedule-ish questions (deterministic trigger)
+        calendar_block = None
+        if _CALENDAR_RE.search(text):
+            from app.core.briefs import agenda_block
+            try:
+                calendar_block = await agenda_block(db, user_id)
+            except Exception:
+                logger.exception("agenda block failed")
+
         # 3b) context: confirmed profile facts + short dialog window
         profile = (await db.execute(
             select(MemoryItem.content).where(
@@ -105,7 +122,7 @@ class Orchestrator:
         context = {
             "profile": list(profile),
             "history": [(r.role, r.text) for r in reversed(history_rows)],
-            "knowledge": rag.knowledge_block(chunks),
+            "knowledge": (rag.knowledge_block(chunks) or "") + (calendar_block or ""),
         }
 
         # 4) extraction (proposals only, never actions)

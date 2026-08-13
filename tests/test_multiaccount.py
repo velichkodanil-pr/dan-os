@@ -46,3 +46,13 @@ async def test_access_for_uses_cached_token(db, monkeypatch):
     await google_client.store_tokens(db, OWNER, _tokens())
     cred = (await google_client.get_accounts(db, OWNER))[0]
     assert await google_client.access_for(db, cred) == "a1"
+
+
+# 3. Calendar-question detector (deterministic trigger for agenda context)
+def test_calendar_trigger():
+    from app.core.orchestrator import _CALENDAR_RE
+    for t in ("Що в календарі на завтра?", "які плани на тиждень",
+              "що у мене завтра", "коли наступна зустріч", "розклад на пʼятницю"):
+        assert _CALENDAR_RE.search(t), t
+    for t in ("нагадай завтра о 10 подзвонити", "запам'ятай: Юра любить каву"):
+        assert not _CALENDAR_RE.search(t), t

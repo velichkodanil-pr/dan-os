@@ -171,9 +171,11 @@ async def cmd_connect_google(message: Message) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔐 Підключити Google", url=url)]])
     await message.answer(
-        "Тисни кнопку, обери свій акаунт і дозволь доступ (лише читання "
-        "календаря і пошти). Екран «Google hasn't verified this app» — "
-        "це нормально: Advanced → Go to DAN.OS.", reply_markup=kb)
+        "Тисни кнопку й обери акаунт (можна додати кілька — кожен прохід "
+        "додає ще один). На екрані дозволів постав УСІ галочки: календар, "
+        "Gmail (читання і чернетки), Drive — все лише читання, крім чернеток. "
+        "Попередження «Google hasn't verified» — нормально для власного "
+        "застосунку: Продовжити.", reply_markup=kb)
 
 
 @router.message(Command("ping"))

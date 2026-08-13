@@ -190,20 +190,16 @@ async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
 
 # ---------- read-only data ----------
 
-async def calendar_today(access_token: str) -> list[dict]:
-    tz = ZoneInfo(settings.tz_name)
-    now = datetime.now(tz)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
+async def calendar_range(access_token: str, start: datetime, end: datetime) -> list[dict]:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             headers={"Authorization": f"Bearer {access_token}"},
             params={"timeMin": start.isoformat(), "timeMax": end.isoformat(),
-                    "singleEvents": "true", "orderBy": "startTime", "maxResults": 10},
+                    "singleEvents": "true", "orderBy": "startTime", "maxResults": 25},
         )
     if resp.status_code != 200:
-        logger.error("calendar_today failed: %s", resp.status_code)
+        logger.error("calendar_range failed: %s", resp.status_code)
         return []
     events = []
     for item in resp.json().get("items", []):
@@ -214,6 +210,12 @@ async def calendar_today(access_token: str) -> list[dict]:
             "all_day": "date" in start_raw,
         })
     return events
+
+
+async def calendar_today(access_token: str) -> list[dict]:
+    tz = ZoneInfo(settings.tz_name)
+    start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return await calendar_range(access_token, start, start + timedelta(days=1))
 
 
 # ---------- drive (read-only) ----------
