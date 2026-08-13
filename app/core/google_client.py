@@ -424,8 +424,19 @@ def drive_indexable(f: dict) -> bool:
         return False
 
 
+class DriveAccessError(Exception):
+    """Drive API refused (401/403): API disabled in the Cloud project or the
+    token lacks the drive scope. api_disabled tells the two apart."""
+
+    def __init__(self, status: str, api_disabled: bool):
+        self.api_disabled = api_disabled
+        super().__init__(status)
+
+
 async def drive_list_all(access_token: str, max_files: int = 300) -> list[dict]:
-    """Whole-Drive listing (newest first), filtered to indexable files."""
+    """Whole-Drive listing (newest first), filtered to indexable files.
+    Raises DriveAccessError on 401/403 — an access problem is NOT an empty
+    Drive, and the caller must say so honestly."""
     files: list[dict] = []
     page_token: str | None = None
     async with httpx.AsyncClient(timeout=60) as client:
@@ -438,6 +449,13 @@ async def drive_list_all(access_token: str, max_files: int = 300) -> list[dict]:
             resp = await client.get(
                 "https://www.googleapis.com/drive/v3/files",
                 headers={"Authorization": f"Bearer {access_token}"}, params=params)
+            if resp.status_code in (401, 403):
+                logger.error("drive_list_all denied: %s %s",
+                             resp.status_code, resp.text[:200])
+                raise DriveAccessError(
+                    str(resp.status_code),
+                    api_disabled="has not been used in project" in resp.text
+                    or "it is disabled" in resp.text)
             if resp.status_code != 200:
                 logger.error("drive_list_all failed: %s %s",
                              resp.status_code, resp.text[:120])

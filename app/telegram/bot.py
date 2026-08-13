@@ -465,6 +465,20 @@ async def _index_all_drive(user_id: int) -> None:
             try:
                 files = await google_client.drive_list_all(
                     access, settings.drive_index_max)
+            except google_client.DriveAccessError as e:
+                if e.api_disabled:
+                    await bot_instance.send_message(
+                        user_id,
+                        f"⚠️ {cred.account_email}: <b>Drive API вимкнений</b> у "
+                        "Cloud-проєкті. Увімкни (один клік) і запусти /drive_all "
+                        "знову:\nconsole.cloud.google.com/apis/library/"
+                        "drive.googleapis.com")
+                else:
+                    await bot_instance.send_message(
+                        user_id,
+                        f"⚠️ {cred.account_email}: немає дозволу на Drive — "
+                        "перепідключи /connect_google і постав галочку Drive.")
+                continue
             except Exception:
                 logger.exception("drive_list_all failed")
                 await bot_instance.send_message(
