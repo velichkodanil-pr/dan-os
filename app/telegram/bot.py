@@ -516,9 +516,11 @@ async def _index_all_drive(user_id: int) -> None:
                             _Doc.source_type == "drive",
                             _Doc.source_ref == f["id"])
                             .limit(1))).scalar_one_or_none()
+                    from app.core.ingest import INGEST_VERSION
                     if (prev is not None and f.get("modifiedTime")
                             and (prev.meta or {}).get("modifiedTime")
-                            == f["modifiedTime"]):
+                            == f["modifiedTime"]
+                            and (prev.meta or {}).get("v") == INGEST_VERSION):
                         dups += 1
                         continue
                     name, data = await google_client.drive_download_text_source(
@@ -526,7 +528,8 @@ async def _index_all_drive(user_id: int) -> None:
                     from app.core.ingest import (delete_stale_versions,
                                                  ingest_document_parts,
                                                  ingest_xlsx_by_sheets)
-                    meta = {"modifiedTime": f.get("modifiedTime", "")}
+                    meta = {"modifiedTime": f.get("modifiedTime", ""),
+                            "v": INGEST_VERSION}
                     async with database.session() as db:
                         if name.lower().endswith(".xlsx"):
                             results = await ingest_xlsx_by_sheets(

@@ -83,21 +83,29 @@ async def _t_get_recent_mail(db, user_id, args):
     accounts = await google_client.get_accounts(db, user_id)
     if not accounts:
         return {"error": "Google не підключено (/connect_google)"}
-    out, broken = [], []
+    out, problems = [], []
     for cred in accounts:
         try:
             access = await google_client.access_for(db, cred)
             if not access:
-                broken.append(cred.account_email)
+                problems.append(f"{cred.account_email}: токен потребує "
+                                "перепідключення (/connect_google)")
                 continue
             for m in await google_client.gmail_recent(access, hours=48, limit=limit):
                 out.append({**m, "account": cred.account_email})
+        except google_client.GmailAccessError as e:
+            problems.append(
+                f"{cred.account_email}: Gmail API ВИМКНЕНИЙ у Cloud-проєкті — "
+                "власнику треба увімкнути console.cloud.google.com/apis/library/"
+                "gmail.googleapis.com" if e.api_disabled else
+                f"{cred.account_email}: немає дозволу на Gmail — /connect_google "
+                "з галочками пошти")
         except Exception:
             logger.exception("mail tool: %s failed", cred.account_email)
-            broken.append(cred.account_email)
+            problems.append(f"{cred.account_email}: тимчасова помилка")
     result = {"messages": out[:limit * 2]}
-    if broken:
-        result["unavailable_accounts"] = broken
+    if problems:
+        result["problems"] = problems
     return result
 
 

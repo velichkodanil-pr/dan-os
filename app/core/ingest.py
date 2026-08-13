@@ -20,6 +20,8 @@ from app.models import Document, KnowledgeChunk
 
 logger = logging.getLogger(__name__)
 
+INGEST_VERSION = 2  # bump when extraction/splitting logic changes:
+# skipped-by-modifiedTime files are re-processed under the new pipeline
 MAX_DOC_BYTES = 15 * 1024 * 1024
 MAX_CHARS = 400_000
 CHUNK_SIZE = 800

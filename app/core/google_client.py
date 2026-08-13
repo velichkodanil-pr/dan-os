@@ -603,6 +603,14 @@ async def gmail_create_draft(access_token: str, *, to_addr: str, subject: str,
     return resp.json().get("id", "")
 
 
+class GmailAccessError(Exception):
+    """Gmail API refused (401/403): API disabled in the project or scope missing."""
+
+    def __init__(self, status: str, api_disabled: bool):
+        self.api_disabled = api_disabled
+        super().__init__(status)
+
+
 async def gmail_recent(access_token: str, hours: int = 16, limit: int = 5) -> list[dict]:
     query = f"in:inbox newer_than:{max(1, hours // 24 + 1)}d -category:promotions -category:social"
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -611,6 +619,11 @@ async def gmail_recent(access_token: str, hours: int = 16, limit: int = 5) -> li
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             headers=headers, params={"q": query, "maxResults": limit},
         )
+        if resp.status_code in (401, 403):
+            logger.error("gmail denied: %s %s", resp.status_code, resp.text[:200])
+            raise GmailAccessError(str(resp.status_code),
+                                   api_disabled="has not been used in project"
+                                   in resp.text or "is disabled" in resp.text)
         if resp.status_code != 200:
             logger.error("gmail list failed: %s", resp.status_code)
             return []
