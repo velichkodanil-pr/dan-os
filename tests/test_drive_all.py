@@ -122,3 +122,26 @@ async def test_rag_keyword_fallback_finds_credential_row(db):
     chunks = await rag.retrieve(db, user_id=111, query="який логін до Toco?")
     joined = " ".join(c.text for c in chunks)
     assert "i.k@travelon.to" in joined, "keyword fallback must surface the row"
+
+
+@pytest.mark.asyncio
+async def test_rag_cyrillic_query_finds_latin_brand(db):
+    """«ТОКО» кирилицею має знаходити рядок із «Toco» латиницею (translit bridge)."""
+    from app.core.ingest import ingest_document
+    from app.core import rag
+    await ingest_document(
+        db, user_id=111, title="Доступи (DMC)",
+        text=("Паролі від інших операторів\n\n"
+              "Other | Toco UA | https://toco-tour.example | i.k@travelon.to | Secret1\n\n"
+              + "\n\n".join(f"Нейтральний рядок {i} про бронювання" for i in range(30))),
+        source_type="drive", source_ref="dmc2")
+    chunks = await rag.retrieve(db, user_id=111, query="який логін до ТОКО Україна?")
+    joined = " ".join(c.text for c in chunks)
+    assert "i.k@travelon.to" in joined
+
+
+def test_token_variants_translit():
+    from app.core.rag import _token_variants
+    v = _token_variants("токо")
+    assert "toko" in v and "toco" in v and "ТОКО" in v
+    assert _token_variants("anex") == {"anex"}  # latin stays as-is (ILIKE folds)

@@ -35,29 +35,64 @@ _LOOKUP_RE = re.compile(r"логін|пароль|доступ|реквізит|
                         re.IGNORECASE)
 _WORD_RE = re.compile(r"[\w'-]{4,}", re.UNICODE)
 _STOP = {"який", "яка", "яке", "котрий", "будь", "ласка", "мене", "мені",
-         "логін", "пароль", "доступ", "реквізити", "login", "password", "скажи"}
+         "логін", "пароль", "доступ", "реквізити", "login", "password", "скажи",
+         "сайт", "site", "яку", "яких"}
+
+_TRANSLIT = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e",
+    "є": "ie", "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "i", "й": "i",
+    "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts", "ч": "ch",
+    "ш": "sh", "щ": "shch", "ь": "", "ю": "iu", "я": "ia", "э": "e", "ы": "y",
+    "ъ": "", "ё": "e"})
+
+
+def _token_variants(token: str) -> set[str]:
+    """Search variants: the token itself; for Cyrillic — case forms (C-locale
+    ILIKE folds only ASCII) and Latin transliterations (брендові назви в
+    таблицях частіше латиницею: ТОКО -> toko/toco)."""
+    variants = {token}
+    if re.search(r"[а-яїієґ]", token):
+        variants |= {token.capitalize(), token.upper()}
+        latin = token.translate(_TRANSLIT)
+        if len(latin) >= 3:
+            variants.add(latin)
+            if "k" in latin:
+                variants.add(latin.replace("k", "c"))
+    return variants
 
 
 async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
-                        limit: int = 3) -> list[RetrievedChunk]:
+                        limit: int = 4) -> list[RetrievedChunk]:
     """Exact-substring fallback for lookup questions: semantic search can lose
     a credentials ROW to thematically-similar prose; ILIKE on the distinctive
-    tokens (partner/service names) finds the row itself."""
+    tokens (partner/service names) finds the row itself. Ranked by how many
+    distinct tokens a chunk matches — not by document age."""
     tokens = [w for w in _WORD_RE.findall(query.lower()) if w not in _STOP][:4]
     if not tokens:
         return []
+    variant_map = {t: _token_variants(t) for t in tokens}
+    all_variants = [v for vs in variant_map.values() for v in vs][:14]
+    if not all_variants:
+        return []
     from sqlalchemy import or_
-    cond = or_(*[KnowledgeChunk.text.ilike(f"%{t}%") for t in tokens])
+    cond = or_(*[KnowledgeChunk.text.ilike(f"%{v}%") for v in all_variants])
     rows = (await db.execute(
         select(KnowledgeChunk.text, Document.title, Document.created_at)
         .join(Document, Document.id == KnowledgeChunk.document_id)
         .where(KnowledgeChunk.user_id == user_id, cond)
         .order_by(Document.created_at.desc())
-        .limit(limit)
+        .limit(16)
     )).all()
+
+    def score(text: str) -> int:
+        low = text.lower()
+        return sum(1 for t, vs in variant_map.items()
+                   if any(v.lower() in low for v in vs))
+    ranked = sorted(rows, key=lambda r: -score(r.text))[:limit]
     return [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
                            distance=0.0)
-            for r in rows]
+            for r in ranked]
 
 
 async def retrieve(db: AsyncSession, *, user_id: int, query: str,
