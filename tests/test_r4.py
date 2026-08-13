@@ -139,6 +139,7 @@ SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
     </customers>
     <costs>
       <gross-cost>85000.50</gross-cost>
+      <debt-agency-in-currency>15000.0</debt-agency-in-currency>
       <amount-of-debt>15000.0</amount-of-debt>
     </costs>
   </order>
@@ -162,19 +163,34 @@ SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
     <status>Confirmed</status>
     <create-date>01.08.2026</create-date>
     <valute>EUR</valute>
+    <local-currency>UAH</local-currency>
+    <rate>52.45</rate>
     <transport>
       <depart-departure-date>15.08.2026</depart-departure-date>
       <depart-charter-name>Chisinau - Antalya</depart-charter-name>
     </transport>
     <customers><customer><name>X</name></customer></customers>
-    <costs><gross-cost>359.0</gross-cost><amount-of-debt>359.0</amount-of-debt></costs>
+    <costs><gross-cost>359.0</gross-cost>
+      <debt-agency-in-currency>359.0</debt-agency-in-currency>
+      <amount-of-debt>18829.55</amount-of-debt></costs>
+  </order>
+  <order>
+    <id>67999</id>
+    <order>67999</order>
+    <status>Confirmed</status>
+    <create-date>02.08.2026</create-date>
+    <valute>EUR</valute>
+    <rate>52.45</rate>
+    <local-currency>UAH</local-currency>
+    <costs><gross-cost>100.0</gross-cost>
+      <amount-of-debt>5245.0</amount-of-debt></costs>
   </order>
 </orders>"""
 
 
 def test_travelon_parse_minimal_fields():
     orders = travelon.parse_orders(SAMPLE_XML)
-    assert len(orders) == 3
+    assert len(orders) == 4
     o = orders[0]
     assert o.order_no == "59266" and o.status == "Confirmed"
     assert o.created == date(2026, 6, 10)
@@ -198,7 +214,25 @@ def test_travelon_parse_flight_only_fallbacks():
     o = travelon.parse_orders(SAMPLE_XML)[2]
     assert o.check_in == date(2026, 8, 15)
     assert o.country.startswith("✈️ Chisinau")
-    assert o.debt == 359.0 and o.tourists == 1
+    assert o.tourists == 1
+
+
+def test_travelon_debt_currency_semantics():
+    """debt = ORDER currency (debt-agency-in-currency); amount-of-debt = UAH."""
+    orders = travelon.parse_orders(SAMPLE_XML)
+    o = orders[2]  # both fields present
+    assert o.debt == 359.0 and o.currency == "EUR"
+    assert o.debt_local == 18829.55 and o.local_currency == "UAH"
+    assert "359 EUR" in travelon._fmt_debt(o) and "18 830 UAH" in travelon._fmt_debt(o)
+    # fallback: only amount-of-debt + rate -> compute the currency debt
+    f = orders[3]
+    assert f.debt == 100.0 and f.debt_local == 5245.0
+    # dust filter
+    dust = travelon.TravelonOrder(
+        order_no="1", status="Confirmed", created=None, hotel="", country="",
+        check_in=None, nights=None, tourists=0, gross_cost=1089.2,
+        currency="EUR", debt=0.72, debt_local=37.76, local_currency="UAH")
+    assert not travelon.has_debt(dust)
 
 
 def test_travelon_empty_orders_is_zero():

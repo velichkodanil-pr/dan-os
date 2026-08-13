@@ -45,8 +45,16 @@ class TravelonOrder:
     nights: int | None
     tourists: int
     gross_cost: float | None
-    currency: str
-    debt: float | None
+    currency: str  # order currency (valute), e.g. EUR — gross_cost and debt
+    debt: float | None  # debt-agency-in-currency: debt in the ORDER currency
+    debt_local: float | None = None  # amount-of-debt: same debt in UAH/local
+    local_currency: str = ""  # e.g. UAH
+
+MIN_DEBT = 1.0  # order-currency units; below this it's rounding dust
+
+
+def has_debt(o: TravelonOrder) -> bool:
+    return o.debt is not None and o.debt >= MIN_DEBT
 
 
 def _text(el, name: str) -> str:
@@ -93,6 +101,16 @@ def parse_orders(xml_text: str) -> list[TravelonOrder]:
             if not country:
                 charter = _text(transport_el, "depart-charter-name")
                 country = f"✈️ {charter[:30]}" if charter else ""
+        # debt semantics (verified on live orders): debt-agency-in-currency is
+        # in the ORDER currency (valute); amount-of-debt is the SAME debt in
+        # local currency (UAH), amount = debt * rate. Never mix the two.
+        debt_cur = debt_local = None
+        if costs_el is not None:
+            debt_cur = _num(_text(costs_el, "debt-agency-in-currency"))
+            debt_local = _num(_text(costs_el, "amount-of-debt"))
+            if debt_cur is None and debt_local is not None:
+                rate = _num(_text(o, "rate"))
+                debt_cur = round(debt_local / rate, 2) if rate else None
         orders.append(TravelonOrder(
             order_no=_text(o, "order") or _text(o, "id"),
             status=_text(o, "status"),
@@ -105,7 +123,9 @@ def parse_orders(xml_text: str) -> list[TravelonOrder]:
             tourists=len(customers),
             gross_cost=_num(_text(costs_el, "gross-cost")) if costs_el is not None else None,
             currency=_text(o, "valute"),
-            debt=_num(_text(costs_el, "amount-of-debt")) if costs_el is not None else None,
+            debt=debt_cur,
+            debt_local=debt_local,
+            local_currency=_text(o, "local-currency"),
         ))
     return orders
 
@@ -178,6 +198,14 @@ def _sum_by_currency(pairs) -> str:
     return " + ".join(_fmt_money(v, cur) for cur, v in sorted(sums.items())) or "—"
 
 
+def _fmt_debt(o: TravelonOrder) -> str:
+    """Debt in the order currency, with the local (UAH) equivalent."""
+    out = _fmt_money(o.debt, o.currency)
+    if o.debt_local and o.local_currency and o.local_currency != o.currency:
+        out += f" (≈{_fmt_money(o.debt_local, o.local_currency)})"
+    return out
+
+
 async def _pulse_compute() -> dict | None:
     """Fetch + aggregate the pulse (no cache). None on total failure."""
     tz = ZoneInfo(settings.tz_name)
@@ -195,7 +223,7 @@ async def _pulse_compute() -> dict | None:
     arr = _active(arrivals)
     arr_today = [o for o in arr if o.check_in == today]
     arr_tomorrow = [o for o in arr if o.check_in == today + timedelta(days=1)]
-    debtors = sorted((o for o in arr if o.debt and o.debt > 0),
+    debtors = sorted((o for o in arr if has_debt(o)),
                      key=lambda x: x.check_in or today)
     return {
         "date": today.strftime("%d.%m"),
@@ -209,7 +237,7 @@ async def _pulse_compute() -> dict | None:
             "when": o.check_in.strftime("%d.%m") if o.check_in else "—",
             "order_no": o.order_no,
             "where": o.country or o.hotel or "—",
-            "amount": _fmt_money(o.debt, o.currency),
+            "amount": _fmt_debt(o),
         } for o in debtors[:8]],
         "generated_at": datetime.now(tz).strftime("%H:%M"),
     }
@@ -302,9 +330,9 @@ def order_card(o: TravelonOrder) -> str:
         details.append(f"{o.tourists} тур.")
     lines.append(" · ".join(details))
     money = f"💰 {_fmt_money(o.gross_cost, o.currency)}"
-    if o.debt and o.debt > 0:
-        money += f" · борг {_fmt_money(o.debt, o.currency)} ⚠️"
-    elif o.debt == 0:
+    if has_debt(o):
+        money += f" · борг {_fmt_debt(o)} ⚠️"
+    elif o.debt is not None:
         money += " · оплачено ✅"
     lines.append(money)
     if o.created:
@@ -324,7 +352,7 @@ async def debt_alert_text() -> str | None:
     except Exception:
         logger.exception("travelon debt alert failed")
         return None
-    debtors = [o for o in _active(arrivals) if o.debt and o.debt > 0]
+    debtors = [o for o in _active(arrivals) if has_debt(o)]
     if not debtors:
         return None
     debtors.sort(key=lambda o: -(o.debt or 0))
@@ -332,7 +360,7 @@ async def debt_alert_text() -> str | None:
     lines = [f"🚨 <b>Завтра заїзд із боргом:</b> {len(debtors)} заявок · {total}"]
     for o in debtors[:10]:
         lines.append(f" • №{o.order_no} · {o.country or o.hotel or '—'} · "
-                     f"{_fmt_money(o.debt, o.currency)}")
+                     f"{_fmt_debt(o)}")
     if len(debtors) > 10:
         lines.append(f" • … і ще {len(debtors) - 10}")
     lines.append("Деталі: «заявка №…» або /travelon")
