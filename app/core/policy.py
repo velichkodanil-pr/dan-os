@@ -21,6 +21,8 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "note.read": ("L0", True, False),
     "today.read": ("L0", True, False),
     "task.read": ("L0", True, False),
+    "drive.read": ("L0", True, False),
+    "gmail.read": ("L0", True, False),
     # L1 — internal writes: automatic (undo-able)
     "raw_event.create": ("L1", True, False),
     "memory.candidate_create": ("L1", True, False),
@@ -33,12 +35,13 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "proposal.edit": ("L2", True, True),
     "memory.confirm": ("L2", True, True),
     "memory.reject": ("L2", True, True),
-    "google.connect": ("L2", True, True),  # read-only scopes; the OAuth consent IS the confirmation
+    "memory.supersede": ("L2", True, True),
+    "google.connect": ("L2", True, True),  # OAuth consent IS the confirmation
     "reminder.schedule": ("L2", True, False),  # follows an approved task
     "reminder.cancel": ("L2", True, False),
     # L3/L4 — external writes/communication: NOT SUPPORTED in round 1
     "calendar.write": ("L3", False, True),
-    "email.draft": ("L3", False, True),
+    "email.draft": ("L3", True, True),  # draft-only (preview+confirm); SENDING stays denied
     "email.send": ("L4", False, True),
     "crm.write": ("L4", False, True),
     "post.publish": ("L4", False, True),

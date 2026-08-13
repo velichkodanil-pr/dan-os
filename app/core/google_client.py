@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPES = ("https://www.googleapis.com/auth/calendar.readonly "
-          "https://www.googleapis.com/auth/gmail.readonly")
+          "https://www.googleapis.com/auth/gmail.readonly "
+          "https://www.googleapis.com/auth/gmail.compose "
+          "https://www.googleapis.com/auth/drive.readonly")
 
 
 def _fernet() -> Fernet:
@@ -152,6 +154,124 @@ async def calendar_today(access_token: str) -> list[dict]:
             "all_day": "date" in start_raw,
         })
     return events
+
+
+# ---------- drive (read-only) ----------
+
+GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+DRIVE_FILE_EXT = (".pdf", ".docx", ".txt", ".md")
+
+
+async def drive_list_folders(access_token: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": "mimeType='application/vnd.google-apps.folder' and trashed=false",
+                    "fields": "files(id,name)", "pageSize": 20,
+                    "orderBy": "modifiedTime desc"},
+        )
+    if resp.status_code != 200:
+        logger.error("drive_list_folders failed: %s %s", resp.status_code, resp.text[:150])
+        resp.raise_for_status()
+    return resp.json().get("files", [])
+
+
+async def drive_list_files(access_token: str, folder_id: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": f"'{folder_id}' in parents and trashed=false",
+                    "fields": "files(id,name,mimeType,size)", "pageSize": 50},
+        )
+    resp.raise_for_status()
+    out = []
+    for f in resp.json().get("files", []):
+        name, mime = f.get("name", ""), f.get("mimeType", "")
+        if mime == GOOGLE_DOC_MIME or name.lower().endswith(DRIVE_FILE_EXT):
+            out.append(f)
+    return out
+
+
+async def drive_download_text_source(access_token: str, file: dict) -> tuple[str, bytes]:
+    """Returns (effective_filename, raw_bytes); Google Docs are exported as txt."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(timeout=120) as client:
+        if file.get("mimeType") == GOOGLE_DOC_MIME:
+            resp = await client.get(
+                f"https://www.googleapis.com/drive/v3/files/{file['id']}/export",
+                headers=headers, params={"mimeType": "text/plain"})
+            resp.raise_for_status()
+            return file["name"] + ".txt", resp.content
+        resp = await client.get(
+            f"https://www.googleapis.com/drive/v3/files/{file['id']}",
+            headers=headers, params={"alt": "media"})
+        resp.raise_for_status()
+        return file["name"], resp.content
+
+
+# ---------- gmail: full message + draft creation ----------
+
+def _walk_text(payload: dict) -> str:
+    import base64 as b64
+    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+        return b64.urlsafe_b64decode(payload["body"]["data"] + "==").decode("utf-8", "ignore")
+    for part in payload.get("parts", []) or []:
+        text = _walk_text(part)
+        if text:
+            return text
+    return ""
+
+
+async def gmail_find_message(access_token: str, query: str) -> dict | None:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers=headers, params={"q": f"in:inbox {query}", "maxResults": 1})
+        if resp.status_code != 200 or not resp.json().get("messages"):
+            return None
+        mid = resp.json()["messages"][0]["id"]
+        m = await client.get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{mid}",
+            headers=headers, params={"format": "full"})
+        if m.status_code != 200:
+            return None
+    data = m.json()
+    hdrs = {h["name"].lower(): h["value"]
+            for h in data.get("payload", {}).get("headers", [])}
+    return {
+        "id": mid, "thread_id": data.get("threadId", ""),
+        "from": hdrs.get("from", ""), "subject": hdrs.get("subject", ""),
+        "message_id": hdrs.get("message-id", ""),
+        "references": hdrs.get("references", ""),
+        "body": _walk_text(data.get("payload", {}))[:6000] or data.get("snippet", ""),
+    }
+
+
+async def gmail_create_draft(access_token: str, *, to_addr: str, subject: str,
+                             body: str, thread_id: str = "", in_reply_to: str = "",
+                             references: str = "") -> str:
+    import base64 as b64
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = (references + " " + in_reply_to).strip()
+    msg.set_content(body)
+    raw = b64.urlsafe_b64encode(msg.as_bytes()).decode()
+    payload: dict = {"message": {"raw": raw}}
+    if thread_id:
+        payload["message"]["threadId"] = thread_id
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+            headers={"Authorization": f"Bearer {access_token}"}, json=payload)
+    resp.raise_for_status()
+    return resp.json().get("id", "")
 
 
 async def gmail_recent(access_token: str, hours: int = 16, limit: int = 5) -> list[dict]:

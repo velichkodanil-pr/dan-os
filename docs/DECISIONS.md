@@ -2,6 +2,19 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Round 3b
+
+- Google scopes extended to gmail.compose + drive.readonly (one re-consent via
+  /connect_google). email.draft flipped to allowed L3 (preview + explicit button);
+  email SEND remains denied — drafts land in Gmail only.
+- Drive import v1 is one-shot per folder (/drive → pick folder → index files +
+  Google Docs export); refresh by re-running — hash dedupe makes it cheap.
+- Conflict detection runs at CONFIRM time (not ingest), same-domain confirmed
+  facts only, Haiku judge (mock: word-overlap); resolution is a user choice:
+  supersede (history kept via superseded_by) / keep old / keep both.
+- Weekly Sunday report (19:00) merges stats + knowledge gaps + up to 3 source
+  suggestions; reported gaps are marked resolved so they never repeat.
+
 ## 2026-08-13 — Round 3a
 
 - Round 3 split into 3a (knowledge core: pgvector, ingest, RAG, digest) and 3b

@@ -173,6 +173,21 @@ class KnowledgeGap(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PendingDraft(Base):
+    """Email draft proposal awaiting L3 confirmation (draft-only, never send)."""
+    __tablename__ = "pending_drafts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    to_addr: Mapped[str] = mapped_column(Text)
+    subject: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    thread_id: Mapped[str] = mapped_column(Text, default="")
+    in_reply_to: Mapped[str] = mapped_column(Text, default="")
+    references: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed|created|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ChatLog(Base):
     """Short conversation window for multi-turn chat context (trimmed reads)."""
     __tablename__ = "chat_log"

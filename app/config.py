@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     embedder: str = "openai"  # openai | mock
     embed_model: str = "text-embedding-3-small"
     digest_times: str = "13:00,18:30"
+    weekly_time: str = "19:00"  # Sunday coverage report
 
     @property
     def public_url(self) -> str:

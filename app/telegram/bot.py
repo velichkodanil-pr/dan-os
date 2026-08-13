@@ -66,6 +66,29 @@ async def send_digest(user_id: int) -> None:
         await bot_instance.send_message(user_id, text)
 
 
+async def send_weekly(user_id: int) -> None:
+    """Sunday coverage report."""
+    from app.core.reports import weekly_coverage_report
+    async with database.session() as db:
+        text = await weekly_coverage_report(db, user_id)
+    await bot_instance.send_message(user_id, text)
+
+
+def _conflict_kb(new_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆕 Нове замінює старе", callback_data=f"cf:{new_id}:n")],
+        [InlineKeyboardButton(text="📌 Лишити старе", callback_data=f"cf:{new_id}:o"),
+         InlineKeyboardButton(text="🤝 Обидва правильні", callback_data=f"cf:{new_id}:b")],
+    ])
+
+
+def _draft_kb(draft_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💾 Створити чернетку в Gmail", callback_data=f"dm:{draft_id}"),
+        InlineKeyboardButton(text="❌ Відхилити", callback_data=f"dx:{draft_id}"),
+    ]])
+
+
 def _is_owner(entity) -> bool:
     return bool(settings.owner_telegram_id and entity.from_user
                 and entity.from_user.id == settings.owner_telegram_id)
@@ -104,9 +127,10 @@ async def cmd_start(message: Message) -> None:
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
-        "• /today — план · /brief — бриф · /checkin — розбір · /kb — база знань\n"
-        f"• бриф о {settings.brief_time}, чек-ін о {settings.checkin_time}, "
-        f"пошт. дайджест о {settings.digest_times}"
+        "• /drive — індексувати папку Google Drive · /reply — чернетка відповіді на лист\n"
+        "• /today · /brief · /checkin · /kb\n"
+        f"• бриф {settings.brief_time} · чек-ін {settings.checkin_time} · "
+        f"дайджест {settings.digest_times} · тижневий звіт нд {settings.weekly_time}"
     )
 
 
@@ -156,6 +180,66 @@ async def cmd_ping(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer("pong ✅")
+
+
+@router.message(Command("drive"))
+async def cmd_drive(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    async with database.session() as db:
+        access = await google_client.get_access_token(db, message.from_user.id)
+    if not access:
+        await message.answer("Спершу підключи Google: /connect_google")
+        return
+    try:
+        folders = await google_client.drive_list_folders(access)
+    except Exception:
+        await message.answer(
+            "Не маю доступу до Drive — онови дозволи через /connect_google "
+            "(додались права читання Drive і створення чернеток).")
+        return
+    if not folders:
+        await message.answer("Папок у Drive не знайшов.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📁 {f['name'][:40]}", callback_data=f"dr:{f['id']}")]
+        for f in folders[:15]])
+    await message.answer(
+        "Обери папку Drive — проіндексую з неї pdf/docx/txt/md і Google Docs "
+        "(лише читання):", reply_markup=kb)
+
+
+@router.message(Command("reply"))
+async def cmd_reply(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Формат: <code>/reply що шукати</code>\n"
+            "Наприклад: <code>/reply від Olena тема оплата</code> — знайду лист, "
+            "підготую чернетку відповіді. Нічого не надсилаю без тебе.")
+        return
+    await message.answer("✍️ Шукаю лист і готую чернетку…")
+    try:
+        async with database.session() as db:
+            status, draft = await orch.propose_draft(
+                db, user_id=message.from_user.id, query=parts[1])
+    except Exception:
+        logger.exception("propose_draft failed")
+        await message.answer("Не вийшло — можливо, бракує прав. Спробуй /connect_google.")
+        return
+    if status == "no_google":
+        await message.answer("Спершу /connect_google")
+    elif status == "not_found":
+        await message.answer("Лист за цим запитом не знайшов. Уточни відправника чи тему.")
+    elif status != "proposed" or draft is None:
+        await message.answer("Не зміг скласти чернетку, спробуй ще раз.")
+    else:
+        await message.answer(
+            f"📧 <b>Чернетка відповіді</b>\n<b>Кому:</b> {draft.to_addr}\n"
+            f"<b>Тема:</b> {draft.subject}\n\n{draft.body[:2500]}",
+            reply_markup=_draft_kb(draft.id))
 
 
 @router.message(Command("kb"))
@@ -342,6 +426,48 @@ async def on_other(message: Message) -> None:
         "з текстом чи підписом.")
 
 
+async def _index_drive_folder(cb: CallbackQuery, user_id: int, folder_id: str) -> None:
+    from app.core.ingest import IngestError, extract_text, ingest_document
+    if not folder_id:
+        await cb.answer("Невідома папка")
+        return
+    await cb.answer("Індексую папку…")
+    try:
+        async with database.session() as db:
+            access = await google_client.get_access_token(db, user_id)
+        if not access:
+            await cb.message.answer("Спершу /connect_google")
+            return
+        files = await google_client.drive_list_files(access, folder_id)
+    except Exception:
+        logger.exception("drive listing failed")
+        await cb.message.answer("Не зміг прочитати папку — перевір доступ: /connect_google")
+        return
+    if not files:
+        await cb.message.answer("У папці немає підтримуваних файлів (pdf/docx/txt/md, Google Docs).")
+        return
+    added = dups = failed = 0
+    for f in files[:20]:
+        try:
+            name, data = await google_client.drive_download_text_source(access, f)
+            text = extract_text(name, data)
+            async with database.session() as db:
+                result = await ingest_document(
+                    db, user_id=user_id, title=name, text=text,
+                    source_type="drive", source_ref=f["id"])
+            if result.status == "indexed":
+                added += 1
+            elif result.status == "duplicate":
+                dups += 1
+            else:
+                failed += 1
+        except (IngestError, Exception):
+            failed += 1
+    await cb.message.answer(
+        f"📁 Готово: додав <b>{added}</b>, вже було {dups}, не вдалося {failed} "
+        f"(з {min(len(files), 20)} файлів). Тепер можеш питати про їх зміст.")
+
+
 # ---------- callbacks ----------
 
 @router.callback_query()
@@ -349,13 +475,18 @@ async def on_callback(cb: CallbackQuery) -> None:
     if not _is_owner(cb):
         await cb.answer()
         return
+    parts = (cb.data or "").split(":")
+    action = parts[0] if parts else ""
+    user_id = cb.from_user.id
+
+    if action == "dr":  # Drive folder id is not a UUID
+        await _index_drive_folder(cb, user_id, parts[1] if len(parts) > 1 else "")
+        return
     try:
-        parts = (cb.data or "").split(":")
-        action, ref = parts[0], uuid.UUID(parts[1])
+        ref = uuid.UUID(parts[1])
     except (IndexError, ValueError):
         await cb.answer("Невідома дія")
         return
-    user_id = cb.from_user.id
 
     try:
         async with database.session() as db:
@@ -397,9 +528,41 @@ async def on_callback(cb: CallbackQuery) -> None:
                 await cb.answer("Скасовано 🚫" if status == "cancelled" else status)
             elif action == "mo":
                 status = await orch.confirm_memory(db, user_id=user_id, item_id=ref)
-                if status in ("confirmed", "already"):
+                if isinstance(status, tuple) and status[0] == "conflict":
+                    old = status[1]
+                    await cb.message.edit_text(
+                        "⚖️ <b>Конфлікт пам'яті</b>\n"
+                        f"🆕 Нове: {cb.message.text[2:].strip()}\n"
+                        f"📌 Старе ({old.created_at.strftime('%d.%m.%Y')}): {old.content[:300]}",
+                        reply_markup=_conflict_kb(ref))
+                    await cb.answer("Потрібне рішення ⚖️")
+                elif status == "confirmed":
                     await cb.message.edit_text(f"🧠✅ {cb.message.text[2:].strip()}")
-                await cb.answer("У пам'яті ✅" if status == "confirmed" else status)
+                    await cb.answer("У пам'яті ✅")
+                else:
+                    await cb.answer(str(status))
+            elif action == "cf":
+                choice = parts[2] if len(parts) > 2 else "b"
+                status = await orch.resolve_conflict(
+                    db, user_id=user_id, new_id=ref, choice=choice)
+                labels = {"n": "🆕 Нове замінило старе ✅",
+                          "o": "📌 Лишив старе, нове відкинув",
+                          "b": "🤝 Зберіг обидва ✅"}
+                await cb.message.edit_reply_markup(reply_markup=None)
+                await cb.answer(labels.get(choice, status) if status == "resolved" else str(status))
+            elif action == "dm":
+                status = await orch.approve_draft(db, user_id=user_id, draft_id=ref)
+                if status in ("created", "already"):
+                    await cb.message.edit_reply_markup(reply_markup=None)
+                    await cb.answer("Чернетка в Gmail ✅ (нічого не надіслано)", show_alert=True)
+                elif status == "no_google":
+                    await cb.answer("Онови доступ: /connect_google", show_alert=True)
+                else:
+                    await cb.answer(str(status))
+            elif action == "dx":
+                await orch.reject_draft(db, user_id=user_id, draft_id=ref)
+                await cb.message.edit_reply_markup(reply_markup=None)
+                await cb.answer("Відхилено")
             elif action == "mx":
                 status = await orch.reject_memory(db, user_id=user_id, item_id=ref)
                 await cb.message.edit_text("🗑 Відкинуто")

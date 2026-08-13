@@ -167,6 +167,27 @@ class MockExtractionProvider:
         return ExtractResult(intent="chat", reply="Чую тебе. (mock-режим без AI)")
 
 
+async def haiku_text(prompt: str, max_tokens: int = 600) -> str | None:
+    """One-shot Haiku text call (shared helper). Returns None on any failure."""
+    if not settings.anthropic_api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": settings.anthropic_api_key,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": settings.model_extract, "max_tokens": max_tokens,
+                      "messages": [{"role": "user", "content": prompt}]},
+            )
+        resp.raise_for_status()
+        return "".join(b.get("text", "") for b in resp.json().get("content", [])).strip()
+    except Exception:
+        logger.exception("haiku_text failed")
+        return None
+
+
 def get_extractor() -> ExtractionProvider:
     if settings.extractor == "mock" or not settings.anthropic_api_key:
         return MockExtractionProvider()

@@ -1,6 +1,22 @@
 # STATUS
 
-_Last verified: 2026-08-13 (round 3a implementation session)_
+_Last verified: 2026-08-13 (round 3b implementation session)_
+
+## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
+
+- /drive: list Drive folders → index pdf/docx/txt/md + Google Docs (read-only,
+  20 files/run, hash dedupe). /reply <query>: find email → Haiku reply draft →
+  preview → 💾 creates a Gmail DRAFT (L3; sending stays denied).
+- Memory conflicts at confirm time: ⚖️ card with «нове замінює старе / лишити
+  старе / обидва»; supersede keeps history (superseded_by).
+- Sunday 19:00 weekly report: stats + unanswered questions + up to 3 source
+  suggestions (coverage map v1); reported gaps marked resolved.
+- Scopes now calendar.readonly + gmail.readonly + gmail.compose + drive.readonly
+  → requires ONE /connect_google re-consent.
+- Tests: **28 passed**. Migration `f75ba5fb32c6` (pending_drafts).
+
+Gate: Danylo re-consents, /drive indexes a folder, /reply creates a Gmail draft,
+Sunday report arrives.
 
 ## Round 0 — Foundation: DONE · Round 1 — Vertical slice: DONE · Round 2 — Secretary: DONE
 (All gates closed 2026-08-13; Google connected, /brief works with real calendar+mail.)

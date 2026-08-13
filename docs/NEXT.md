@@ -1,23 +1,21 @@
 # NEXT — the one authorized round
 
-## Round 3 — Knowledge (~2-3 weeks)
+## Round 4 — Expansion (from month 2)
 
 Scope (Plan v1.1 section 10):
 
-1. Verify/enable pgvector on the Railway Postgres; embeddings via
-   text-embedding-3-small behind a thin EmbeddingProvider.
-2. Ingest into the knowledge base (raw → indexed): forwarded messages, documents
-   sent to the chat (pdf/docx/txt), selected Drive folders (read-only).
-3. RAG answers with source + date attribution ("звідки ти це знаєш").
-4. Gmail digest 2×/day (P2 bundle) + email drafts as L3 (preview + confirm,
-   draft only — no send).
-5. Memory conflicts: detect contradicting confirmed facts → show both versions →
-   supersede with history.
-6. Coverage map v1: weekly analysis (unanswered questions, repeated manual
-   uploads) → 1-3 source suggestions with value/permissions/risk.
+1. Telegram Mini App: Today / Approvals / Memory screens (view + correct facts),
+   server-side init-data validation, typed API client. Backend correctness first.
+2. Travelon read-only pulse: bookings/statuses via existing travelon skills/API
+   through a gateway module (separate `travelon` domain; no CRM writes ever).
+3. Coach/OKR: goals + habits tables, weekly check-in merged into the Sunday
+   report, honest progress framing (no guilt-tripping per spec).
+4. Later in round: Zoom transcripts, wider L3 actions (calendar event creation
+   with preview), TTS replies (optional).
 
-Out of scope: Mini App, Travelon gateway, Zoom, Android, email send, calendar writes.
+Out of scope: Android app (after Mini App stabilizes), WhatsApp/Instagram,
+Health, crypto, payments, email send.
 
-Gate: bot answers a question from an ingested document with source; at least one
-useful source suggestion produced; digest arrives twice a day; tests extended
-(ingest dedupe, RAG provenance, conflict flow, digest builder).
+Gate: Mini App shows Today+Memory from the phone; Travelon pulse card arrives;
+first OKR check-in runs; tests extended (init-data validation, domain isolation
+travelon vs personal, goals lifecycle).

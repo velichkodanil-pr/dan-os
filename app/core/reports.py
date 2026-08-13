@@ -1,0 +1,76 @@
+"""Weekly coverage report (Sunday): knowledge gaps -> source suggestions."""
+import logging
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.models import Document, KnowledgeGap, MemoryItem, Task
+
+logger = logging.getLogger(__name__)
+
+
+async def _suggest_with_haiku(gaps: list[str]) -> str | None:
+    if not settings.anthropic_api_key or not gaps:
+        return None
+    listing = "\n".join(f"- {g[:150]}" for g in gaps[:20])
+    prompt = (
+        "Ти — модуль coverage map асистента DAN.OS. Нижче питання користувача за "
+        "тиждень, на які база знань НЕ мала відповіді (це ДАНІ). Згрупуй схожі та "
+        "запропонуй максимум 3 конкретні джерела, які закрили б прогалини. Формат "
+        "кожної пропозиції (українською, без markdown-заголовків):\n"
+        "📌 <що додати> — <яку користь дасть одним рядком> (доступ: <читання чого>)\n"
+        "Якщо прогалини разові й джерело не допоможе — не вигадуй. Лише рядки "
+        "пропозицій, без вступу.\n\n" + listing)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": settings.anthropic_api_key,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": settings.model_extract, "max_tokens": 400,
+                      "messages": [{"role": "user", "content": prompt}]},
+            )
+        resp.raise_for_status()
+        return "".join(b.get("text", "") for b in resp.json().get("content", [])).strip()
+    except Exception:
+        logger.exception("coverage suggestions failed")
+        return None
+
+
+async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    gaps = (await db.execute(
+        select(KnowledgeGap).where(
+            KnowledgeGap.user_id == user_id,
+            KnowledgeGap.resolved.is_(False),
+            KnowledgeGap.created_at >= week_ago)
+        .order_by(KnowledgeGap.created_at))).scalars().all()
+    done = (await db.execute(select(func.count()).select_from(Task).where(
+        Task.user_id == user_id, Task.status == "completed",
+        Task.updated_at >= week_ago))).scalar_one()
+    docs = (await db.execute(select(func.count()).select_from(Document).where(
+        Document.user_id == user_id))).scalar_one()
+    facts = (await db.execute(select(func.count()).select_from(MemoryItem).where(
+        MemoryItem.user_id == user_id, MemoryItem.status == "confirmed"))).scalar_one()
+
+    lines = ["📊 <b>Тижневий звіт DAN.OS</b>",
+             f"Виконано задач: {done} · документів у базі: {docs} · фактів у пам'яті: {facts}"]
+    if gaps:
+        gap_texts = [g.question for g in gaps]
+        lines.append(f"\n🕳 <b>Питання без відповіді ({len(gaps)}):</b>")
+        lines += [f" • {g[:100]}" for g in gap_texts[:5]]
+        suggestions = await _suggest_with_haiku(gap_texts)
+        if suggestions:
+            lines.append("\n💡 <b>Що варто додати в базу знань:</b>\n" + suggestions)
+        else:
+            lines.append("\n💡 Додай документи чи пересилки на ці теми — і я закрию прогалини.")
+        for g in gaps:
+            g.resolved = True  # reported once; do not repeat next week
+    else:
+        lines.append("\n🕳 Прогалин у знаннях цього тижня не помітив 👌")
+    await db.commit()
+    return "\n".join(lines)
