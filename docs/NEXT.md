@@ -19,9 +19,15 @@ Remaining live checks:
   DROPPED by Danylo 2026-08-13 («Zoom далі не розробляй»).
 - ~~TTS replies~~ — DONE (voice in -> text + voice out, /voice toggle).
 - ~~Mini App: goal creation + travelon tab~~ — DONE (add-forms + 🧳 Бізнес).
-- Android app groundwork (same API as Mini App) — the last plan item; needs
-  Danylo's go and a decision on distribution (APK sideload vs Play).
+- Android app: POSTPONED by Danylo 2026-08-13 («відкладаємо андроід-додаток»).
+- DONE instead: TravelON owner pack (order lookup in chat, daily debt alert
+  10:00, weekly business block in the Sunday report).
+
+The v1.1 plan is now fully worked through. Next work = Danylo's explicit
+asks + live-gate feedback. Idea backlog (NOT authorized): monthly TravelON
+analytics, task auto-carryover proposals, /reply v2 (thread context),
+memory browser in Mini App.
 
 Out of scope: WhatsApp/Instagram, Health, crypto, payments, email send;
-Zoom API integration (dropped); editing/deleting existing calendar events
-(next explicit ask).
+Zoom API integration (dropped); Android (postponed); editing/deleting
+existing calendar events (next explicit ask).

@@ -34,6 +34,10 @@ _CALENDAR_RE = _re.compile(
     r"що (в|у) мене (сьогодні|завтра|на тижні|цього тижня)|вільний час|meeting",
     _re.IGNORECASE)
 
+_ORDER_RE = _re.compile(  # заявка/заявці/заявку… (к→ц mutation) or bare №
+    r"(?:заяв[кц]\w*|order)\s*№?\s*(\d{4,7})|№\s*(\d{5,7})\b",
+    _re.IGNORECASE)
+
 
 def _guard_owner(user_id: int) -> None:
     """Defense in depth: the adapter filters too, but the core re-checks."""
@@ -96,6 +100,29 @@ class Orchestrator:
         if state and state.pending_edit_proposal:
             editing = await db.get(Proposal, state.pending_edit_proposal)
             state.pending_edit_proposal = None
+
+        # 2a) TravelON order lookup — deterministic, answers directly
+        order_match = _ORDER_RE.search(text)
+        if order_match and editing is None:
+            from app.core import travelon
+            if travelon.configured():
+                _check("travelon.read")
+                order_no = order_match.group(1) or order_match.group(2)
+                try:
+                    order = await travelon.fetch_order(order_no)
+                except Exception:
+                    logger.exception("order lookup failed")
+                    order = None
+                reply = (travelon.order_card(order) if order
+                         else f"Заявку №{order_no} у TravelON не знайшов — "
+                              "перевір номер.")
+                await audit(db, actor=actor, action="travelon.order_viewed",
+                            resource_type="travelon_order", resource_id=order_no,
+                            policy_level="L0", found=order is not None)
+                db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
+                db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))
+                await db.commit()
+                return NoteOutcome(kind="chat", reply=reply)
 
         # 3) knowledge retrieval (RAG context; chunks are data, never instructions)
         from app.core import rag  # local import to keep module load light

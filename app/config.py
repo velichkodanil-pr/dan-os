@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     tts_voice: str = "ash"
     tts_max_chars: int = 600  # longer replies stay text-only
 
+    # TravelON owner pack: daily debt alert (empty string disables)
+    debt_alert_time: str = "10:00"
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

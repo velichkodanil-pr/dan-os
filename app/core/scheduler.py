@@ -59,7 +59,8 @@ async def _fire_due(send_message) -> None:
         await db.commit()
 
 
-async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly) -> None:
+async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
+                       run_debts=None) -> None:
     owner = settings.owner_telegram_id
     if not owner:
         return
@@ -69,6 +70,8 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly) -> None:
                ("weekly", settings.weekly_time, run_weekly, 6)]  # Sunday
     for t in [x.strip() for x in settings.digest_times.split(",") if x.strip()]:
         rituals.append((f"digest_{t}", t, run_digest, None))
+    if run_debts is not None and settings.debt_alert_time.strip():
+        rituals.append(("debts", settings.debt_alert_time.strip(), run_debts, None))
     for key, time_str, fn, weekday in rituals:
         if weekday is not None and now_local.weekday() != weekday:
             continue
@@ -89,20 +92,24 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly) -> None:
             await db.commit()
 
 
-async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly) -> None:
+async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
+                run_debts=None) -> None:
     while True:
         try:
             await _fire_due(send_message)
-            await _run_rituals(run_brief, run_checkin, run_digest, run_weekly)
+            await _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
+                               run_debts)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
-def start(send_message, run_brief, run_checkin, run_digest, run_weekly) -> None:
+def start(send_message, run_brief, run_checkin, run_digest, run_weekly,
+          run_debts=None) -> None:
     global _task
     _task = asyncio.create_task(
-        _loop(send_message, run_brief, run_checkin, run_digest, run_weekly))
+        _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
+              run_debts))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

@@ -274,6 +274,96 @@ async def pulse_text(db=None) -> str | None:
     return "\n".join(lines)
 
 
+async def fetch_order(order_id: str) -> TravelonOrder | None:
+    """Single order by number: BASE/{TOKEN}/{ORDER_ID}. None if not found."""
+    if not configured() or not order_id.isdigit():
+        return None
+    url = f"{BASE}/{settings.travelon_token}/{order_id}"
+    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_UA) as client:
+        resp = await client.get(url)
+    if resp.status_code != 200:
+        logger.error("travelon order lookup returned %s", resp.status_code)
+        return None
+    orders = parse_orders(resp.text)
+    return orders[0] if orders else None
+
+
+def order_card(o: TravelonOrder) -> str:
+    """Plain-text order card (the chat layer escapes HTML)."""
+    lines = [f"🧳 Заявка №{o.order_no} · {o.status or '—'}"]
+    where = " · ".join(x for x in (o.hotel, o.country) if x)
+    if where:
+        lines.append(f"🏨 {where}")
+    when = o.check_in.strftime("%d.%m.%Y") if o.check_in else "—"
+    details = [f"🛬 Заїзд {when}"]
+    if o.nights:
+        details.append(f"{o.nights} ноч.")
+    if o.tourists:
+        details.append(f"{o.tourists} тур.")
+    lines.append(" · ".join(details))
+    money = f"💰 {_fmt_money(o.gross_cost, o.currency)}"
+    if o.debt and o.debt > 0:
+        money += f" · борг {_fmt_money(o.debt, o.currency)} ⚠️"
+    elif o.debt == 0:
+        money += " · оплачено ✅"
+    lines.append(money)
+    if o.created:
+        lines.append(f"📅 Створена {o.created.strftime('%d.%m.%Y')}")
+    return "\n".join(lines)
+
+
+async def debt_alert_text() -> str | None:
+    """Morning debt alert: TOMORROW's check-ins with unpaid balance.
+    None => nothing to say (no debts / not configured / API down)."""
+    if not configured():
+        return None
+    tz = ZoneInfo(settings.tz_name)
+    tomorrow = datetime.now(tz).date() + timedelta(days=1)
+    try:
+        arrivals = await fetch_days([tomorrow], by_entry_date=True)
+    except Exception:
+        logger.exception("travelon debt alert failed")
+        return None
+    debtors = [o for o in _active(arrivals) if o.debt and o.debt > 0]
+    if not debtors:
+        return None
+    debtors.sort(key=lambda o: -(o.debt or 0))
+    total = _sum_by_currency((o.debt, o.currency) for o in debtors)
+    lines = [f"🚨 <b>Завтра заїзд із боргом:</b> {len(debtors)} заявок · {total}"]
+    for o in debtors[:10]:
+        lines.append(f" • №{o.order_no} · {o.country or o.hotel or '—'} · "
+                     f"{_fmt_money(o.debt, o.currency)}")
+    if len(debtors) > 10:
+        lines.append(f" • … і ще {len(debtors) - 10}")
+    lines.append("Деталі: «заявка №…» або /travelon")
+    return "\n".join(lines)
+
+
+async def weekly_block() -> str | None:
+    """TravelON week summary for the Sunday report (HTML). None => skip."""
+    if not configured():
+        return None
+    tz = ZoneInfo(settings.tz_name)
+    today = datetime.now(tz).date()
+    week = [today - timedelta(days=i) for i in range(7)]
+    try:
+        created = await fetch_days(week)
+    except Exception:
+        logger.exception("travelon weekly failed")
+        return None
+    active = _active(created)
+    by_country: dict[str, int] = {}
+    for o in active:
+        key = o.country or "інше"
+        by_country[key] = by_country.get(key, 0) + 1
+    top = sorted(by_country.items(), key=lambda kv: -kv[1])[:3]
+    lines = [f"\n🧳 <b>TravelON за тиждень:</b> {len(active)} нових заявок · "
+             f"{_sum_by_currency((o.gross_cost, o.currency) for o in active)}"]
+    if top:
+        lines.append(" • топ: " + " · ".join(f"{c} ({n})" for c, n in top))
+    return "\n".join(lines)
+
+
 async def brief_line() -> str | None:
     """One compact line for the morning brief. None = skip silently."""
     if not configured():

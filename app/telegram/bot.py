@@ -85,6 +85,15 @@ async def send_weekly(user_id: int) -> None:
     await bot_instance.send_message(user_id, text)
 
 
+async def send_debt_alert(user_id: int) -> None:
+    """Daily TravelON alert: tomorrow's check-ins with unpaid balance.
+    Stays silent when there is nothing to flag."""
+    from app.core import travelon
+    text = await travelon.debt_alert_text()
+    if text:
+        await bot_instance.send_message(user_id, text)
+
+
 def _conflict_kb(new_id) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆕 Нове замінює старе", callback_data=f"cf:{new_id}:n")],
@@ -143,7 +152,8 @@ async def cmd_start(message: Message) -> None:
         "• 🎙 транскрипт зустрічі (vtt/srt із Zoom) → підсумок, рішення і задачі\n"
         "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
-        "• /travelon — пульс заявок TravelON 🧳\n"
+        "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
+        "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive — індексувати папку Google Drive · /reply — чернетка відповіді на лист\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
@@ -302,6 +312,31 @@ async def cmd_habits(message: Message) -> None:
     await message.answer(
         "🏃 <b>Звички цього тижня</b> (тисни, щоб відмітити/зняти сьогодні):",
         reply_markup=kb)
+
+
+@router.message(Command("order"))
+async def cmd_order(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import travelon
+    parts = (message.text or "").split(maxsplit=1)
+    if not travelon.configured():
+        await message.answer("🧳 TravelON не підключено.")
+        return
+    if len(parts) < 2 or not parts[1].strip().lstrip("№").strip().isdigit():
+        await message.answer("Формат: <code>/order 59266</code> — покажу заявку. "
+                             "Або просто напиши «заявка 59266».")
+        return
+    order_no = parts[1].strip().lstrip("№").strip()
+    await message.answer("🔎 Шукаю заявку…")
+    try:
+        order = await travelon.fetch_order(order_no)
+    except Exception:
+        logger.exception("order cmd failed")
+        order = None
+    import html as _html
+    await message.answer(_html.escape(travelon.order_card(order)) if order
+                         else f"Заявку №{order_no} не знайшов — перевір номер.")
 
 
 @router.message(Command("travelon"))

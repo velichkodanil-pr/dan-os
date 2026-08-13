@@ -68,6 +68,14 @@ async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
     except Exception:
         logger.exception("coach weekly block failed")
 
+    try:  # TravelON week summary (owner pack)
+        from app.core import travelon
+        t_block = await travelon.weekly_block()
+        if t_block:
+            lines.append(t_block)
+    except Exception:
+        logger.exception("travelon weekly block failed")
+
     if gaps:
         gap_texts = [g.question for g in gaps]
         lines.append(f"\n🕳 <b>Питання без відповіді ({len(gaps)}):</b>")

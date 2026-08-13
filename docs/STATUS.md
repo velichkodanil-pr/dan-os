@@ -91,6 +91,18 @@ per day; 7-day range requests time out). Reworked before first prod use:
 - Verified live: pulse 22.8s (26/82 orders, 513 arrivals/7d, 47 debtors),
   brief line 9.7s. TRAVELON_TOKEN set on Railway. Tests: **66 passed**.
 
+### R4b slice 4: TravelON owner pack (Android postponed by Danylo)
+
+- Order lookup in chat: «заявка 59266» / «що по заявці №…» / /order —
+  deterministic trigger (заявк/заявц stem + bare №NNNNN), plain-text card
+  (status, hotel/direction, check-in, tourists, cost, debt ⚠️/paid ✅).
+  Read-only, L0, nothing stored, audited as travelon.order_viewed.
+- Daily debt alert (10:00, DEBT_ALERT_TIME, empty disables): tomorrow's
+  check-ins with unpaid balance -> 🚨 list (top 10 by debt) + total;
+  SILENT when all paid. New scheduler ritual "debts".
+- Sunday report gets a TravelON week block: new orders count + sums by
+  currency + top-3 destinations. Tests: **82 passed**.
+
 ### R4b slice 3: voice replies + Mini App extensions (Zoom API dropped)
 
 - Zoom API auto-pull DROPPED per Danylo. Remaining plan items built instead:
