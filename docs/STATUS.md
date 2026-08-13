@@ -41,6 +41,25 @@ card once TRAVELON_TOKEN is set, habits appear in the evening check-in.
 - Chat engine: Sonnet 5 rejected `thinking.enabled` (400 on every message,
   silent fallback to Haiku one-liners). Switched to `thinking: adaptive` +
   `output_config.effort` (CHAT_EFFORT=high), verified live. Tests: **51**.
+- Calendar 403 root cause found in logs: **Calendar API was disabled** in the
+  Google Cloud project (551440869378) — scopes were fine. Danylo enabled it;
+  calendar answers verified live (3 events listed).
+
+### Calendar RSVP slice (same day, Danylo's request)
+
+«Скасуй мою участь у зустрічі з маркетингом» must actually decline the event:
+
+- New intent `calendar` (extraction): cal_action decline|accept|tentative,
+  cal_query words, cal_date day hint; mock has deterministic triggers.
+- Flow: find events (fuzzy word-match ≥0.5 across ALL visible calendars of all
+  accounts, ≤3 matches) → PendingCalAction row + preview card («Організатора
+  буде повідомлено») → ✅ button = L3 confirmation → PATCH own attendee
+  responseStatus with sendUpdates=all. Idempotent (done→already); reject never
+  touches Google; organizer-of-own-event → honest "not_attendee" alert.
+- Policy: `calendar.respond` L3 allowed (RSVP only); `calendar.write`
+  (create/delete) STAYS denied. Scope added: `calendar.events` → **both
+  accounts need /connect_google re-consent with the NEW checkbox**.
+- Migration `c3d4e5f60718` (pending_cal_actions). Tests: **59 passed**.
 
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 

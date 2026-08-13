@@ -203,6 +203,21 @@ class ChatLog(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PendingCalAction(Base):
+    """Calendar participation change awaiting L3 confirmation (RSVP only)."""
+    __tablename__ = "pending_cal_actions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    calendar_id: Mapped[str] = mapped_column(Text)
+    event_id: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    start_str: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(String(16), default="decline")  # decline|accept|tentative
+    status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed|done|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Goal(Base):
     """Coach (R4): a mid-term goal Danylo tracks with DAN.OS."""
     __tablename__ = "goals"

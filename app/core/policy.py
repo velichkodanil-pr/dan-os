@@ -23,6 +23,7 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "task.read": ("L0", True, False),
     "drive.read": ("L0", True, False),
     "gmail.read": ("L0", True, False),
+    "calendar.read": ("L0", True, False),
     "travelon.read": ("L0", True, False),  # read-only XML report, never writes
     # L1 — internal writes: automatic (undo-able)
     "raw_event.create": ("L1", True, False),
@@ -45,8 +46,9 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "habit.log": ("L2", True, True),  # toggle is reversible
     "reminder.schedule": ("L2", True, False),  # follows an approved task
     "reminder.cancel": ("L2", True, False),
-    # L3/L4 — external writes/communication: NOT SUPPORTED in round 1
-    "calendar.write": ("L3", False, True),
+    # L3/L4 — external writes/communication
+    "calendar.respond": ("L3", True, True),  # OWN attendance RSVP (preview+confirm)
+    "calendar.write": ("L3", False, True),  # creating/deleting events stays denied
     "email.draft": ("L3", True, True),  # draft-only (preview+confirm); SENDING stays denied
     "email.send": ("L4", False, True),
     "crm.write": ("L4", False, True),

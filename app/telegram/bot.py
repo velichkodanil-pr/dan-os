@@ -137,6 +137,7 @@ async def cmd_start(message: Message) -> None:
         "Привіт, Данило! <b>DAN.OS</b> · раунд 4 🟢\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
+        "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
         "• 📄 документ (pdf/docx/txt/md) чи пересилка → база знань, потім просто питай\n"
         "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
@@ -186,8 +187,9 @@ async def cmd_connect_google(message: Message) -> None:
         InlineKeyboardButton(text="🔐 Підключити Google", url=url)]])
     await message.answer(
         "Тисни кнопку й обери акаунт (можна додати кілька — кожен прохід "
-        "додає ще один). На екрані дозволів постав УСІ галочки: календар, "
-        "Gmail (читання і чернетки), Drive — все лише читання, крім чернеток. "
+        "додає ще один). На екрані дозволів постав УСІ галочки: перегляд "
+        "календаря, події календаря (для відповідей на запрошення), "
+        "Gmail (читання і чернетки), Drive (читання). "
         "Попередження «Google hasn't verified» — нормально для власного "
         "застосунку: Продовжити.", reply_markup=kb)
 
@@ -578,6 +580,37 @@ async def on_forward(message: Message) -> None:
 
 # ---------- notes: text & voice ----------
 
+_CAL_ACTION_LABEL = {"decline": ("Скасувати участь", "🙅"),
+                     "accept": ("Підтвердити участь", "🙋"),
+                     "tentative": ("Позначити «можливо»", "🤔")}
+
+
+def _cal_when(start_str: str) -> str:
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _zi
+    try:
+        return _dt.fromisoformat(start_str).astimezone(
+            _zi(settings.tz_name)).strftime("%d.%m %H:%M")
+    except ValueError:
+        return start_str[:10]
+
+
+async def _send_cal_action_cards(message: Message, actions: list) -> None:
+    import html as _html
+    for p in actions:
+        label, emoji = _CAL_ACTION_LABEL.get(p.action, ("Змінити участь", "📅"))
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"✅ {label}", callback_data=f"cr:{p.id}"),
+            InlineKeyboardButton(text="❌ Ні", callback_data=f"cx:{p.id}"),
+        ]])
+        await message.answer(
+            f"{emoji} <b>{label}?</b>\n"
+            f"📅 {_html.escape(p.summary)}\n🕐 {_cal_when(p.start_str)}\n\n"
+            "<i>Організатора буде повідомлено — як при відповіді в Google "
+            "Calendar. Нічого не зміню без підтвердження.</i>",
+            reply_markup=kb)
+
+
 async def _process_note(message: Message, text: str, prefix: str = "") -> None:
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")
@@ -593,6 +626,9 @@ async def _process_note(message: Message, text: str, prefix: str = "") -> None:
         await message.answer(prefix + proposal_card(outcome.proposal),
                              reply_markup=_proposal_kb(outcome.proposal.id,
                                                        outcome.proposal.version))
+        return
+    if outcome.kind == "cal_actions" and outcome.cal_actions:
+        await _send_cal_action_cards(message, outcome.cal_actions)
         return
     import html as _html
     if outcome.kind == "note":
@@ -836,6 +872,31 @@ async def on_callback(cb: CallbackQuery) -> None:
                 if status == "dropped":
                     await cb.message.edit_text(f"🗑 {cb.message.text[2:].strip()} — знято")
                 await cb.answer()
+            elif action == "cr":
+                status = await orch.confirm_cal_action(db, user_id=user_id,
+                                                       action_id=ref)
+                if status in ("done", "already"):
+                    first = (cb.message.text or "").split("\n")[1] if "\n" in (
+                        cb.message.text or "") else ""
+                    await cb.message.edit_text(f"✅ Готово: {first}\n"
+                                               "Участь оновлено, організатор отримає "
+                                               "сповіщення.")
+                    await cb.answer("Зроблено ✅")
+                elif status == "not_attendee":
+                    await cb.message.edit_reply_markup(reply_markup=None)
+                    await cb.answer("Ти не в списку учасників цієї події (можливо, "
+                                    "ти організатор) — змінити RSVP не можу.",
+                                    show_alert=True)
+                elif status in ("no_google", "no_scope"):
+                    await cb.answer("Бракує прав на події календаря — перепідключи: "
+                                    "/connect_google (постав усі галочки)",
+                                    show_alert=True)
+                else:
+                    await cb.answer(str(status))
+            elif action == "cx":
+                await orch.reject_cal_action(db, user_id=user_id, action_id=ref)
+                await cb.message.edit_reply_markup(reply_markup=None)
+                await cb.answer("Скасовано, нічого не міняв")
             elif action == "hb":
                 from app.core import coach
                 status = await coach.toggle_habit(db, user_id=user_id, habit_id=ref)

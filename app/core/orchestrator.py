@@ -50,10 +50,11 @@ def _check(action: str) -> str:
 
 @dataclass
 class NoteOutcome:
-    kind: str  # duplicate | proposal | note | chat | error
+    kind: str  # duplicate | proposal | note | chat | cal_actions | error
     proposal: Proposal | None = None
     reply: str | None = None
     memory_saved: bool = False
+    cal_actions: list | None = None  # PendingCalAction rows awaiting confirmation
 
 
 class Orchestrator:
@@ -169,6 +170,11 @@ class Orchestrator:
             await db.commit()
             return NoteOutcome(kind="proposal", proposal=proposal)
 
+        if ext.intent == "calendar":
+            outcome = await self._propose_cal_actions(db, user_id=user_id, ext=ext)
+            await db.commit()
+            return outcome
+
         if ext.intent == "note" and ext.memory_text:
             _check("memory.candidate_create")
             item = MemoryItem(user_id=user_id, content=ext.memory_text,
@@ -193,6 +199,117 @@ class Orchestrator:
             await rag.log_gap(db, user_id=user_id, question=text)  # coverage map (R3b)
         await db.commit()
         return NoteOutcome(kind="chat", reply=reply)
+
+    # ---------- calendar: respond to own participation (L3) ----------
+
+    async def _propose_cal_actions(self, db: AsyncSession, *, user_id: int,
+                                   ext) -> NoteOutcome:
+        """Find matching events and stage RSVP proposals (no writes yet)."""
+        from app.core import google_client
+        from app.models import PendingCalAction
+        _check("calendar.read")
+        if not ext.cal_query:
+            return NoteOutcome(kind="chat", reply=(
+                "Уточни, будь ласка, яку саме подію маєш на увазі — "
+                "назву зустрічі чи з ким вона."))
+        accounts = await google_client.get_accounts(db, user_id)
+        if not accounts:
+            return NoteOutcome(kind="chat", reply="Спершу підключи Google: /connect_google")
+        matches: list[tuple] = []
+        access_broken = False
+        for cred in accounts:
+            try:
+                access = await google_client.access_for(db, cred)
+                if not access:
+                    continue
+                for ev in await google_client.calendar_find_events(
+                        access, ext.cal_query, day=ext.cal_date):
+                    matches.append((cred, ev))
+            except google_client.CalendarAccessError:
+                access_broken = True
+            except Exception:
+                logger.exception("cal find failed for %s", cred.account_email)
+        if not matches:
+            if access_broken:
+                return NoteOutcome(kind="chat", reply=(
+                    "Не маю прав змінювати події календаря. Перепідключи акаунт: "
+                    "/connect_google — і постав галочку про події календаря."))
+            when = f" на {ext.cal_date.strftime('%d.%m')}" if ext.cal_date else ""
+            return NoteOutcome(kind="chat", reply=(
+                f"Не знайшов у календарі{when} події за «{ext.cal_query}». "
+                "Спробуй точнішу назву або перевір /brief."))
+        actions = []
+        for cred, ev in matches[:3]:
+            pending = PendingCalAction(
+                user_id=user_id, credential_id=cred.id,
+                calendar_id=ev["calendar_id"], event_id=ev["event_id"],
+                summary=ev["summary"], start_str=ev["start"],
+                action=ext.cal_action or "decline")
+            db.add(pending)
+            actions.append(pending)
+        await db.flush()
+        for p in actions:
+            await audit(db, actor=f"user:{user_id}", action="calendar.respond_proposed",
+                        resource_type="cal_action", resource_id=p.id,
+                        policy_level="L3", summary=p.summary[:80], rsvp=p.action)
+        return NoteOutcome(kind="cal_actions", cal_actions=actions)
+
+    async def confirm_cal_action(self, db: AsyncSession, *, user_id: int,
+                                 action_id: uuid.UUID) -> str:
+        _guard_owner(user_id)
+        _check("calendar.respond")  # L3: the button press IS the confirmation
+        from app.core import google_client
+        from app.models import GoogleCredential, PendingCalAction
+        pending = await db.get(PendingCalAction, action_id, with_for_update=True)
+        if pending is None or pending.user_id != user_id:
+            return "not_found"
+        if pending.status == "done":
+            await db.commit()
+            return "already"
+        if pending.status != "proposed":
+            await db.commit()
+            return pending.status
+        access, email = None, ""
+        if pending.credential_id:
+            cred = await db.get(GoogleCredential, pending.credential_id)
+            if cred is not None:
+                access = await google_client.access_for(db, cred)
+                email = cred.account_email
+        if not access:
+            await db.commit()
+            return "no_google"
+        try:
+            result = await google_client.calendar_respond(
+                access, pending.calendar_id, pending.event_id, pending.action,
+                email=email)
+        except google_client.CalendarAccessError:
+            await db.commit()
+            return "no_scope"
+        if result != "done":
+            await db.commit()
+            return result
+        pending.status = "done"
+        await audit(db, actor=f"user:{user_id}", action="calendar.responded",
+                    resource_type="cal_action", resource_id=pending.id,
+                    policy_level="L3", rsvp=pending.action,
+                    summary=pending.summary[:80])
+        await db.commit()
+        return "done"
+
+    async def reject_cal_action(self, db: AsyncSession, *, user_id: int,
+                                action_id: uuid.UUID) -> str:
+        _guard_owner(user_id)
+        from app.models import PendingCalAction
+        pending = await db.get(PendingCalAction, action_id, with_for_update=True)
+        if pending is None or pending.user_id != user_id:
+            return "not_found"
+        if pending.status == "proposed":
+            pending.status = "rejected"
+            await audit(db, actor=f"user:{user_id}", action="calendar.respond_rejected",
+                        resource_type="cal_action", resource_id=pending.id,
+                        policy_level="L3")
+        await db.commit()
+        return "rejected"
 
     # ---------- memory review ----------
 

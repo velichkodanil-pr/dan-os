@@ -2,6 +2,21 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-13 — Calendar RSVP (Danylo: «він мав скасувати мою участь»)
+
+- First L3 calendar write, scoped to the SMALLEST useful action: change OWN
+  attendance (decline/accept/tentative) on an existing event. Creating,
+  editing and deleting events remain denied (calendar.write) — next candidate
+  for R4b with its own preview flow.
+- Same safety pattern as email drafts: model only PROPOSES (PendingCalAction),
+  a preview card states the side effect («організатора буде повідомлено»),
+  the button press is the L3 confirmation, everything audited, idempotent.
+- sendUpdates=all on the PATCH — mirrors what pressing «Ні» in Google
+  Calendar does; hiding the decline from the organizer would be dishonest.
+- Scope calendar.events added next to calendar.readonly (calendarList needs
+  readonly; events PATCH needs events) → one more re-consent with a new
+  checkbox for every connected account.
+
 ## 2026-08-13 — Round 4 (Mini App, coach, TravelON)
 
 - Mini App = one self-contained HTML served by the same FastAPI service

@@ -25,6 +25,7 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPES = ("openid email "
           "https://www.googleapis.com/auth/calendar.readonly "
+          "https://www.googleapis.com/auth/calendar.events "
           "https://www.googleapis.com/auth/gmail.readonly "
           "https://www.googleapis.com/auth/gmail.compose "
           "https://www.googleapis.com/auth/drive.readonly")
@@ -259,6 +260,119 @@ async def calendar_today(access_token: str) -> list[dict]:
     tz = ZoneInfo(settings.tz_name)
     start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     return await calendar_range(access_token, start, start + timedelta(days=1))
+
+
+# ---------- calendar: respond to own participation (L3 flow) ----------
+
+def match_score(summary: str, query: str) -> float:
+    """Share of query content-words found in the event summary (0..1, pure)."""
+    import re as _re
+    words = [w for w in _re.findall(r"\w+", (query or "").lower()) if len(w) > 2]
+    if not words:
+        return 0.0
+    s = (summary or "").lower()
+    hit = sum(1 for w in words if w in s or any(
+        w[:5] == sw[:5] for sw in _re.findall(r"\w+", s) if len(sw) > 2))
+    return hit / len(words)
+
+
+async def calendar_find_events(access_token: str, query: str,
+                               day: datetime | None = None,
+                               days: int = 14) -> list[dict]:
+    """Upcoming events matching the query words (all visible calendars, ≤3)."""
+    from urllib.parse import quote
+    tz = ZoneInfo(settings.tz_name)
+    if day is not None:
+        start = day.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+    else:
+        start = datetime.now(tz).replace(minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=days)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    found: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for cal in (await _calendar_list(client, headers))[:10]:
+            cal_id = cal.get("id", "primary")
+            resp = await client.get(
+                "https://www.googleapis.com/calendar/v3/calendars/"
+                f"{quote(cal_id, safe='')}/events",
+                headers=headers,
+                params={"timeMin": start.isoformat(), "timeMax": end.isoformat(),
+                        "singleEvents": "true", "orderBy": "startTime",
+                        "maxResults": 50},
+            )
+            if resp.status_code in (401, 403) and cal.get("primary"):
+                raise CalendarAccessError(str(resp.status_code))
+            if resp.status_code != 200:
+                continue
+            for item in resp.json().get("items", []):
+                score = match_score(item.get("summary", ""), query)
+                if score >= 0.5:
+                    start_raw = item.get("start", {})
+                    found.append({
+                        "calendar_id": cal_id,
+                        "event_id": item.get("id", ""),
+                        "summary": item.get("summary", "(без назви)"),
+                        "start": start_raw.get("dateTime") or start_raw.get("date", ""),
+                        "all_day": "date" in start_raw,
+                        "score": score,
+                    })
+    found.sort(key=lambda e: (-e["score"], e["start"]))
+    seen: set[tuple] = set()
+    unique = []
+    for e in found:
+        key = (e["summary"], e["start"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    return unique[:3]
+
+
+def respond_in_attendees(attendees: list[dict], response: str,
+                         email: str = "") -> list[dict] | None:
+    """New attendees list with MY responseStatus changed; None if I'm not there."""
+    out, mine = [], False
+    for a in attendees or []:
+        a = dict(a)
+        if a.get("self") or (email and a.get("email", "").lower() == email.lower()):
+            a["responseStatus"] = response
+            mine = True
+        out.append(a)
+    return out if mine else None
+
+
+async def calendar_respond(access_token: str, calendar_id: str, event_id: str,
+                           response: str, email: str = "") -> str:
+    """Set own attendance (declined/accepted/tentative). Organizer is notified —
+    same as pressing No/Yes in the Calendar UI. Returns done|not_attendee|error."""
+    from urllib.parse import quote
+    status_map = {"decline": "declined", "accept": "accepted",
+                  "tentative": "tentative"}
+    target = status_map.get(response, response)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base = ("https://www.googleapis.com/calendar/v3/calendars/"
+            f"{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(base, headers=headers)
+        if resp.status_code in (401, 403):
+            raise CalendarAccessError(str(resp.status_code))
+        if resp.status_code != 200:
+            logger.error("calendar_respond get failed: %s", resp.status_code)
+            return "error"
+        event = resp.json()
+        new_attendees = respond_in_attendees(event.get("attendees", []), target, email)
+        if new_attendees is None:
+            return "not_attendee"
+        patch = await client.patch(
+            base, headers=headers, params={"sendUpdates": "all"},
+            json={"attendees": new_attendees})
+        if patch.status_code in (401, 403):
+            raise CalendarAccessError(str(patch.status_code))
+        if patch.status_code != 200:
+            logger.error("calendar_respond patch failed: %s %s",
+                         patch.status_code, patch.text[:150])
+            return "error"
+    return "done"
 
 
 # ---------- drive (read-only) ----------
