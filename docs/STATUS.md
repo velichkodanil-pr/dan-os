@@ -76,6 +76,21 @@ event lands in the chosen account's primary calendar:
   existing events) still denied. Idempotent; reject never touches Google.
 - Migration `d4e5f60819aa` (pending_cal_creates). Tests: **64 passed**.
 
+### TravelON pulse v2 (token received — volume-aware rework)
+
+Live token turned out to be the FULL operator flow (~100 orders/day, ~1MB XML
+per day; 7-day range requests time out). Reworked before first prod use:
+
+- fetch_days(): day-sized windows fetched concurrently (semaphore 4, UA
+  header, timeout 90s; FROM==TO verified as a valid single-day window).
+- Pulse is now AGGREGATES: created today/yesterday + sums by currency,
+  arrivals today/tomorrow/7d + tourist count; per-order lines ONLY for the
+  actionable bit — unpaid balances among nearest check-ins (top 5 + total).
+- Flight-only orders (no hotel block — big share of the flow): check-in and
+  direction fall back to transport (depart date, ✈️ charter name).
+- Verified live: pulse 22.8s (26/82 orders, 513 arrivals/7d, 47 debtors),
+  brief line 9.7s. TRAVELON_TOKEN set on Railway. Tests: **66 passed**.
+
 ## Round 3b — Knowledge extensions: DELIVERED (gate: re-consent + live checks)
 
 - /drive: list Drive folders → index pdf/docx/txt/md + Google Docs (read-only,

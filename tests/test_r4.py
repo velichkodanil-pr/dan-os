@@ -156,12 +156,25 @@ SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
     </hotel>
     <costs><gross-cost/><amount-of-debt/></costs>
   </order>
+  <order>
+    <id>66422</id>
+    <order>66422</order>
+    <status>Confirmed</status>
+    <create-date>01.08.2026</create-date>
+    <valute>EUR</valute>
+    <transport>
+      <depart-departure-date>15.08.2026</depart-departure-date>
+      <depart-charter-name>Chisinau - Antalya</depart-charter-name>
+    </transport>
+    <customers><customer><name>X</name></customer></customers>
+    <costs><gross-cost>359.0</gross-cost><amount-of-debt>359.0</amount-of-debt></costs>
+  </order>
 </orders>"""
 
 
 def test_travelon_parse_minimal_fields():
     orders = travelon.parse_orders(SAMPLE_XML)
-    assert len(orders) == 2
+    assert len(orders) == 3
     o = orders[0]
     assert o.order_no == "59266" and o.status == "Confirmed"
     assert o.created == date(2026, 6, 10)
@@ -180,6 +193,14 @@ def test_travelon_parse_tolerates_empty_and_nil():
     assert o.gross_cost is None and o.debt is None and o.tourists == 0
 
 
+def test_travelon_parse_flight_only_fallbacks():
+    """Avia-only orders: check-in and direction come from the transport block."""
+    o = travelon.parse_orders(SAMPLE_XML)[2]
+    assert o.check_in == date(2026, 8, 15)
+    assert o.country.startswith("✈️ Chisinau")
+    assert o.debt == 359.0 and o.tourists == 1
+
+
 def test_travelon_empty_orders_is_zero():
     assert travelon.parse_orders("<orders/>") == []
 
@@ -190,3 +211,41 @@ async def test_travelon_unconfigured_fetch_is_noop():
     assert await travelon.fetch_period(date(2026, 1, 1), date(2026, 1, 2)) == []
     assert await travelon.brief_line() is None
     assert await travelon.pulse_text() is None
+
+
+@pytest.mark.asyncio
+async def test_travelon_pulse_aggregates(monkeypatch):
+    """Volume-aware pulse: aggregates + debt lines only, cancelled excluded."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from app.config import settings
+    monkeypatch.setattr(settings, "travelon_token", "T")
+    today = datetime.now(ZoneInfo(settings.tz_name)).date()
+
+    def order(no, status="Confirmed", check_in=None, cost=1000.0, cur="UAH",
+              debt=None, tourists=2):
+        return travelon.TravelonOrder(
+            order_no=no, status=status, created=today, hotel="H", country="Туреччина",
+            check_in=check_in, nights=7, tourists=tourists, gross_cost=cost,
+            currency=cur, debt=debt)
+
+    async def fake_period(d_from, d_to, by_entry_date=False):
+        if by_entry_date:
+            if d_from == today:
+                return [order("A1", check_in=today, debt=500.0),
+                        order("A2", check_in=today, status="Cancelled")]
+            if d_from == today + timedelta(days=1):
+                return [order("B1", check_in=today + timedelta(days=1), cur="EUR",
+                              cost=200.0)]
+            return []
+        return [order("C1"), order("C2", status="Cancelled")]  # created days
+    monkeypatch.setattr(travelon, "fetch_period", fake_period)
+
+    text = await travelon.pulse_text()
+    assert "сьогодні 1 · вчора 1" in text  # cancelled excluded from created
+    assert "сьогодні 1 · завтра 1 · за 7 днів 2" in text
+    assert "Борг у найближчих заїздах:</b> 1" in text and "500 UAH" in text
+    assert "2 000 UAH" in text  # created sum (2 active × 1000)
+
+    line = await travelon.brief_line()
+    assert "заїздів сьогодні: 1" in line and "нових заявок учора: 1" in line
