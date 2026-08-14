@@ -262,3 +262,30 @@ class HabitLog(Base):
     user_id: Mapped[int] = mapped_column(BigInteger)
     log_date: Mapped[str] = mapped_column(String(10))  # ISO YYYY-MM-DD in Europe/Kyiv
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WikiPage(Base):
+    """Compiled knowledge page (R6, inspired by llm-wiki / Karpathy's LLM Wiki).
+
+    Raw chunks answer "what did the document say"; a wiki page answers
+    "what do we KNOW about X" — facts merged from many sources over time,
+    with provenance, aliases (ТОКО / Toco UA / toco-tour.com.ua) and an
+    explicit contradictions section. kind: concept | entity | archive.
+    """
+    __tablename__ = "wiki_pages"
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_wiki_slug"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(String(16), default="entity")
+    slug: Mapped[str] = mapped_column(String(120))
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    contradictions: Mapped[str] = mapped_column(Text, default="")
+    aliases: Mapped[dict] = mapped_column(JSONB, default=list)  # list[str]
+    tags: Mapped[dict] = mapped_column(JSONB, default=list)  # list[str]
+    sources: Mapped[dict] = mapped_column(JSONB, default=list)  # list[{title,date,ref}]
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    embedding: Mapped[list | None] = mapped_column(Vector(EMBED_DIM), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

@@ -16,10 +16,34 @@ from app.core.policy import evaluate
 logger = logging.getLogger(__name__)
 
 TOOL_DEFS = [
+    {"name": "wiki_index",
+     "description": "Карта бази знань Данила: перелік сторінок (сутності — "
+                    "партнери/люди/інструменти, концепції — процеси/правила, "
+                    "архів відповідей). ПОЧИНАЙ з цього інструменту, коли "
+                    "питання про його справи, партнерів, доступи чи домовленості "
+                    "— щоб побачити, що взагалі відомо.",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "wiki_page",
+     "description": "Повна сторінка знань за назвою, слагом або будь-яким "
+                    "аліасом (ТОКО / Toco UA / toco-tour.com.ua). Тут лежать "
+                    "зібрані факти: доступи, реквізити, умови, контакти, з "
+                    "джерелами.",
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "назва/аліас/слаг"}},
+         "required": ["name"]}},
+    {"name": "wiki_save_answer",
+     "description": "Зберегти складну синтезовану відповідь як сторінку архіву, "
+                    "щоб наступного разу вона була миттєвою. Використовуй, коли "
+                    "зібрав відповідь з кількох джерел і вона буде потрібна ще.",
+     "input_schema": {"type": "object", "properties": {
+         "title": {"type": "string"}, "summary": {"type": "string"},
+         "body": {"type": "string", "description": "повний текст, markdown"}},
+         "required": ["title", "summary", "body"]}},
     {"name": "search_knowledge",
-     "description": "Пошук у базі знань Данила (документи, таблиці, транскрипти, "
-                    "пересилки; гібридний — семантика + точні збіги). Використовуй "
-                    "для питань про його файли, логіни/доступи, договори, нотатки.",
+     "description": "Пошук по СИРИХ документах (таблиці, файли Drive, транскрипти, "
+                    "пересилки; семантика + точні збіги). Використовуй, коли у "
+                    "вікі немає сторінки або треба знайти конкретний рядок/цитату "
+                    "у документі.",
      "input_schema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "запит у вільній формі"}},
          "required": ["query"]}},
@@ -52,10 +76,46 @@ TOOL_DEFS = [
          "order_no": {"type": "string"}}, "required": ["order_no"]}},
 ]
 
-_POLICY = {"search_knowledge": "note.read", "get_calendar": "calendar.read",
+_POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
+           "wiki_save_answer": "wiki.archive", "search_knowledge": "note.read", "get_calendar": "calendar.read",
            "get_recent_mail": "gmail.read", "search_mail": "gmail.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
            "travelon_order": "travelon.read"}
+
+
+async def _t_wiki_index(db, user_id, args):
+    from app.core import wiki
+    return {"index": await wiki.render_index(db, user_id)}
+
+
+async def _t_wiki_page(db, user_id, args):
+    from app.core import wiki
+    name = str(args.get("name", ""))[:120]
+    page = await wiki.find_page(db, user_id, name)
+    if page is None:
+        found = await wiki.search_pages(db, user_id, name, limit=5)
+        if not found:
+            return {"found": False,
+                    "note": "сторінки немає — спробуй search_knowledge по сирих документах"}
+        if len(found) == 1:
+            page = found[0]
+        else:
+            return {"found": False, "candidates": [
+                {"title": p.title, "slug": p.slug, "summary": p.summary[:150]}
+                for p in found]}
+    return {"found": True, "page": wiki.page_text(page)[:6000]}
+
+
+async def _t_wiki_save_answer(db, user_id, args):
+    from app.core import wiki
+    title = str(args.get("title", "")).strip()[:200]
+    body = str(args.get("body", "")).strip()
+    if len(title) < 3 or len(body) < 40:
+        return {"saved": False, "note": "замало змісту для архівної сторінки"}
+    page = await wiki.save_archive(db, user_id=user_id, title=title,
+                                   summary=str(args.get("summary", ""))[:600],
+                                   body=body[:10000])
+    return {"saved": True, "slug": page.slug}
 
 
 async def _t_search_knowledge(db, user_id, args):
@@ -161,7 +221,9 @@ async def _t_travelon_order(db, user_id, args):
     return {"card": travelon.order_card(order)} if order else {"found": False}
 
 
-_EXECUTORS = {"search_knowledge": _t_search_knowledge,
+_EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
+              "wiki_save_answer": _t_wiki_save_answer,
+              "search_knowledge": _t_search_knowledge,
               "get_calendar": _t_get_calendar,
               "get_recent_mail": _t_get_recent_mail,
               "search_mail": _t_search_mail,

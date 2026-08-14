@@ -24,10 +24,13 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "drive.read": ("L0", True, False),
     "gmail.read": ("L0", True, False),
     "calendar.read": ("L0", True, False),
+    "wiki.read": ("L0", True, False),
     "travelon.read": ("L0", True, False),  # read-only XML report, never writes
     # L1 — internal writes: automatic (undo-able)
     "raw_event.create": ("L1", True, False),
     "memory.candidate_create": ("L1", True, False),
+    "wiki.write": ("L1", True, False),  # internal knowledge page (reversible, audited)
+    "wiki.archive": ("L1", True, False),
     "proposal.create": ("L1", True, False),
     # L2 — reversible personal writes: explicit user intent (button/command)
     "task.create_via_approval": ("L2", True, True),

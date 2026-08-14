@@ -68,6 +68,14 @@ async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
     except Exception:
         logger.exception("coach weekly block failed")
 
+    try:  # compiled knowledge health (R6)
+        from app.core import wiki
+        w_block = wiki.lint_block(await wiki.lint(db, user_id))
+        if w_block:
+            lines.append(w_block)
+    except Exception:
+        logger.exception("wiki lint block failed")
+
     try:  # TravelON week summary (owner pack)
         from app.core import travelon
         t_block = await travelon.weekly_block()

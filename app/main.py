@@ -183,6 +183,7 @@ class AdminIngestRequest(BaseModel):
     text: str
     domain: str = "personal"
     source_ref: str = ""
+    compile: bool = True  # also compile into wiki pages
 
 
 @app.post("/admin/ingest")
@@ -200,14 +201,23 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
         return Response(status_code=400, content="text too short")
     domain = req.domain if req.domain in ("personal", "travelon", "tech") else "personal"
     from app.core.ingest import ingest_document
+    pages: list = []
     async with database.session() as db:
         result = await ingest_document(
             db, user_id=settings.owner_telegram_id,
             title=req.title.strip()[:200] or "Матеріал",
             text=text, source_type="cowork_upload",
             source_ref=req.source_ref.strip()[:200], domain=domain)
+        if result.status == "indexed" and result.document is not None and req.compile:
+            try:  # compile into wiki pages (best effort)
+                from app.core import wiki
+                pages = await wiki.compile_document(
+                    db, user_id=settings.owner_telegram_id, document=result.document)
+            except Exception:
+                logger.exception("admin ingest wiki compile failed")
     return {"status": result.status, "chunks": result.chunks,
-            "document_id": str(result.document.id) if result.document else None}
+            "document_id": str(result.document.id) if result.document else None,
+            "wiki_pages": [{"slug": s, "status": st} for s, st in pages]}
 
 
 class AdminSearchRequest(BaseModel):

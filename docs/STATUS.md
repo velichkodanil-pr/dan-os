@@ -1,6 +1,22 @@
 # STATUS
 
-_Last verified: 2026-08-13 (round 4 implementation session)_
+_Last verified: 2026-08-14 (R6 compiled knowledge layer)_
+
+## R6 — Wiki-пам'ять (compiled knowledge): DELIVERED
+
+- `wiki_pages` (migration `e5f60819aabb`): entity | concept | archive, with
+  summary/content/contradictions/aliases/tags/sources/domain.
+- `app/core/wiki.py`: slugify+translit aliases, find_page (spelling-insensitive,
+  containment match), search_pages, render_index, upsert_page, compile_source
+  (extract facts -> create or LLM-merge into existing page), save_archive,
+  document compilation from indexed chunks, lint + Sunday-report block.
+- Agent tools: `wiki_index`, `wiki_page`, `wiki_save_answer` (prompt: wiki
+  BEFORE raw search; save complex answers for reuse).
+- Commands: `/wiki` (index), `/wiki <назва>` (page), `/wiki_build [N]`
+  (background compilation with progress), `/wiki_lint`.
+- Auto-compile on new Telegram documents and on `/admin/ingest` (Cowork channel).
+- Tests: **118 passed** (10 new: aliases, create->merge accumulation,
+  merge-failure fact preservation, archive, lint, agent tools).
 
 ## Round 4 — Expansion: DELIVERED (gate: live phone checks pending)
 

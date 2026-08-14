@@ -155,6 +155,7 @@ async def cmd_start(message: Message) -> None:
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
+        "• /wiki — база знань сторінками (партнери, доступи, процеси) · /wiki_build\n"
         "• «напиши лист на adresa@…» → чернетка нового листа · /reply — відповідь\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
@@ -313,6 +314,134 @@ async def cmd_habits(message: Message) -> None:
     await message.answer(
         "🏃 <b>Звички цього тижня</b> (тисни, щоб відмітити/зняти сьогодні):",
         reply_markup=kb)
+
+
+# ---------- wiki: compiled knowledge (R6) ----------
+
+async def _wiki_build_job(user_id: int, limit: int) -> None:
+    """Background: compile indexed documents into wiki pages, with progress."""
+    from app.core import wiki
+    try:
+        async with database.session() as db:
+            docs = await wiki.pending_documents(db, user_id, limit=limit)
+        if not docs:
+            await bot_instance.send_message(
+                user_id, "📚 Нових документів для вікі немає — усе скомпільовано ✅")
+            return
+        await bot_instance.send_message(
+            user_id, f"📚 Компілюю знання з {len(docs)} документів "
+            "(створюю/оновлюю сторінки про партнерів, процеси, домовленості)…")
+        created = updated = failed = 0
+        for i, doc in enumerate(docs, 1):
+            try:
+                async with database.session() as db:
+                    doc = await db.merge(doc)
+                    pages = await wiki.compile_document(db, user_id=user_id, document=doc)
+                created += sum(1 for _s, st in pages if st == "created")
+                updated += sum(1 for _s, st in pages if st == "updated")
+            except Exception:
+                logger.exception("wiki compile failed: %s", doc.title[:60])
+                failed += 1
+            if i % 10 == 0:
+                await bot_instance.send_message(
+                    user_id, f"📚 {i}/{len(docs)} · нових сторінок {created}, "
+                    f"оновлено {updated}…")
+        async with database.session() as db:
+            report = await wiki.lint(db, user_id)
+        await bot_instance.send_message(
+            user_id,
+            f"📚 <b>Вікі оновлено.</b> Нових сторінок: {created} · оновлено: "
+            f"{updated}" + (f" · пропущено: {failed}" if failed else "") + "\n"
+            f"Усього: {report['total']} (сутностей {report['entities']}, "
+            f"концепцій {report['concepts']}, архів {report['archives']}).\n"
+            "Дивитись: /wiki · сторінка: /wiki ТОКО")
+    except Exception:
+        logger.exception("wiki build job failed")
+        try:
+            await bot_instance.send_message(
+                user_id, "📚 Компіляція перервалась — запусти /wiki_build ще раз "
+                "(зроблене збережено).")
+        except Exception:
+            pass
+
+
+@router.message(Command("wiki_build"))
+async def cmd_wiki_build(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    import asyncio as _asyncio
+    parts = (message.text or "").split()
+    try:
+        limit = min(max(int(parts[1]), 1), 200) if len(parts) > 1 else 40
+    except ValueError:
+        limit = 40
+    await message.answer(
+        f"📚 Стартую компіляцію знань (до {limit} документів). Це кілька хвилин — "
+        "відпишу прогрес. Повторний запуск бере наступну порцію.")
+    _asyncio.create_task(_wiki_build_job(message.from_user.id, limit))
+
+
+@router.message(Command("wiki_lint"))
+async def cmd_wiki_lint(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    from app.core import wiki
+    async with database.session() as db:
+        r = await wiki.lint(db, message.from_user.id)
+    lines = [f"🧹 <b>Стан вікі:</b> {r['total']} сторінок "
+             f"(сутності {r['entities']} · концепції {r['concepts']} · "
+             f"архів {r['archives']})"]
+    if r["conflicts"]:
+        lines.append("\n⚖️ <b>Суперечності:</b>\n" +
+                     "\n".join(f" • {t}" for t in r["conflicts"]))
+    if r["dupes"]:
+        lines.append("\n👯 <b>Схожі сторінки (варто злити):</b>\n" +
+                     "\n".join(f" • {t}" for t in r["dupes"]))
+    if r["thin"]:
+        lines.append("\n🪶 <b>Замало змісту:</b>\n" +
+                     "\n".join(f" • {t}" for t in r["thin"][:5]))
+    if r["no_source"]:
+        lines.append("\n❓ <b>Без джерела:</b>\n" +
+                     "\n".join(f" • {t}" for t in r["no_source"][:5]))
+    if len(lines) == 1:
+        lines.append("Проблем не знайшов 👌")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("wiki"))
+async def cmd_wiki(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    import html as _html
+    from app.core import wiki
+    parts = (message.text or "").split(maxsplit=1)
+    async with database.session() as db:
+        if len(parts) < 2:
+            index = await wiki.render_index(db, message.from_user.id, limit=40)
+            await message.answer(
+                "📚 <b>Вікі знань</b>\n<pre>" + _html.escape(index[:3500]) + "</pre>\n"
+                "Сторінка: <code>/wiki ТОКО</code> · оновити: /wiki_build · "
+                "перевірка: /wiki_lint")
+            return
+        query = parts[1].strip()
+        page = await wiki.find_page(db, message.from_user.id, query)
+        if page is None:
+            found = await wiki.search_pages(db, message.from_user.id, query, limit=6)
+            if not found:
+                await message.answer(
+                    f"Сторінки «{_html.escape(query)}» немає. Спробуй /wiki_build "
+                    "або просто спитай — пошукаю в документах.")
+                return
+            if len(found) == 1:
+                page = found[0]
+            else:
+                listing = "\n".join(f" • {p.title} — <code>/wiki {p.slug}</code>"
+                                    for p in found)
+                await message.answer(f"Знайшов кілька сторінок:\n{listing}")
+                return
+        text = wiki.page_text(page)
+    for i in range(0, len(text), 3800):
+        await message.answer("📄 <pre>" + _html.escape(text[i:i + 3800]) + "</pre>")
 
 
 @router.message(Command("order"))
@@ -700,6 +829,30 @@ async def cmd_kb(message: Message) -> None:
 ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".xlsx")
 
 
+async def _compile_one(message: Message, document) -> None:
+    """Compile a freshly ingested document into wiki pages (best effort)."""
+    if document is None:
+        return
+    from app.core import wiki
+    try:
+        async with database.session() as db:
+            document = await db.merge(document)
+            pages = await wiki.compile_document(
+                db, user_id=message.from_user.id, document=document)
+    except Exception:
+        logger.exception("auto wiki compile failed")
+        return
+    if pages:
+        created = [s for s, st in pages if st == "created"]
+        updated = [s for s, st in pages if st == "updated"]
+        bits = []
+        if created:
+            bits.append("нові сторінки: " + ", ".join(created[:4]))
+        if updated:
+            bits.append("оновлено: " + ", ".join(updated[:4]))
+        await message.answer("📚 Вікі: " + " · ".join(bits) + " (/wiki)")
+
+
 async def _handle_transcript_file(message: Message, name: str, text: str) -> None:
     import html as _html
     await message.answer("📝 Читаю транскрипт і готую підсумок…")
@@ -789,6 +942,7 @@ async def on_document(message: Message) -> None:
         await message.answer(
             f"📚 Додав у базу знань: <b>{name}</b> ({result.chunks} фрагментів).\n"
             "Тепер можеш просто спитати мене про його зміст.")
+        await _compile_one(message, result.document)
 
 
 def _forward_title(message: Message) -> str:

@@ -2,6 +2,40 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-14 — R6: compiled knowledge layer («LLM Wiki»)
+
+Adopted from Karpathy's LLM-Wiki idea and its Ukrainian implementation
+(github.com/BogdanovychA/llm-wiki, dou.ua/forums/topic/60484), after our own
+painful lesson: 6k+ raw chunks of flattened spreadsheets could not answer
+«який логін до ТОКО Україна?» — pure RAG re-discovers, never accumulates.
+
+What we took (and how it differs here):
+
+- **Pages, not just chunks.** `wiki_pages`: entity | concept | archive. A page
+  answers «what do we KNOW about X», merged from many sources over time.
+  Raw chunks stay as the second layer for exact quotes.
+- **Merge-vs-create.** A new source about a known partner MERGES into that
+  page (LLM merge, facts preserved; on merge failure facts are APPENDED, never
+  lost) and appends provenance instead of creating a disconnected duplicate.
+- **Aliases as first-class.** Every page carries all spellings seen in sources
+  (Toco UA / ТОКО / toco-tour.com.ua); lookup is translit- and case-insensitive
+  (к↔k↔c). This is the structural fix for the Toco failure.
+- **Contradictions section** on the page (llm-wiki's «Суперечності»), surfaced
+  by lint and in the Sunday report — instead of two silently conflicting chunks.
+- **Query archiving.** A synthesized answer can be saved as an archive page
+  (`wiki_save_answer`), so the next identical question is instant and knowledge
+  compounds (the «Гепард» answer becomes permanent).
+- **Index first.** `wiki_index` is a compact map of everything known; the
+  agentic chat is instructed to consult wiki BEFORE raw search.
+- **Lint workflow.** Thin/orphan/no-source/duplicate/conflicting pages →
+  /wiki_lint and a block in the Sunday report (llm-wiki's linter skill).
+
+What we deliberately did NOT copy: files-in-git + Obsidian storage (we keep
+Postgres — the bot needs server-side access, and provenance/audit already
+exist), and per-file subagents (our ingest is already one-document-at-a-time).
+Policy: wiki.read L0, wiki.write / wiki.archive L1 (internal, audited,
+reversible) — no confirmation cards for internal knowledge.
+
 ## 2026-08-13 — Calendar RSVP (Danylo: «він мав скасувати мою участь»)
 
 - First L3 calendar write, scoped to the SMALLEST useful action: change OWN
