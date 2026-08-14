@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text as sql_text
 
 from app import db as database
-from app.config import settings
+from app.config import APP_RELEASE, APP_VERSION, settings
 from app.core import google_client, scheduler
 from app.core.audit import audit
 from app.telegram import bot as botmod
@@ -100,7 +100,8 @@ app.include_router(webapp_router)
 
 @app.get("/health/live")
 async def health_live() -> dict:
-    return {"status": "ok", "service": "dan-os", "round": 4}
+    return {"status": "ok", "service": "dan-os", "version": APP_VERSION,
+            "release": APP_RELEASE}
 
 
 @app.get("/health/ready")
@@ -183,7 +184,9 @@ class AdminIngestRequest(BaseModel):
     text: str
     domain: str = "personal"
     source_ref: str = ""
-    compile: bool = True  # also compile into wiki pages
+    # R6.1A: compilation is a provider call over stored content — opt-in only,
+    # and only when the local security scan of the base has finished.
+    compile: bool = False
 
 
 @app.post("/admin/ingest")
@@ -200,8 +203,10 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
     if len(text) < 20:
         return Response(status_code=400, content="text too short")
     domain = req.domain if req.domain in ("personal", "travelon", "tech") else "personal"
+    from app.core import security
     from app.core.ingest import ingest_document
     pages: list = []
+    compile_status = "skipped"
     async with database.session() as db:
         result = await ingest_document(
             db, user_id=settings.owner_telegram_id,
@@ -209,14 +214,24 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
             text=text, source_type="cowork_upload",
             source_ref=req.source_ref.strip()[:200], domain=domain)
         if result.status == "indexed" and result.document is not None and req.compile:
-            try:  # compile into wiki pages (best effort)
-                from app.core import wiki
-                pages = await wiki.compile_document(
-                    db, user_id=settings.owner_telegram_id, document=result.document)
-            except Exception:
-                logger.exception("admin ingest wiki compile failed")
+            if not await security.scan_complete(db):
+                compile_status = "blocked_scan_incomplete"
+            else:
+                try:  # compile into wiki pages (best effort)
+                    from app.core import wiki
+                    outcome = await wiki.compile_document(
+                        db, user_id=settings.owner_telegram_id,
+                        document=result.document)
+                    pages, compile_status = outcome.pages, outcome.status
+                except Exception:
+                    logger.exception("admin ingest wiki compile failed")
+                    compile_status = "failed"
     return {"status": result.status, "chunks": result.chunks,
             "document_id": str(result.document.id) if result.document else None,
+            # categories only — the endpoint never echoes what it rejected
+            "security": {"categories": [str(c) for c in result.categories]}
+            if result.status == "quarantined" else None,
+            "compile_status": compile_status,
             "wiki_pages": [{"slug": s, "status": st} for s, st in pages]}
 
 

@@ -25,16 +25,19 @@ def test_thinking_params_by_model():
 
 @pytest.mark.asyncio
 async def test_tool_search_knowledge(db):
+    """Business facts stay findable (R6.1A replaced the credential fixture:
+    the tool must find WHO and WHERE, never a password)."""
     from app.core.ingest import ingest_document
-    await ingest_document(db, user_id=OWNER, title="Доступи",
-                          text="Other | Toco UA | toco-tour.example | log1 | pass1"
+    await ingest_document(db, user_id=OWNER, title="Партнери",
+                          text="Other | Toco UA | toco-tour.example | "
+                               "менеджер i.k@travelon.to | ЄДРПОУ 46140224"
                                + "\n\n" + "\n\n".join(f"рядок {i}" for i in range(30)),
                           source_type="drive", source_ref="x1")
     raw = await chat_tools.run_tool(db, OWNER, "search_knowledge",
-                                    {"query": "логін Toco"})
+                                    {"query": "реквізити Toco"})
     data = json.loads(raw)
     assert data["found"] >= 1
-    assert any("log1" in c["text"] for c in data["chunks"])
+    assert any("i.k@travelon.to" in c["text"] for c in data["chunks"])
 
 
 @pytest.mark.asyncio
@@ -120,9 +123,9 @@ def _workbook(sheets: dict) -> bytes:
 async def test_xlsx_each_sheet_is_own_document(db):
     data = _workbook({
         "Продукт": [[f"Ідея {i}", f"опис {i}"] for i in range(200)],
-        "DMC": [["Паролі від інших операторів"],
+        "DMC": [["Умови роботи з операторами"],
                 ["Other", "Toco UA", "https://toco-tour.example",
-                 "i.k@travelon.to", "Secret1"]],
+                 "i.k@travelon.to", "депозит 30%"]],
     })
     results = await ingest_xlsx_by_sheets(
         db, user_id=OWNER, filename="Travelon Project.xlsx", data=data,
@@ -130,9 +133,9 @@ async def test_xlsx_each_sheet_is_own_document(db):
     titles = [r.document.title for r in results if r.document]
     assert any("аркуш «Продукт»" in t for t in titles)
     assert any("аркуш «DMC»" in t for t in titles)
-    # the credentials row from the LAST tab is searchable
+    # the business row from the LAST tab is searchable (no credential involved)
     from app.core import rag
-    chunks = await rag.retrieve(db, user_id=OWNER, query="логін Toco пароль")
+    chunks = await rag.retrieve(db, user_id=OWNER, query="Toco депозит умови")
     assert any("i.k@travelon.to" in c.text for c in chunks)
 
 

@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core import security
 from app.core.audit import audit
 from app.core.extraction import ExtractionProvider, get_extractor
 from app.core.policy import PolicyDenied, evaluate
@@ -54,7 +55,9 @@ def _check(action: str) -> str:
 
 @dataclass
 class NoteOutcome:
-    kind: str  # duplicate | proposal | note | chat | cal_actions | cal_create | new_draft | error
+    # duplicate | proposal | note | chat | cal_actions | cal_create |
+    # new_draft | blocked | error
+    kind: str
     proposal: Proposal | None = None
     reply: str | None = None
     memory_saved: bool = False
@@ -76,6 +79,33 @@ class Orchestrator:
     ) -> NoteOutcome:
         _guard_owner(user_id)
         actor = f"user:{user_id}"
+
+        # 0) the gate (R6.1A). Runs BEFORE the raw event, before the chat log,
+        # before extraction, RAG, tools and every provider call — so a pasted
+        # credential is never persisted, embedded or sent anywhere. The body is
+        # dropped; only categories/counts survive, in the finding and the audit.
+        scan = security.scan(text)
+        if scan.blocked:
+            await security.record_finding(
+                db, user_id=user_id, resource_type="note",
+                resource_id=dedupe_key[:64], result=scan)
+            await security.audit_blocked(
+                db, user_id=user_id, action="note.blocked",
+                resource_type="raw_event", resource_id=dedupe_key[:64],
+                result=scan)
+            await db.commit()
+            return NoteOutcome(kind="blocked", reply=security.SAFE_REFUSAL)
+
+        # 0a) asking DAN.OS to hand over a stored credential: answer honestly
+        # («не зберігаю»), do NOT start a credential hunt, do not call a model.
+        if security.is_credential_request(text):
+            await audit(db, actor=actor, action="credential_request.refused",
+                        resource_type="chat", policy_level="L0")
+            db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
+            db.add(ChatLog(user_id=user_id, role="bot",
+                           text=security.SAFE_NOT_STORED[:1500]))
+            await db.commit()
+            return NoteOutcome(kind="chat", reply=security.SAFE_NOT_STORED)
 
         # 1) immutable raw event with dedupe
         _check("raw_event.create")
@@ -139,7 +169,8 @@ class Orchestrator:
                 MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
             .order_by(MemoryItem.created_at.desc()).limit(12))).scalars().all()
         history_rows = (await db.execute(
-            select(ChatLog).where(ChatLog.user_id == user_id)
+            select(ChatLog).where(ChatLog.user_id == user_id,
+                                  ChatLog.provider_eligible.is_(True))
             .order_by(ChatLog.id.desc())
             .limit(max(8, settings.chat_history_window)))).scalars().all()
         history = [(r.role, r.text) for r in reversed(history_rows)]
@@ -156,10 +187,19 @@ class Orchestrator:
             except Exception:
                 logger.exception("agenda block failed")
 
+        # last checkpoint before the prompt is assembled: the pieces come from
+        # different places (chunks, calendar titles, confirmed facts) and each
+        # is filtered upstream, but the assembled block is what actually
+        # reaches the model, so it gets checked as a whole.
+        knowledge = (rag.knowledge_block(chunks) or "") + (calendar_block or "")
+        if security.scan(knowledge).blocked:
+            logger.warning("context block withheld by secret scan")
+            knowledge = ""
+        profile = [f for f in profile if not security.scan(f).blocked]
         context = {
             "profile": list(profile),
             "history": history,
-            "knowledge": (rag.knowledge_block(chunks) or "") + (calendar_block or ""),
+            "knowledge": knowledge,
         }
 
         # 4) extraction (proposals only, never actions)
@@ -754,6 +794,13 @@ class Orchestrator:
                 break
         if not email:
             return "not_found", None
+        # the letter is external content and the draft call is a provider call
+        if security.scan_parts(email.get("subject"), email.get("body")).blocked:
+            await security.audit_blocked(
+                db, user_id=user_id, action="draft.blocked", resource_type="email",
+                result=security.scan_parts(email.get("subject"), email.get("body")))
+            await db.commit()
+            return "blocked_secret", None
         profile = (await db.execute(
             select(MemoryItem.content).where(
                 MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")

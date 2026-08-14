@@ -20,9 +20,29 @@ cp .env.example .env                            # fill TELEGRAM_BOT_TOKEN etc.
 uvicorn app.main:app --reload --port 8000
 ```
 
-Health: `GET /health/live`, `GET /health/ready`. Telegram webhook: `POST /telegram/webhook`
+Health: `GET /health/live` (returns the build `version`/`release` from
+`app/config.py`), `GET /health/ready`. Telegram webhook: `POST /telegram/webhook`
 (guarded by `X-Telegram-Bot-Api-Secret-Token`). Without `RAILWAY_PUBLIC_DOMAIN` the app
 starts fine and simply skips webhook registration.
+
+## Secrets are not knowledge (R6.1A)
+
+DAN.OS is not a password manager. Passwords, API keys, OAuth/bearer tokens,
+private keys, session cookies, recovery codes and seed phrases are detected by
+deterministic local code (`app/core/secret_policy.py` — no LLM, no embeddings,
+no network) **before** anything is persisted, embedded, compiled or sent to a
+model. Affected content is quarantined: contained and excluded from retrieval,
+never deleted by code.
+
+Usernames, e-mail addresses, URLs, IBAN/ЄДРПОУ/ІПН, invoice and order numbers
+and ordinary requisites stay fully searchable — the gate targets credentials,
+not business data.
+
+- `/kb_security_scan` (owner-only) — one local, bounded, idempotent pass over
+  the existing base. Zero provider calls; counts-only report; nothing deleted.
+- `AUTO_WIKI_COMPILE_ENABLED` (default `false`) — automatic wiki compilation
+  also requires that scan to have completed successfully.
+- Real tokens live only in Railway variables or a local gitignored `.env`.
 
 ## Layout
 

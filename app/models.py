@@ -88,7 +88,9 @@ class MemoryItem(Base):
     user_id: Mapped[int] = mapped_column(BigInteger)
     domain: Mapped[str] = mapped_column(String(32), default="personal")
     content: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(16), default="candidate")  # candidate|confirmed|superseded|deleted
+    # candidate|confirmed|superseded|deleted|quarantined
+    # quarantined = reversible containment (R6.1A), never a delete
+    status: Mapped[str] = mapped_column(String(16), default="candidate")
     confidence: Mapped[float] = mapped_column(Float, default=0.7)
     sensitivity: Mapped[str] = mapped_column(String(16), default="private")
     source_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("raw_events.id"), nullable=True)
@@ -150,7 +152,8 @@ class Document(Base):
     source_type: Mapped[str] = mapped_column(String(32))  # telegram_file|telegram_forward|drive|email
     source_ref: Mapped[str] = mapped_column(Text, default="")
     content_hash: Mapped[str] = mapped_column(String(64), unique=True)  # dedupe
-    status: Mapped[str] = mapped_column(String(16), default="indexed")  # raw|indexed|failed
+    # raw|indexed|failed|quarantined (quarantined = contained, never retrieved)
+    status: Mapped[str] = mapped_column(String(16), default="indexed")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     meta: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -200,6 +203,8 @@ class ChatLog(Base):
     user_id: Mapped[int] = mapped_column(BigInteger)
     role: Mapped[str] = mapped_column(String(8))  # user|bot
     text: Mapped[str] = mapped_column(Text)
+    # False = contained turn: never replayed into a provider prompt (R6.1A)
+    provider_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -286,6 +291,39 @@ class WikiPage(Base):
     tags: Mapped[dict] = mapped_column(JSONB, default=list)  # list[str]
     sources: Mapped[dict] = mapped_column(JSONB, default=list)  # list[{title,date,ref}]
     domain: Mapped[str] = mapped_column(String(32), default="personal")
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active|quarantined
     embedding: Mapped[list | None] = mapped_column(Vector(EMBED_DIM), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SecurityFinding(Base):
+    """Append-only record that a resource tripped the secret scanner (R6.1A).
+
+    Deliberately NOT stored here, in any form: the secret value, an excerpt,
+    a reversible encoding of it, or a hash/fingerprint of it (a hash of a
+    short credential is brute-forceable, i.e. reversible). Only the resource
+    pointer, the categories, how many findings, and which scanner version
+    said so — enough to contain and to re-scan, useless to an attacker who
+    reads the table.
+
+    One row per (resource, scanner version): re-running the scan is
+    idempotent, and a future scanner version can record its own verdict
+    without overwriting history.
+    """
+    __tablename__ = "security_findings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "resource_type", "resource_id",
+                         "scanner_version", name="uq_secfinding_resource"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    # document|wiki_page|memory_item|chat_log|raw_event|note|ingest|compile|tool_output
+    resource_type: Mapped[str] = mapped_column(String(32))
+    resource_id: Mapped[str] = mapped_column(String(64), default="")
+    categories: Mapped[dict] = mapped_column(JSONB, default=list)  # list[str]
+    finding_count: Mapped[int] = mapped_column(Integer, default=0)
+    scanner_version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open|resolved
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -4,6 +4,17 @@ The model DECIDES what it needs and reaches for it — no more hardcoded
 regex triggers deciding for it. READ-ONLY tools only: every executor passes
 the deterministic policy (L0) before touching data; anything that WRITES
 stays behind the existing preview-card flows. Tool output is DATA.
+
+R6.1A tightened two things here:
+
+- `wiki_save_answer` is GONE. It was the one tool that let the model write to
+  long-term memory on its own initiative, and «save the answer you just
+  assembled» is how partner credentials became a permanent, retrievable wiki
+  page. A user-confirmed save flow comes back as R6.3.
+- Every tool result is scanned before it is handed to the model. Tools read
+  from places DAN.OS does not control — mailboxes, spreadsheets, chunks
+  indexed before this round — so the last checkpoint before the model's
+  context is here, not in the callers.
 """
 import json
 import logging
@@ -25,20 +36,12 @@ TOOL_DEFS = [
      "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "wiki_page",
      "description": "Повна сторінка знань за назвою, слагом або будь-яким "
-                    "аліасом (ТОКО / Toco UA / toco-tour.com.ua). Тут лежать "
-                    "зібрані факти: доступи, реквізити, умови, контакти, з "
-                    "джерелами.",
+                    "аліасом (ТОКО / Toco UA / toco-tour.com.ua). Тут зібрані "
+                    "факти: сервіс, посилання, логін, умови, реквізити, "
+                    "контакти — з джерелами. Паролів і токенів тут немає.",
      "input_schema": {"type": "object", "properties": {
          "name": {"type": "string", "description": "назва/аліас/слаг"}},
          "required": ["name"]}},
-    {"name": "wiki_save_answer",
-     "description": "Зберегти складну синтезовану відповідь як сторінку архіву, "
-                    "щоб наступного разу вона була миттєвою. Використовуй, коли "
-                    "зібрав відповідь з кількох джерел і вона буде потрібна ще.",
-     "input_schema": {"type": "object", "properties": {
-         "title": {"type": "string"}, "summary": {"type": "string"},
-         "body": {"type": "string", "description": "повний текст, markdown"}},
-         "required": ["title", "summary", "body"]}},
     {"name": "search_knowledge",
      "description": "Пошук по СИРИХ документах (таблиці, файли Drive, транскрипти, "
                     "пересилки; семантика + точні збіги). Використовуй, коли у "
@@ -77,7 +80,7 @@ TOOL_DEFS = [
 ]
 
 _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
-           "wiki_save_answer": "wiki.archive", "search_knowledge": "note.read", "get_calendar": "calendar.read",
+           "search_knowledge": "note.read", "get_calendar": "calendar.read",
            "get_recent_mail": "gmail.read", "search_mail": "gmail.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
            "travelon_order": "travelon.read"}
@@ -104,18 +107,6 @@ async def _t_wiki_page(db, user_id, args):
                 {"title": p.title, "slug": p.slug, "summary": p.summary[:150]}
                 for p in found]}
     return {"found": True, "page": wiki.page_text(page)[:6000]}
-
-
-async def _t_wiki_save_answer(db, user_id, args):
-    from app.core import wiki
-    title = str(args.get("title", "")).strip()[:200]
-    body = str(args.get("body", "")).strip()
-    if len(title) < 3 or len(body) < 40:
-        return {"saved": False, "note": "замало змісту для архівної сторінки"}
-    page = await wiki.save_archive(db, user_id=user_id, title=title,
-                                   summary=str(args.get("summary", ""))[:600],
-                                   body=body[:10000])
-    return {"saved": True, "slug": page.slug}
 
 
 async def _t_search_knowledge(db, user_id, args):
@@ -222,7 +213,6 @@ async def _t_travelon_order(db, user_id, args):
 
 
 _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
-              "wiki_save_answer": _t_wiki_save_answer,
               "search_knowledge": _t_search_knowledge,
               "get_calendar": _t_get_calendar,
               "get_recent_mail": _t_get_recent_mail,
@@ -232,8 +222,22 @@ _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
               "travelon_order": _t_travelon_order}
 
 
+_WITHHELD = {"withheld": True, "reason": "secret_detected",
+             "note": "У знайденому фрагменті є пароль/токен/ключ. DAN.OS не "
+                     "передає такі значення. Скажи Данилу, ЩО саме знайшлось "
+                     "(сервіс, документ) і що доступ треба взяти в менеджері "
+                     "паролів; значення не називай — ти його не бачив."}
+
+
 async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str:
-    """Execute one read-tool under policy; ALWAYS returns a JSON string."""
+    """Execute one read-tool under policy; ALWAYS returns a JSON string.
+
+    The last checkpoint before the model's context: whatever a tool dug up —
+    a mailbox thread, a spreadsheet row, a chunk indexed before R6.1A — is
+    scanned here. A blocked result is replaced wholesale, not redacted in
+    place, because a partial redaction still leaks structure.
+    """
+    from app.core import security
     action = _POLICY.get(name)
     if action is None or not evaluate(action).allowed:
         return json.dumps({"error": f"інструмент {name} не дозволено"},
@@ -243,4 +247,18 @@ async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str
     except Exception:
         logger.exception("tool %s failed", name)
         result = {"error": "інструмент тимчасово не спрацював"}
-    return json.dumps(result, ensure_ascii=False, default=str)[:8000]
+    payload = json.dumps(result, ensure_ascii=False, default=str)[:8000]
+    scan = security.scan(payload)
+    if scan.blocked:
+        logger.info("tool %s: output withheld by secret scan (categories=%s)",
+                    name, ",".join(str(c) for c in scan.categories))
+        await security.record_finding(db, user_id=user_id,
+                                      resource_type="tool_output",
+                                      resource_id=name, result=scan)
+        await security.audit_blocked(db, user_id=user_id,
+                                     action="tool.output_withheld",
+                                     resource_type="tool", resource_id=name,
+                                     result=scan)
+        await db.commit()
+        return json.dumps(_WITHHELD, ensure_ascii=False)
+    return payload

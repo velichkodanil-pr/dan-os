@@ -1,6 +1,69 @@
 # STATUS
 
-_Last verified: 2026-08-14 (R6 compiled knowledge layer)_
+_Last verified: 2026-08-14 (R6.1A — tests green locally; NOT deployed)_
+
+## R6.1A — Emergency knowledge safety: CODE COMPLETE, NOT DEPLOYED
+
+Hard secrets no longer reach persistence, embeddings, the wiki compiler, chat
+context or model tool output. Existing content is contained by an owner-run
+local scan, without any automatic deletion.
+
+- **`app/core/secret_policy.py`** — deterministic classifier: password,
+  api_key, oauth_token, bearer_token, private_key, session_cookie,
+  recovery_code, seed_phrase. No LLM / embeddings / web / connectors. Patterns
+  compiled once; NFKC + unicode-whitespace normalisation (fullwidth,
+  zero-width and nbsp evasion); the WHOLE document is scanned in overlapping
+  20k windows, never a prefix; credential TABLES (a «Пароль» column with values
+  on other rows) are matched positionally. `scan_text()` returns
+  `SecretScanResult(blocked, categories, finding_count)` — never a value, an
+  excerpt, an encoding or a hash.
+- **`app/core/security.py`** — the single core gate: fail-closed scan, append-
+  only findings (idempotent per resource + scanner version, SAVEPOINT-safe),
+  metadata-only audit, the Ukrainian safe replies, the scan-complete flag, and
+  the deterministic «is this asking for a stored credential?» check.
+- **Gate points** — `ingest_document` (before `chunk_text` and the embedder),
+  `ingest_document_parts` (whole source before splitting, so a secret cannot
+  ride a part boundary), per-sheet xlsx, `Orchestrator.handle_note` (before
+  RawEvent / ChatLog / extractor / RAG / tools), transcripts, Drive,
+  `/admin/ingest`, the wiki compiler (before the provider call AND on its
+  output), `upsert_page`, `chat_tools.run_tool` (every tool result before it
+  reaches the model), the Gmail digest, reply-draft composition, and the
+  assembled chat context block (chunks + calendar + profile facts).
+- **Containment** — `security_findings` (migration `f6a1b2c3d4e7`),
+  `Document.status=quarantined`, `WikiPage.status=active|quarantined`,
+  `MemoryItem.status=quarantined`, `ChatLog.provider_eligible=false`. Every
+  retrieval, wiki lookup, index, lint and chat-history path filters them out.
+  Raw events are flagged, never modified or deleted.
+- **`/kb_security_scan`** (owner-only) — bounded keyset batches over chunks
+  (grouped by document), wiki pages, memory, chat log and raw-event payloads.
+  Zero provider calls, idempotent re-runs, counts-only report with no titles
+  or excerpts. The scan-complete flag is cleared at start and set only after a
+  full successful pass.
+- **Autonomy reduced** — `wiki_save_answer` removed from tool defs, policy map,
+  executors, agent prompt, tests and docs (returns as a confirmed flow in
+  R6.3). `AUTO_WIKI_COMPILE_ENABLED=false` by default; `/admin/ingest`
+  `compile` defaults to false; `/wiki_build` and auto-compile refuse until the
+  scan gate is complete.
+- **Honest compilation status** — `pending | succeeded | empty_valid | failed |
+  deferred_large | quarantined` + compiler_version, source_chars,
+  processed_chars, pages, error_code, timestamp. `failed` and `deferred_large`
+  stay in the pending queue; error metadata carries codes, never bodies.
+- **Version metadata** — `APP_VERSION`/`APP_RELEASE` in `app/config.py`;
+  `/health/live` and `/start` no longer claim «round 4».
+- Tests: **186 passed** locally (68 new in `tests/test_security.py`; the tests
+  that asserted credential retention/retrieval were replaced, not left
+  contradicting). Provider tripwires fail a test on any embedder, Anthropic or
+  network call on a gated path. Migration verified three ways: fresh DB from
+  zero, upgrade of a populated R6 database (rows and defaults intact), and a
+  replay over an already-applied schema.
+
+Not done here (deliberately, own rounds): domain isolation (R6.1B), wiki
+revisions / durable queue / full section compiler (R6.2), confirmed
+save-answer (R6.3), vault connector, and deletion of existing data.
+
+Gate: Danylo reviews and pushes; then deploy → `/kb_security_scan` → rotate
+any credentials that may have been indexed → keep auto-compilation off until
+the result is reviewed.
 
 ## R6 — Wiki-пам'ять (compiled knowledge): DELIVERED
 
@@ -10,13 +73,15 @@ _Last verified: 2026-08-14 (R6 compiled knowledge layer)_
   containment match), search_pages, render_index, upsert_page, compile_source
   (extract facts -> create or LLM-merge into existing page), save_archive,
   document compilation from indexed chunks, lint + Sunday-report block.
-- Agent tools: `wiki_index`, `wiki_page`, `wiki_save_answer` (prompt: wiki
-  BEFORE raw search; save complex answers for reuse).
+- Agent tools: `wiki_index`, `wiki_page` (prompt: wiki BEFORE raw search).
+  `wiki_save_answer` shipped in R6 and was REMOVED in R6.1A — see above.
 - Commands: `/wiki` (index), `/wiki <назва>` (page), `/wiki_build [N]`
   (background compilation with progress), `/wiki_lint`.
-- Auto-compile on new Telegram documents and on `/admin/ingest` (Cowork channel).
-- Tests: **118 passed** (10 new: aliases, create->merge accumulation,
-  merge-failure fact preservation, archive, lint, agent tools).
+- Auto-compile on new Telegram documents and on `/admin/ingest` (Cowork
+  channel) — DISABLED BY DEFAULT since R6.1A (`AUTO_WIKI_COMPILE_ENABLED`,
+  plus the scan gate).
+- Tests at the time of R6: **118 passed** (10 new: aliases, create->merge
+  accumulation, merge-failure fact preservation, archive, lint, agent tools).
 
 ## Round 4 — Expansion: DELIVERED (gate: live phone checks pending)
 

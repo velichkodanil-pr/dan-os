@@ -3,6 +3,11 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Build identity. One constant, updated per round — /health/live and /start
+# read it instead of carrying a hardcoded round number that goes stale.
+APP_VERSION = "r6.1a"
+APP_RELEASE = "R6.1A — emergency knowledge safety"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -59,6 +64,11 @@ class Settings(BaseSettings):
 
     # Full-Drive indexing cap per account per run (/drive_all)
     drive_index_max: int = 300
+
+    # R6.1A: autonomous wiki compilation is OFF by default. Compilation is a
+    # provider call over stored sources, so it stays opt-in AND gated on a
+    # completed local security scan — see app/core/security.py.
+    auto_wiki_compile_enabled: bool = False
 
     @property
     def public_url(self) -> str:

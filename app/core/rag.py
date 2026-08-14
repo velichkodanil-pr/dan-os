@@ -31,8 +31,39 @@ def looks_like_question(text: str) -> bool:
     return bool(_QUESTION_RE.search(text.strip()))
 
 
-_LOOKUP_RE = re.compile(r"логін|пароль|доступ|реквізит|login|password|iban|єдрпоу",
-                        re.IGNORECASE)
+def _not_quarantined():
+    """Containment filter — every retrieval path must carry it (R6.1A)."""
+    return Document.status != "quarantined"
+
+
+def _safe_chunks(chunks: list["RetrievedChunk"]) -> list["RetrievedChunk"]:
+    """Second line of defence: drop any chunk that still carries a secret.
+
+    Quarantine is the primary mechanism, but chunks indexed before this round
+    exist until `/kb_security_scan` runs — and retrieval must be safe on the
+    very first request after deploy, not only after the owner remembers to
+    scan. Cheap: a handful of ≤900-char chunks per query.
+    """
+    from app.core import security
+    out = []
+    for c in chunks:
+        if security.scan(c.text).blocked:
+            logger.info("retrieval: chunk withheld by secret scan (source=%r)",
+                        c.title[:60])
+            continue
+        out.append(c)
+    return out
+
+
+# R6.1A: this is an IDENTIFIER lookup trigger, not a credential lookup trigger.
+# «логін/пароль/password» were removed on purpose — hunting for a stored
+# credential is no longer a supported behaviour, it is the defect this round
+# fixes. Ordinary business identifiers (requisites, IBAN, ЄДРПОУ, invoice and
+# order numbers) still get the exact-substring boost, because a semantic
+# search genuinely loses a single table row among similar prose.
+_LOOKUP_RE = re.compile(
+    r"реквізит|iban|єдрпоу|ідентифікаційн|іпн\b|розрахунков|номер\s+рахунк|"
+    r"invoice|рахунок|замовлен|declaration|номер\s+догов", re.IGNORECASE)
 _WORD_RE = re.compile(r"[\w'-]{4,}", re.UNICODE)
 _STOP = {"який", "яка", "яке", "котрий", "будь", "ласка", "мене", "мені",
          "логін", "пароль", "доступ", "реквізити", "login", "password", "скажи",
@@ -80,7 +111,7 @@ async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
     rows = (await db.execute(
         select(KnowledgeChunk.text, Document.title, Document.created_at)
         .join(Document, Document.id == KnowledgeChunk.document_id)
-        .where(KnowledgeChunk.user_id == user_id, cond)
+        .where(KnowledgeChunk.user_id == user_id, cond, _not_quarantined())
         .order_by(Document.created_at.desc())
         .limit(16)
     )).all()
@@ -110,14 +141,14 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
         select(KnowledgeChunk.text, Document.title, Document.created_at,
                dist.label("dist"))
         .join(Document, Document.id == KnowledgeChunk.document_id)
-        .where(KnowledgeChunk.user_id == user_id)
+        .where(KnowledgeChunk.user_id == user_id, _not_quarantined())
         .order_by(dist)
         .limit(k + 3 if lookup else k)
     )).all()
     out = [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
                           distance=float(r.dist))
            for r in rows if float(r.dist) <= MAX_DISTANCE]
-    if lookup:  # credentials/requisites question -> add exact-substring hits
+    if lookup:  # requisites/identifier question -> add exact-substring hits
         try:
             seen = {c.text for c in out}
             for hit in await _keyword_hits(db, user_id, query):
@@ -125,7 +156,7 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
                     out.insert(0, hit)  # exact matches first — they ARE the answer
         except Exception:
             logger.exception("keyword fallback failed")
-    return out[:k + 3]
+    return _safe_chunks(out[:k + 3])
 
 
 async def log_gap(db: AsyncSession, *, user_id: int, question: str) -> None:

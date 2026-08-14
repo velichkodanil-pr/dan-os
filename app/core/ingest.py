@@ -1,7 +1,13 @@
-"""Knowledge ingestion: extract text -> chunk -> embed -> store with provenance.
+"""Knowledge ingestion: scan -> extract text -> chunk -> embed -> store.
 
 Content is DATA: nothing in an ingested file can trigger actions (policy stays
 in code). Dedupe by content hash — re-ingesting the same content is a no-op.
+
+R6.1A: the secret scan runs BEFORE chunking and BEFORE the embedder, so a
+credential-bearing file costs zero provider calls and leaves zero source text
+behind. What survives is a metadata-only Document row in `quarantined` state:
+Danylo can see that a file was rejected and why (categories, counts) without
+the content being stored, indexed or retrievable.
 """
 import hashlib
 import io
@@ -14,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import security
 from app.core.audit import audit
 from app.core.embeddings import get_embedder
 from app.models import Document, KnowledgeChunk
@@ -33,7 +40,12 @@ ALLOWED_EXT = {".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".tsv", "
 def xlsx_to_sheets(data: bytes) -> list[tuple[str, str]]:
     """Workbook -> [(sheet_title, text)]. Each SHEET becomes its own document
     downstream, so a mega-workbook can never crowd its later tabs out of the
-    index (the DMC-passwords lesson). Rows stay atomic paragraphs."""
+    index. Rows stay atomic paragraphs, because in a business table the ROW is
+    the fact (partner, site, terms, contact) and splitting it destroys meaning.
+
+    Per-sheet ingest also gives the security gate the right granularity: one
+    tab with credentials is quarantined on its own, the rest of the workbook
+    still gets indexed."""
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     sheets: list[tuple[str, str]] = []
@@ -60,12 +72,12 @@ def xlsx_to_sheets(data: bytes) -> list[tuple[str, str]]:
 
 def _xlsx_to_text(data: bytes) -> str:
     """Workbook -> text: every sheet titled, every ROW an atomic paragraph
-    (credential/contact tables must never split between name and login).
+    (contact/terms tables must never split between the name and its values).
 
     Google-exported xlsx often carries WRONG dimension metadata; read_only
-    iter_rows silently stops at the declared bound and drops the sheet tail —
-    exactly where password sections live. reset_dimensions() forces a full
-    scan to the real end of each sheet."""
+    iter_rows silently stops at the declared bound and drops the sheet tail.
+    reset_dimensions() forces a full scan to the real end of each sheet — the
+    security scan needs the whole sheet as much as retrieval does."""
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts: list[str] = []
@@ -161,7 +173,7 @@ def extract_text(filename: str, data: bytes) -> str:
     elif name.endswith((".csv", ".tsv")):
         raw = data.decode("utf-8", "ignore")
         # each row becomes a paragraph -> chunker never cuts a row in half
-        # (critical for credential/contact tables: the row IS the fact)
+        # (critical for contact/terms tables: the row IS the fact)
         text = "\n\n".join(line for line in raw.splitlines() if line.strip())
     elif name.endswith((".txt", ".md")):
         text = data.decode("utf-8", "ignore")
@@ -197,10 +209,11 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
 
 @dataclass
 class IngestResult:
-    status: str  # indexed | duplicate | error
+    status: str  # indexed | duplicate | quarantined | error
     document: Document | None = None
     chunks: int = 0
     error: str | None = None
+    categories: tuple = ()  # secret categories when quarantined (never values)
 
 
 async def ingest_document(
@@ -215,7 +228,38 @@ async def ingest_document(
         await audit(db, actor=f"user:{user_id}", action="ingest", resource_type="document",
                     resource_id=existing.id, outcome="dedupe", title=title)
         await db.commit()
-        return IngestResult(status="duplicate", document=existing, chunks=existing.chunk_count)
+        # re-uploading a quarantined file stays quarantined and stays silent
+        # about its content — the dedupe path must not become a read channel
+        status = "quarantined" if existing.status == "quarantined" else "duplicate"
+        return IngestResult(status=status, document=existing,
+                            chunks=existing.chunk_count)
+
+    # ---- the gate: nothing below this line may see a credential ----
+    scan = security.scan(text)
+    if scan.blocked:
+        doc = Document(user_id=user_id, domain=domain, title=title[:200],
+                       source_type=source_type, source_ref=source_ref[:500],
+                       content_hash=content_hash, status="quarantined",
+                       chunk_count=0,
+                       meta={**(meta or {}), "security": scan.as_meta()})
+        db.add(doc)
+        try:
+            await db.flush()
+        except IntegrityError:  # race on hash
+            await db.rollback()
+            return IngestResult(status="duplicate")
+        await security.record_finding(db, user_id=user_id, domain=domain,
+                                      resource_type="document",
+                                      resource_id=doc.id, result=scan)
+        await security.audit_blocked(db, user_id=user_id, action="ingest.quarantined",
+                                     resource_type="document", resource_id=doc.id,
+                                     result=scan)
+        await db.commit()
+        logger.info("ingest quarantined: source=%s categories=%s findings=%d",
+                    source_type, ",".join(str(c) for c in scan.categories),
+                    scan.finding_count)
+        return IngestResult(status="quarantined", document=doc, chunks=0,
+                            categories=scan.categories)
 
     chunks = chunk_text(text)
     if not chunks:
@@ -299,8 +343,17 @@ async def ingest_document_parts(
     source_type: str, source_ref: str = "", domain: str = "personal",
     meta: dict | None = None,
 ) -> list[IngestResult]:
-    """Oversized texts (huge workbooks/exports) become «title (ч.N)» parts —
-    NOTHING gets silently truncated (the tail is where password sections live)."""
+    """Oversized texts (huge workbooks/exports) become «title (ч.N)» parts.
+
+    The scan runs on the WHOLE text before splitting, so a credential block
+    cannot be smuggled in by landing on a part boundary; the whole source is
+    then contained as one metadata-only row rather than partly indexed.
+    """
+    scan = security.scan(text)
+    if scan.blocked:
+        return [await ingest_document(
+            db, user_id=user_id, title=title, text=text, source_type=source_type,
+            source_ref=source_ref, domain=domain, meta=meta)]
     if len(text) <= PART_CHARS:
         return [await ingest_document(db, user_id=user_id, title=title, text=text,
                                       source_type=source_type, source_ref=source_ref,

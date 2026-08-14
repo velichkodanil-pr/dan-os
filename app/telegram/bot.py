@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 from app import db as database
-from app.config import settings
+from app.config import APP_RELEASE, settings
 from app.core import briefs, google_client
 from app.core.orchestrator import Orchestrator
 from app.core.policy import PolicyDenied
@@ -143,7 +143,10 @@ async def cmd_start(message: Message) -> None:
     if not _is_owner(message):
         return
     await message.answer(
-        "Привіт, Данило! <b>DAN.OS</b> · раунд 4 🟢\n\n"
+        f"Привіт, Данило! <b>DAN.OS</b> · {APP_RELEASE} 🟢\n\n"
+        "🔒 Паролі, токени, ключі й seed-фрази я НЕ зберігаю: такий текст "
+        "відсікається до бази, до пошуку і до моделі. Тримай доступи в "
+        "менеджері паролів · перевірити наявну базу: /kb_security_scan\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
@@ -155,7 +158,7 @@ async def cmd_start(message: Message) -> None:
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
-        "• /wiki — база знань сторінками (партнери, доступи, процеси) · /wiki_build\n"
+        "• /wiki — база знань сторінками (партнери, процеси, умови) · /wiki_build\n"
         "• «напиши лист на adresa@…» → чернетка нового листа · /reply — відповідь\n"
         "• /accounts — Google-акаунти (можна кілька: особистий + робочі)\n"
         "• /today · /brief · /checkin · /kb\n"
@@ -332,13 +335,21 @@ async def _wiki_build_job(user_id: int, limit: int) -> None:
             user_id, f"📚 Компілюю знання з {len(docs)} документів "
             "(створюю/оновлюю сторінки про партнерів, процеси, домовленості)…")
         created = updated = failed = 0
+        quarantined = deferred = 0
         for i, doc in enumerate(docs, 1):
             try:
                 async with database.session() as db:
                     doc = await db.merge(doc)
-                    pages = await wiki.compile_document(db, user_id=user_id, document=doc)
-                created += sum(1 for _s, st in pages if st == "created")
-                updated += sum(1 for _s, st in pages if st == "updated")
+                    outcome = await wiki.compile_document(
+                        db, user_id=user_id, document=doc)
+                created += sum(1 for _s, st in outcome.pages if st == "created")
+                updated += sum(1 for _s, st in outcome.pages if st == "updated")
+                if outcome.status == "quarantined":
+                    quarantined += 1
+                elif outcome.status == "deferred_large":
+                    deferred += 1
+                elif outcome.status == "failed":
+                    failed += 1
             except Exception:
                 logger.exception("wiki compile failed: %s", doc.title[:60])
                 failed += 1
@@ -348,13 +359,19 @@ async def _wiki_build_job(user_id: int, limit: int) -> None:
                     f"оновлено {updated}…")
         async with database.session() as db:
             report = await wiki.lint(db, user_id)
+        extra = ""
+        if quarantined:
+            extra += f"\n🔒 У карантині (є секрети, не компілюю): {quarantined}."
+        if deferred:
+            extra += (f"\n📏 Завеликі — оброблено лише початок: {deferred}. "
+                      "Лишились у черзі на повну компіляцію.")
         await bot_instance.send_message(
             user_id,
             f"📚 <b>Вікі оновлено.</b> Нових сторінок: {created} · оновлено: "
-            f"{updated}" + (f" · пропущено: {failed}" if failed else "") + "\n"
+            f"{updated}" + (f" · невдалих: {failed}" if failed else "") + "\n"
             f"Усього: {report['total']} (сутностей {report['entities']}, "
-            f"концепцій {report['concepts']}, архів {report['archives']}).\n"
-            "Дивитись: /wiki · сторінка: /wiki ТОКО")
+            f"концепцій {report['concepts']}, архів {report['archives']})."
+            + extra + "\nДивитись: /wiki · сторінка: /wiki ТОКО")
     except Exception:
         logger.exception("wiki build job failed")
         try:
@@ -370,6 +387,15 @@ async def cmd_wiki_build(message: Message) -> None:
     if not _is_owner(message):
         return
     import asyncio as _asyncio
+    from app.core import security
+    async with database.session() as db:
+        if not await security.scan_complete(db):
+            await message.answer(
+                "🔒 Спершу локальна перевірка бази: <b>/kb_security_scan</b>.\n"
+                "Компіляція відправляє збережені документи в модель, тому вона "
+                "заблокована, доки не перевірено, що в базі немає паролів і "
+                "токенів. Скан локальний — жодних зовнішніх викликів.")
+            return
     parts = (message.text or "").split()
     try:
         limit = min(max(int(parts[1]), 1), 200) if len(parts) > 1 else 40
@@ -403,6 +429,10 @@ async def cmd_wiki_lint(message: Message) -> None:
     if r["no_source"]:
         lines.append("\n❓ <b>Без джерела:</b>\n" +
                      "\n".join(f" • {t}" for t in r["no_source"][:5]))
+    if r.get("quarantined"):
+        lines.append(f"\n🔒 <b>У карантині:</b> {r['quarantined']} сторінок — "
+                     "у них знайдено секрети, тому їх не видно ні в пошуку, "
+                     "ні моделі. Назви не показую навмисно.")
     if len(lines) == 1:
         lines.append("Проблем не знайшов 👌")
     await message.answer("\n".join(lines))
@@ -598,7 +628,7 @@ async def _index_all_drive(user_id: int) -> None:
     try:
         async with database.session() as db:
             accounts = await google_client.get_accounts(db, user_id)
-        grand = {"added": 0, "dups": 0, "failed": 0}
+        grand = {"added": 0, "dups": 0, "failed": 0, "blocked": 0}
         for cred in accounts:
             async with database.session() as db:
                 cred = await db.merge(cred)
@@ -633,7 +663,7 @@ async def _index_all_drive(user_id: int) -> None:
             await bot_instance.send_message(
                 user_id, f"📧 {cred.account_email}: знайшов {len(files)} файлів, "
                 "індексую…")
-            added = dups = failed = 0
+            added = dups = failed = blocked = 0
             for i, f in enumerate(files, 1):
                 try:
                     # fast path: same file id + same modifiedTime -> no download
@@ -678,6 +708,8 @@ async def _index_all_drive(user_id: int) -> None:
                     statuses = [r.status for r in results]
                     if "indexed" in statuses:
                         added += 1
+                    elif "quarantined" in statuses:
+                        blocked += 1
                     elif "duplicate" in statuses:
                         dups += 1
                     else:
@@ -699,16 +731,22 @@ async def _index_all_drive(user_id: int) -> None:
             grand["added"] += added
             grand["dups"] += dups
             grand["failed"] += failed
+            grand["blocked"] += blocked
             await bot_instance.send_message(
                 user_id, f"📧 <b>{cred.account_email}</b>: файлів {len(files)} · "
-                f"додано {added} · вже було {dups} · пропущено {failed}")
+                f"додано {added} · вже було {dups} · пропущено {failed}"
+                + (f" · 🔒 в карантині {blocked}" if blocked else ""))
         await _set_flag("drive_all_running", None)
         await bot_instance.send_message(
             user_id,
             f"🗂 <b>Індексація Drive завершена.</b> Нових документів: "
-            f"{grand['added']} (дублікатів {grand['dups']}).\n"
-            "Тепер просто питай: «який логін до …», «де договір з …», "
-            "«що в файлі …» — знайду і процитую джерело.")
+            f"{grand['added']} (дублікатів {grand['dups']})."
+            + (f"\n🔒 У карантині: {grand['blocked']} — там паролі/токени, "
+               "їх не збережено і не проіндексовано."
+               if grand["blocked"] else "")
+            + "\nТепер просто питай: «де договір з …», «які умови в …», "
+              "«що в файлі …» — знайду і процитую джерело. Паролів і токенів "
+              "у мене немає за архітектурою — тримай їх у менеджері паролів.")
     except Exception:
         logger.exception("drive_all failed")
         try:
@@ -791,6 +829,11 @@ async def cmd_reply(message: Message) -> None:
         await message.answer("Спершу /connect_google")
     elif status == "not_found":
         await message.answer("Лист за цим запитом не знайшов. Уточни відправника чи тему.")
+    elif status == "blocked_secret":
+        await message.answer(
+            "🔒 У цьому листі є пароль / токен / ключ доступу, тому я не "
+            "відправляв його в модель і чернетку не складав. Відповідай на "
+            "нього вручну, а доступ поклади в менеджер паролів.")
     elif status != "proposed" or draft is None:
         await message.answer("Не зміг скласти чернетку, спробуй ще раз.")
     else:
@@ -813,38 +856,108 @@ async def cmd_kb(message: Message) -> None:
         total = (await db.execute(
             select(func.count()).select_from(Document)
             .where(Document.user_id == message.from_user.id))).scalar_one()
+        quarantined = (await db.execute(
+            select(func.count()).select_from(Document)
+            .where(Document.user_id == message.from_user.id,
+                   Document.status == "quarantined"))).scalar_one()
     if not total:
         await message.answer(
             "📚 База знань порожня. Перешли мені документ (pdf, docx, txt, md) "
             "або будь-яке повідомлення — і я запам'ятаю.")
         return
     lines = [f"📚 <b>База знань:</b> {total} документ(ів). Останні:"]
-    lines += [f" • {d.title} ({d.chunk_count} фр., {d.created_at.strftime('%d.%m')})"
+    lines += [(" • 🔒 " if d.status == "quarantined" else " • ")
+              + f"{d.title} ({d.chunk_count} фр., {d.created_at.strftime('%d.%m')})"
               for d in docs]
+    if quarantined:
+        lines.append(f"\n🔒 У карантині: {quarantined} — там паролі/токени, "
+                     "у пошук вони не потрапляють.")
     await message.answer("\n".join(lines))
+
+
+# ---------- local security scan of the existing base (R6.1A) ----------
+
+async def _security_scan_job(user_id: int) -> None:
+    """Owner-run, local, bounded. Never calls OpenAI/Anthropic/web/connectors."""
+    from app.core import security_scan
+    try:
+        async with database.session() as db:
+            report = await security_scan.run_scan(db, user_id=user_id)
+        await bot_instance.send_message(user_id,
+                                        security_scan.report_text(report))
+        if report.completed and not report.affected:
+            await bot_instance.send_message(
+                user_id, "Автокомпіляцію вікі тепер можна вмикати: постав "
+                "<code>AUTO_WIKI_COMPILE_ENABLED=true</code> у змінних "
+                "Railway. /wiki_build уже доступний.")
+    except Exception:
+        logger.exception("kb security scan failed")
+        try:
+            await bot_instance.send_message(
+                user_id, "🔒 Скан перервався помилкою. Позначку «перевірено» "
+                "НЕ поставлено — запусти /kb_security_scan ще раз (він "
+                "ідемпотентний, повторний запуск безпечний).")
+        except Exception:
+            pass
+
+
+@router.message(Command("kb_security_scan"))
+async def cmd_kb_security_scan(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    import asyncio as _asyncio
+    await message.answer(
+        "🔒 Стартую локальну перевірку бази знань на паролі/токени/ключі.\n"
+        "Це детермінований код на цій же машині — жодного виклику до "
+        "OpenAI, Anthropic, вебу чи конекторів. Нічого не видаляю: знайдене "
+        "переводжу в карантин (можна повернути). Відпишу лише цифрами.")
+    _asyncio.create_task(_security_scan_job(message.from_user.id))
 
 
 # ---------- knowledge intake: files & forwards ----------
 
 ALLOWED_DOC_EXT = (".pdf", ".docx", ".txt", ".md", ".vtt", ".srt", ".csv", ".xlsx")
 
+# Says what happened and what to do; never quotes what triggered it.
+_QUARANTINE_MSG = (
+    "🔒 <b>{name}</b> — у карантині: у файлі є паролі / токени / ключі доступу.\n"
+    "Текст НЕ збережено, НЕ проіндексовано і нікуди не відправлено.\n\n"
+    "Тримай доступи в менеджері паролів (1Password, Bitwarden, Keeper). "
+    "Якщо потрібно, щоб я знаходив цей документ — прибери з нього значення "
+    "доступів і надішли ще раз: сервіс, посилання, логін, умови й контакти "
+    "індексуються нормально.")
+
 
 async def _compile_one(message: Message, document) -> None:
-    """Compile a freshly ingested document into wiki pages (best effort)."""
+    """Compile a freshly ingested document into wiki pages (best effort).
+
+    Three conditions, all required (R6.1A §9): the feature flag is on, the
+    local security scan of the base has completed, and this document is not
+    quarantined. Autonomous compilation was how one credential spreadsheet
+    became five permanent pages — it does not restart by default.
+    """
     if document is None:
         return
-    from app.core import wiki
+    if not settings.auto_wiki_compile_enabled:
+        return
+    from app.core import security, wiki
+    if getattr(document, "status", "") == "quarantined":
+        return
     try:
         async with database.session() as db:
+            if not await security.scan_complete(db):
+                return
             document = await db.merge(document)
-            pages = await wiki.compile_document(
+            if document.status == "quarantined":
+                return
+            outcome = await wiki.compile_document(
                 db, user_id=message.from_user.id, document=document)
     except Exception:
         logger.exception("auto wiki compile failed")
         return
-    if pages:
-        created = [s for s, st in pages if st == "created"]
-        updated = [s for s, st in pages if st == "updated"]
+    if outcome.pages:
+        created = [s for s, st in outcome.pages if st == "created"]
+        updated = [s for s, st in outcome.pages if st == "updated"]
         bits = []
         if created:
             bits.append("нові сторінки: " + ", ".join(created[:4]))
@@ -916,10 +1029,14 @@ async def on_document(message: Message) -> None:
                     source_type="telegram_file", source_ref=name)
             indexed = sum(1 for r in results if r.status == "indexed")
             dups = sum(1 for r in results if r.status == "duplicate")
+            blocked = sum(1 for r in results if r.status == "quarantined")
             await message.answer(
                 f"📚 Таблиця <b>{name}</b>: проіндексував {indexed} аркуш(ів)"
                 + (f", вже було {dups}" if dups else "")
-                + ". Тепер можеш питати про її зміст.")
+                + ". Тепер можеш питати про її зміст."
+                + (f"\n\n🔒 Аркушів у карантині: {blocked} — там паролі/токени. "
+                   "Їх не збережено і не проіндексовано. Тримай доступи в "
+                   "менеджері паролів." if blocked else ""))
             return
         text = extract_text(name, data)
         if meetings.looks_like_transcript(name):
@@ -936,7 +1053,9 @@ async def on_document(message: Message) -> None:
         logger.exception("document ingest failed")
         await message.answer("📄 Не вдалося обробити файл, спробуй ще раз.")
         return
-    if result.status == "duplicate":
+    if result.status == "quarantined":
+        await message.answer(_QUARANTINE_MSG.format(name=name))
+    elif result.status == "duplicate":
         await message.answer(f"📚 «{name}» вже є в базі знань ✅")
     else:
         await message.answer(
@@ -983,7 +1102,9 @@ async def on_forward(message: Message) -> None:
         logger.exception("forward ingest failed")
         await message.answer("Не вдалося зберегти пересилку.")
         return
-    if result.status == "duplicate":
+    if result.status == "quarantined":
+        await message.answer(_QUARANTINE_MSG.format(name=title))
+    elif result.status == "duplicate":
         await message.answer("📚 Це вже є в базі знань ✅")
     elif result.status == "indexed":
         await message.answer(f"📚 Зберіг у базу знань ({title.lower()})")
@@ -1087,6 +1208,10 @@ async def _process_note(message: Message, text: str, prefix: str = "",
             db, user_id=message.from_user.id, text=text, dedupe_key=dedupe)
     if outcome.kind == "duplicate":
         return  # replayed update — already processed, stay silent
+    if outcome.kind == "blocked":
+        # nothing was stored, nothing was sent to a model, nothing is echoed
+        await message.answer(outcome.reply or "")
+        return
     if outcome.kind == "proposal" and outcome.proposal:
         await message.answer(prefix + proposal_card(outcome.proposal),
                              reply_markup=_proposal_kb(outcome.proposal.id,

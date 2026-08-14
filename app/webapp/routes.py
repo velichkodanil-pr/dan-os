@@ -66,9 +66,10 @@ async def overview(x_telegram_init_data: str = Header(default="")) -> dict:
             select(MemoryItem).where(MemoryItem.user_id == user_id,
                                      MemoryItem.status == "confirmed")
             .order_by(MemoryItem.created_at.desc()).limit(30))).scalars().all()
-        kb_docs = (await db.execute(
+        kb_docs = (await db.execute(  # searchable documents only (R6.1A)
             select(func.count()).select_from(Document)
-            .where(Document.user_id == user_id))).scalar_one()
+            .where(Document.user_id == user_id,
+                   Document.status != "quarantined"))).scalar_one()
         goals = await coach.list_goals(db, user_id)
         habits = await coach.habits_overview(db, user_id)
 

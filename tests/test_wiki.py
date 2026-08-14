@@ -23,7 +23,7 @@ def test_slugify_and_aliases():
 async def test_find_page_by_any_alias(db):
     await wiki.upsert_page(
         db, user_id=OWNER, kind="entity", title="Toco UA (ТОКО Україна)",
-        summary="Партнер-оператор", content="- Логін: i.k@travelon.to",
+        summary="Партнер-оператор", content="- Контакт: i.k@travelon.to",
         aliases=["Toco UA", "ТОКО", "toco-tour.com.ua"], tags=["partner"],
         source={"title": "DMC", "ref": "d1", "date": "2026-08-14"})
     await db.commit()
@@ -60,7 +60,8 @@ async def test_compile_creates_then_merges(db, monkeypatch):
                     "aliases": ["Toco UA", "ТОКО", "toco-tour.com.ua"],
                     "summary": "Партнер-оператор, є кабінет",
                     "facts": ["Сайт: toco-tour.com.ua",
-                              "Логін: i.kornienko@travelon.to", "Пароль: Travelon"],
+                              "Менеджер: i.kornienko@travelon.to",
+                              "Доступ до кабінету — у менеджері паролів"],
                     "tags": ["partner", "travelon"]}]}, ensure_ascii=False)
             return json.dumps({"pages": [{
                 "kind": "entity", "title": "ТОКО Україна",
@@ -70,22 +71,25 @@ async def test_compile_creates_then_merges(db, monkeypatch):
         # merge prompt
         return json.dumps({
             "summary": "Партнер-оператор: кабінет, контакт, умови",
-            "content": ("- Сайт: toco-tour.com.ua\n- Логін: i.kornienko@travelon.to\n"
-                        "- Пароль: Travelon\n- Контакт: Ірина\n- Умови: депозит 30%"),
+            "content": ("- Сайт: toco-tour.com.ua\n"
+                        "- Менеджер: i.kornienko@travelon.to\n"
+                        "- Доступ до кабінету — у менеджері паролів\n"
+                        "- Контакт: Ірина\n- Умови: депозит 30%"),
             "contradictions": ""}, ensure_ascii=False)
     monkeypatch.setattr("app.core.extraction.haiku_text", fake_haiku)
 
     first = await wiki.compile_source(
         db, user_id=OWNER, title="Travelon Project · аркуш «DMC»",
-        text="Other | Toco UA | https://toco-tour.com.ua | i.kornienko@travelon.to | Travelon",
+        text="Other | Toco UA | https://toco-tour.com.ua | i.kornienko@travelon.to",
         source_ref="doc-1")
-    assert first == [("toco-ua-toko-ukraina", "created")]
+    assert first.status == "succeeded"
+    assert first.pages == [("toco-ua-toko-ukraina", "created")]
 
     # a DIFFERENT source about the same partner must MERGE into the same page
     second = await wiki.compile_source(
         db, user_id=OWNER, title="Умови роботи з операторами",
         text="ТОКО Україна: контакт Ірина, депозит 30%", source_ref="doc-2")
-    assert second and second[0][1] == "updated"
+    assert second.pages and second.pages[0][1] == "updated"
 
     page = await wiki.find_page(db, OWNER, "ТОКО")
     assert "i.kornienko@travelon.to" in page.content  # old facts kept
@@ -102,13 +106,13 @@ async def test_compile_merge_failure_keeps_facts(db, monkeypatch):
         if "Виділи до" in prompt:
             return json.dumps({"pages": [{
                 "kind": "entity", "title": "Анекс", "aliases": ["Anex"],
-                "summary": "оператор", "facts": ["Логін: anex_login"],
+                "summary": "оператор", "facts": ["Менеджер кабінету: anex_manager"],
                 "tags": ["partner"]}]}, ensure_ascii=False)
         return None  # merge fails
     monkeypatch.setattr("app.core.extraction.haiku_text", flaky)
 
     await wiki.compile_source(db, user_id=OWNER, title="Джерело 1",
-                              text="Анекс логін anex_login", source_ref="d1")
+                              text="Анекс менеджер anex_manager", source_ref="d1")
 
     async def flaky2(prompt, max_tokens=600):
         if "Виділи до" in prompt:
@@ -122,7 +126,7 @@ async def test_compile_merge_failure_keeps_facts(db, monkeypatch):
                               text="Anex новий контакт Марія", source_ref="d2")
 
     page = await wiki.find_page(db, OWNER, "Анекс")
-    assert "anex_login" in page.content and "Марія" in page.content
+    assert "anex_manager" in page.content and "Марія" in page.content
 
 
 @pytest.mark.asyncio
@@ -130,8 +134,9 @@ async def test_compile_ignores_empty_result(db, monkeypatch):
     async def nothing(prompt, max_tokens=600):
         return json.dumps({"pages": []})
     monkeypatch.setattr("app.core.extraction.haiku_text", nothing)
-    assert await wiki.compile_source(db, user_id=OWNER, title="Реєстр",
-                                     text="1 | 2 | 3", source_ref="d9") == []
+    outcome = await wiki.compile_source(db, user_id=OWNER, title="Реєстр",
+                                        text="1 | 2 | 3", source_ref="d9")
+    assert outcome.pages == [] and outcome.status == "empty_valid"
 
 
 # ---------- archive (query archiving) ----------
@@ -182,7 +187,7 @@ async def test_wiki_tools_for_agent(db):
     from app.core import chat_tools
     await wiki.upsert_page(
         db, user_id=OWNER, kind="entity", title="Toco UA", summary="оператор",
-        content="- Логін: i.k@travelon.to", aliases=["ТОКО"], tags=["partner"])
+        content="- Менеджер: i.k@travelon.to", aliases=["ТОКО"], tags=["partner"])
     await db.commit()
 
     idx = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_index", {}))
@@ -196,7 +201,8 @@ async def test_wiki_tools_for_agent(db):
                                                 {"name": "Невідомий партнер"}))
     assert miss["found"] is False
 
-    saved = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_save_answer", {
+    # R6.1A: the model can no longer write to long-term memory on its own
+    denied = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_save_answer", {
         "title": "Порівняння операторів", "summary": "коротко",
         "body": "Детальний аналіз з кількох джерел " * 3}))
-    assert saved["saved"] is True
+    assert "не дозволено" in denied["error"]

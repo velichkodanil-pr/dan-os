@@ -2,6 +2,52 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-14 — R6.1A: DAN.OS is not a password manager
+
+The R3–R6 pursuit of «який логін до ТОКО Україна?» was treated as a retrieval
+defect and fixed five times (truncation, translit, ranking, xlsx dimensions,
+per-sheet ingest). It was not a retrieval defect. Storing and returning a
+credential violates the plan's own contract — «жодного SQL/shell/URL у LLM»,
+«журнал дій без тіл повідомлень і секретів», «the LLM never gets … secrets».
+The right fix was to stop trying to answer the question.
+
+- **Hard secrets never reach persistence, embeddings, the compiler, chat
+  context or tool output.** Passwords, API keys, OAuth/bearer tokens, private
+  keys, session cookies, recovery-code lists and seed phrases are classified
+  by deterministic local code (`app/core/secret_policy.py`) — no LLM, no
+  embeddings, no network. The scanner sits in `app/core`, ahead of every
+  provider call, because a check that lives in a Telegram handler protects one
+  door out of six.
+- **The scanner's API is value-free.** It returns categories and counts and
+  nothing else — no excerpt, no reversible encoding, no hash (a hash of a short
+  credential is brute-forceable, i.e. reversible). Same rule for findings,
+  audit rows, log lines, exception text, Telegram replies and scan reports.
+- **Identity is not a secret.** Usernames, e-mail addresses, URLs, phone
+  numbers, IBAN/ЄДРПОУ/ІПН, invoice and order numbers and ordinary bank
+  requisites stay indexable and searchable. A false positive costs Danylo a
+  real business answer, so every value rule is guarded by a concreteness check
+  and placeholders (`<PASSWORD>`, `${TOKEN}`, `***`, `[REDACTED]`) never trip.
+  «Яка політика паролів?» must keep working; «який пароль до X?» must not.
+- **Quarantine is containment, not deletion.** Affected rows are marked
+  (`Document.status`, `WikiPage.status`, `MemoryItem.status`,
+  `ChatLog.provider_eligible`) and disappear from retrieval, compilation and
+  model context. Nothing is deleted by code in this round — Danylo decides
+  that, after seeing the counts. Raw events stay immutable: a finding is
+  recorded against them, their payload is untouched.
+- **Autonomous writes to long-term memory are gone.** `wiki_save_answer` let
+  the model decide what to remember forever; that is how a credential
+  spreadsheet became five permanent pages. It returns in R6.3 as a confirmed
+  action with a preview card. Automatic compilation is off by default
+  (`AUTO_WIKI_COMPILE_ENABLED=false`) and additionally gated on a completed
+  local scan.
+- **Honest compilation status.** `pending | succeeded | empty_valid | failed |
+  deferred_large | quarantined` with compiler version, source/processed chars
+  and an error CODE (never a body). An oversized source that only had its
+  first 12k characters read reports `deferred_large` and stays in the queue —
+  «done» must not mean «we read the beginning».
+- The password-manager connector stays out. DAN.OS points at the vault; it
+  does not become one.
+
 ## 2026-08-14 — R6: compiled knowledge layer («LLM Wiki»)
 
 Adopted from Karpathy's LLM-Wiki idea and its Ukrainian implementation
@@ -22,9 +68,11 @@ What we took (and how it differs here):
   (к↔k↔c). This is the structural fix for the Toco failure.
 - **Contradictions section** on the page (llm-wiki's «Суперечності»), surfaced
   by lint and in the Sunday report — instead of two silently conflicting chunks.
-- **Query archiving.** A synthesized answer can be saved as an archive page
-  (`wiki_save_answer`), so the next identical question is instant and knowledge
-  compounds (the «Гепард» answer becomes permanent).
+- **Query archiving.** A synthesized answer can be saved as an archive page, so
+  the next identical question is instant and knowledge compounds (the «Гепард»
+  answer becomes permanent). _Superseded by R6.1A:_ the autonomous tool
+  (`wiki_save_answer`) was removed; `wiki.save_archive()` stays in core and
+  returns as a user-confirmed action in R6.3.
 - **Index first.** `wiki_index` is a compact map of everything known; the
   agentic chat is instructed to consult wiki BEFORE raw search.
 - **Lint workflow.** Thin/orphan/no-source/duplicate/conflicting pages →

@@ -10,8 +10,31 @@ from app.core import google_client
 logger = logging.getLogger(__name__)
 
 
+def _digestible(emails: list[dict]) -> list[dict]:
+    """Drop messages that carry a credential (R6.1A).
+
+    A mailbox is external content DAN.OS does not control — password resets,
+    invite links, provisioning mails. The digest is a provider call over that
+    content, so it gets the same gate as everything else. A dropped message is
+    simply absent from the digest; it is never quoted, counted by sender, or
+    described.
+    """
+    from app.core import security
+    kept = []
+    for m in emails:
+        if security.scan_parts(m.get("from"), m.get("subject"),
+                               m.get("snippet")).blocked:
+            logger.info("digest: message withheld by secret scan")
+            continue
+        kept.append(m)
+    return kept
+
+
 async def _rank_with_haiku(emails: list[dict]) -> str | None:
     if not settings.anthropic_api_key:
+        return None
+    emails = _digestible(emails)
+    if not emails:
         return None
     listing = "\n".join(
         f"{i+1}. Від: {m['from']} | Тема: {m['subject']} | {m['snippet'][:80]}"
