@@ -226,7 +226,8 @@ async def ingest_document(
         select(Document).where(Document.content_hash == content_hash))).scalar_one_or_none()
     if existing:
         await audit(db, actor=f"user:{user_id}", action="ingest", resource_type="document",
-                    resource_id=existing.id, outcome="dedupe", title=title)
+                    resource_id=existing.id, outcome="dedupe",
+                    title=security.safe_title(title))
         await db.commit()
         # re-uploading a quarantined file stays quarantined and stays silent
         # about its content — the dedupe path must not become a read channel
@@ -235,13 +236,25 @@ async def ingest_document(
                             chunks=existing.chunk_count)
 
     # ---- the gate: nothing below this line may see a credential ----
-    scan = security.scan(text)
+    # R6.1A.1: the ENVELOPE is scanned, not just the body — a filename or a
+    # source_ref can carry the secret all by itself.
+    scan = security.scan_envelope(text, title, source_ref, meta)
     if scan.blocked:
-        doc = Document(user_id=user_id, domain=domain, title=title[:200],
-                       source_type=source_type, source_ref=source_ref[:500],
-                       content_hash=content_hash, status="quarantined",
+        # dedupe id that is NOT a fingerprint of the secret (see security.py)
+        fingerprint = security.quarantine_fingerprint(text)
+        prior = (await db.execute(select(Document).where(
+            Document.content_hash == fingerprint))).scalar_one_or_none()
+        if prior is not None:
+            return IngestResult(status="quarantined", document=prior, chunks=0,
+                                categories=scan.categories)
+        doc = Document(user_id=user_id, domain=domain,
+                       title=security.safe_title(title)[:200],
+                       source_type=source_type,
+                       source_ref=security.safe_title(source_ref, "")[:500],
+                       content_hash=fingerprint, status="quarantined",
                        chunk_count=0,
-                       meta={**(meta or {}), "security": scan.as_meta()})
+                       meta={**security.safe_meta(meta),
+                             "security": scan.as_meta()})
         db.add(doc)
         try:
             await db.flush()
@@ -255,6 +268,7 @@ async def ingest_document(
                                      resource_type="document", resource_id=doc.id,
                                      result=scan)
         await db.commit()
+        # the title is deliberately absent from this line — it can be the secret
         logger.info("ingest quarantined: source=%s categories=%s findings=%d",
                     source_type, ",".join(str(c) for c in scan.categories),
                     scan.finding_count)
@@ -280,7 +294,8 @@ async def ingest_document(
         db.add(KnowledgeChunk(document_id=doc.id, user_id=user_id, seq=i,
                               text=chunk, embedding=emb))
     await audit(db, actor=f"user:{user_id}", action="ingest", resource_type="document",
-                resource_id=doc.id, policy_level="L1", title=title, chunks=len(chunks))
+                resource_id=doc.id, policy_level="L1",
+                title=security.safe_title(title), chunks=len(chunks))
     await db.commit()
     return IngestResult(status="indexed", document=doc, chunks=len(chunks))
 
@@ -349,7 +364,7 @@ async def ingest_document_parts(
     cannot be smuggled in by landing on a part boundary; the whole source is
     then contained as one metadata-only row rather than partly indexed.
     """
-    scan = security.scan(text)
+    scan = security.scan_envelope(text, title, source_ref, meta)
     if scan.blocked:
         return [await ingest_document(
             db, user_id=user_id, title=title, text=text, source_type=source_type,

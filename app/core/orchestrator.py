@@ -173,7 +173,10 @@ class Orchestrator:
                                   ChatLog.provider_eligible.is_(True))
             .order_by(ChatLog.id.desc())
             .limit(max(8, settings.chat_history_window)))).scalars().all()
-        history = [(r.role, r.text) for r in reversed(history_rows)]
+        # re-scan on the READ path: a turn stored before scanner v2 can carry
+        # something v1 missed, and the window is replayed into every prompt
+        history = [(r.role, r.text) for r in reversed(history_rows)
+                   if not security.scan(r.text).blocked]
 
         # 3b) calendar context for schedule-ish questions (deterministic trigger);
         # short follow-ups ("а сьогодні?") inherit the trigger from recent turns
@@ -212,6 +215,23 @@ class Orchestrator:
             await db.commit()
             return NoteOutcome(kind="error",
                                reply="Не зміг обробити повідомлення — спробуй ще раз.")
+
+        # 4a) EGRESS gate on model output (R6.1A.1). Everything below turns
+        # `ext` into a stored row — a Proposal title, a MemoryItem, a draft
+        # body. A model can echo a secret it saw in context, so its output is
+        # checked before it becomes persistence, exactly like input is.
+        ext_scan = security.scan_envelope(
+            ext.title, ext.memory_text, ext.reply, ext.cal_title,
+            ext.email_to, ext.email_subject, ext.email_body)
+        if ext_scan.blocked:
+            await security.record_finding(
+                db, user_id=user_id, resource_type="model_output",
+                resource_id=str(event.id), result=ext_scan)
+            await security.audit_blocked(
+                db, user_id=user_id, action="extraction.blocked",
+                resource_type="raw_event", resource_id=event.id, result=ext_scan)
+            await db.commit()
+            return NoteOutcome(kind="blocked", reply=security.SAFE_OUTPUT)
 
         if ext.intent == "task" or editing is not None:
             _check("proposal.create")
@@ -268,6 +288,22 @@ class Orchestrator:
             text, db=db, user_id=user_id, profile=context["profile"],
             history=context["history"], knowledge=context["knowledge"])
         reply = reply or ext.reply or "Записав."
+        # EGRESS: the reply is about to be persisted, sent to Telegram and
+        # possibly spoken by TTS. A blocked reply is dropped whole — and the
+        # turn is logged as provider-ineligible so it never replays into a
+        # later prompt.
+        reply_scan = security.scan(reply)
+        if reply_scan.blocked:
+            await security.record_finding(
+                db, user_id=user_id, resource_type="chat_reply",
+                resource_id=str(event.id), result=reply_scan)
+            await security.audit_blocked(
+                db, user_id=user_id, action="chat_reply.blocked",
+                resource_type="chat", resource_id=event.id, result=reply_scan)
+            db.add(ChatLog(user_id=user_id, role="user", text=text[:1500],
+                           provider_eligible=False))
+            await db.commit()
+            return NoteOutcome(kind="blocked", reply=security.SAFE_OUTPUT)
         db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
         db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))
         if not chunks and rag.looks_like_question(text):
@@ -297,6 +333,13 @@ class Orchestrator:
             return out
 
         digest = await meetings.meeting_digest(text)
+        if digest and security.scan_envelope(digest).blocked:
+            await security.audit_blocked(
+                db, user_id=user_id, action="transcript.digest_blocked",
+                resource_type="document", resource_id=result.document.id,
+                result=security.scan_envelope(digest))
+            await db.commit()
+            digest = None            # KB-only ingest, no unsafe proposals
         out["digest"] = digest
         if not digest:
             return out
@@ -780,6 +823,13 @@ class Orchestrator:
         from app.core import google_client
         from app.core.extraction import haiku_text
         from app.models import PendingDraft
+        # the search string itself is provider input — zero Gmail calls if blocked
+        if security.scan(query).blocked:
+            await security.audit_blocked(
+                db, user_id=user_id, action="gmail.query_refused",
+                resource_type="gmail", result=security.scan(query))
+            await db.commit()
+            return "blocked_secret", None
         accounts = await google_client.get_accounts(db, user_id)
         if not accounts:
             return "no_google", None
@@ -816,6 +866,13 @@ class Orchestrator:
             max_tokens=700)
         if not body:
             return "compose_failed", None
+        body_scan = security.scan(body)   # model output -> Gmail: egress gate
+        if body_scan.blocked:
+            await security.audit_blocked(
+                db, user_id=user_id, action="draft.output_blocked",
+                resource_type="draft", result=body_scan)
+            await db.commit()
+            return "blocked_secret", None
         subject = email["subject"]
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"

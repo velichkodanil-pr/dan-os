@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text as sql_text
 
 from app import db as database
-from app.config import APP_RELEASE, APP_VERSION, settings
+from app.config import APP_RELEASE, APP_VERSION, SCANNER_BUILD, settings
 from app.core import google_client, scheduler
 from app.core.audit import audit
 from app.telegram import bot as botmod
@@ -100,8 +100,11 @@ app.include_router(webapp_router)
 
 @app.get("/health/live")
 async def health_live() -> dict:
+    """Build metadata only — deliberately says nothing about whether the
+    production security scan has run. That claim belongs to /health/ready,
+    which can actually check it."""
     return {"status": "ok", "service": "dan-os", "version": APP_VERSION,
-            "release": APP_RELEASE}
+            "release": APP_RELEASE, "scanner_version": SCANNER_BUILD}
 
 
 @app.get("/health/ready")
@@ -115,9 +118,20 @@ async def health_ready() -> dict:
         except Exception:
             logger.exception("DB health check failed")
             db_ok = False
+    scan_done = None
+    if db_ok:
+        try:
+            from app.core import security
+            async with database.session() as db:
+                scan_done = await security.scan_complete(db)
+        except Exception:
+            logger.exception("scan-gate check failed")
     return {
         "status": "ok" if db_ok in (True, None) else "degraded",
         "db": db_ok,
+        "scanner_version": SCANNER_BUILD,
+        # truthful: False until a FULL scanner-v2 pass finishes in production
+        "security_scan_complete": scan_done,
         "telegram_configured": bot is not None,
         "webhook_target": (settings.public_url + WEBHOOK_PATH) if settings.public_url else None,
     }
@@ -249,7 +263,9 @@ async def admin_search(req: AdminSearchRequest, request: Request):
     if (not settings.admin_token or not settings.owner_telegram_id
             or not _hmac.compare_digest(token, settings.admin_token)):
         return Response(status_code=403)
-    from app.core import rag
+    from app.core import rag, security
+    if security.scan(req.query).blocked:   # zero embedding / provider calls
+        return {"hits": [], "refused": "secret_in_query"}
     async with database.session() as db:
         chunks = await rag.retrieve(db, user_id=settings.owner_telegram_id,
                                     query=req.query, k=min(req.k, 15))

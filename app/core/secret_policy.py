@@ -27,7 +27,7 @@ import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 
-SCANNER_VERSION = 1
+SCANNER_VERSION = 2
 
 # Large documents are scanned in overlapping windows so that a secret sitting
 # on a window boundary is still seen. NOT a prefix scan: every section of the
@@ -126,40 +126,77 @@ _PLACEHOLDERS = {
     "none", "null", "nil", "n/a", "na", "empty", "unset", "test", "dummy",
     "нема", "немає", "невідомо", "невідомий", "тут", "-", "—",
 }
+# EXACT placeholder shapes (v2). v1 rejected anything merely STARTING with
+# < [ { $ %, which silently let `$ExampleOnly123!` and `{ExampleOnly123!}`
+# through as "placeholders". A placeholder is now matched whole or not at all.
+_PLACEHOLDER_PATTERNS = (
+    re.compile(r"^<[^<>]{1,40}>$"),                    # <PASSWORD>
+    re.compile(r"^\$\{[^{}]{1,40}\}$"),                # ${TOKEN}
+    re.compile(r"^\{\{[^{}]{1,40}\}\}$"),              # {{token}}
+    re.compile(r"^%[A-Za-z_][A-Za-z0-9_]{0,38}%$"),    # %TOKEN%
+    re.compile(r"^\[[A-Za-z_ .\-]{1,40}\]$"),          # [REDACTED]
+    re.compile(r"^\$[A-Z_][A-Z0-9_]{1,38}$"),          # $TOKEN (env style)
+)
+# Masked values — the only "low information" rejection left. Repeated digits
+# (0000, 111111) are NOT masking: under an explicit `password:` key they are a
+# weak credential, and weak credentials are exactly the ones that get reused.
+_MASK_RE = re.compile(r"^[*x✱•·.\-_#\s]+$", re.IGNORECASE)
 # words that follow "password:" in a POLICY sentence, not a credential dump
 _POLICY_WORDS = {
     "minimum", "min", "max", "maximum", "policy", "required", "requirement",
     "must", "should", "complex", "complexity", "length", "characters",
     "chars", "symbols", "rotate", "rotation", "manager", "vault", "expires",
-    "expiry", "reset", "unique", "strong",
+    "expiry", "reset", "unique", "strong", "same", "different", "above",
+    "below", "here", "there", "unknown", "lost", "forgotten",
 }
-_CYRILLIC_WORD_RE = re.compile(r"^[А-Яа-яЁёЇїІіЄєҐґЫыЭэЪъЬь'’ʼ-]+$")
+# Cyrillic prose that legitimately follows «пароль —» in a SENTENCE. v1
+# rejected ALL-Cyrillic values wholesale, which meant «пароль: Секретний»
+# (a real Ukrainian/Russian password) was silently treated as clean.
+_PROSE_VALUES = {
+    "не", "це", "має", "мати", "буде", "був", "була", "потрібно", "треба",
+    "змінено", "змінений", "змінити", "змінюється", "оновлено", "втрачено",
+    "забув", "забула", "стандартний", "той", "самий", "такий", "як", "що",
+    "щоб", "де", "коли", "або", "чи", "для", "від", "при", "після", "разом",
+    "складний", "простий", "надійний", "однаковий", "різний", "інший",
+    "новий", "старий", "тимчасовий", "порожній", "відсутній",
+    "нет", "это", "нужно", "надо", "изменен", "изменён", "изменить",
+    "забыл", "забыла", "тот", "самый", "какой", "который", "если", "или",
+    "новый", "старый", "пустой", "отсутствует", "сложный",
+}
 _URL_PREFIXES = ("http://", "https://", "ftp://", "www.")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+def _is_placeholder(v: str, low: str) -> bool:
+    if low in _PLACEHOLDERS or low in _POLICY_WORDS or low in _PROSE_VALUES:
+        return True
+    if low.startswith(("your_", "your-", "&lt;")):
+        return True
+    if _MASK_RE.match(v):
+        return True
+    return any(p.match(v) for p in _PLACEHOLDER_PATTERNS)
 
 
 def _is_concrete_value(raw: str) -> bool:
     """True when the captured token really looks like a credential value.
 
     Everything rejected here is a deliberate false-positive control: policy
-    prose, placeholders, e-mails, URLs and masked values must stay indexable.
+    prose, exact placeholders, e-mails, URLs and masked values must stay
+    indexable. Everything else in an explicit credential context is treated
+    as a real value — including short PINs, repeated digits and Cyrillic
+    words, all of which v1 waved through.
     """
-    v = raw.strip().strip("`\"'«»“”")
-    v = v.rstrip(".,;:!?)]}»")
+    quoted = raw.strip().strip("`\"'«»“”")
+    v = quoted.rstrip(".,;:!?)»")
     if not (MIN_VALUE_LEN <= len(v) <= MAX_VALUE_LEN):
         return False
     low = v.lower()
-    if low in _PLACEHOLDERS or low in _POLICY_WORDS:
-        return False
-    if v[0] in "<[{$%" or low.startswith(("your_", "your-", "&lt;")):
+    # both forms: `${TOKEN}` needs its closing brace, `[REDACTED].` does not
+    if _is_placeholder(quoted, quoted.lower()) or _is_placeholder(v, low):
         return False
     if low.startswith(_URL_PREFIXES):
         return False
     if _EMAIL_RE.match(v):          # a login is identity, not a secret
-        return False
-    if len(set(v)) <= 2:            # ***, xxxx, ------, 0000
-        return False
-    if _CYRILLIC_WORD_RE.match(v):  # «Пароль — це важливо» / «пароль: змінено»
         return False
     return True
 
@@ -210,7 +247,7 @@ _STRUCTURAL: tuple[tuple[SecretCategory, re.Pattern[str]], ...] = (
 
 # ---------- field patterns (KEY + concrete VALUE) ----------
 
-_VALUE = r"([^\s\"',;}{\]\[]+)"
+_VALUE = r"([^\s\"',;]+)"
 
 _FIELDS: tuple[tuple[SecretCategory, re.Pattern[str]], ...] = (
     (SecretCategory.BEARER_TOKEN,
@@ -228,8 +265,10 @@ _FIELDS: tuple[tuple[SecretCategory, re.Pattern[str]], ...] = (
                 r"ключ\s+api|токен\s+доступу)\s*[\"']?\s*[:=]\s*[\"']?" + _VALUE,
                 re.IGNORECASE)),
     (SecretCategory.PASSWORD,
-     re.compile(r"(?:\bpassword|\bpasswd|\bpwd|\bpass|пароль|парол[ья])"
-                r"\s*(?:[:=]|\s[-—–]\s)\s*[\"']?" + _VALUE, re.IGNORECASE)),
+     re.compile(r"(?:\bpassword|\bpasswd|\bpwd|\bpass|пароль|парол[ья]|"
+                r"\bpin\b|\bпін[- ]?код|\bпін\b|\bкод\s+доступу)"
+                r"[\"']?[ \t]*(?:[:=]|[ \t][-—–][ \t])[ \t]*\n?[ \t]*[\"']?"
+                + _VALUE, re.IGNORECASE)),
     (SecretCategory.PASSWORD,
      re.compile(r"\bsecret\s*[\"']?\s*[:=]\s*[\"']?" + _VALUE, re.IGNORECASE)),
     (SecretCategory.SESSION_COOKIE,
@@ -248,7 +287,7 @@ _COOKIE_CATEGORIES = {SecretCategory.SESSION_COOKIE}
 # enough to sit on the ingest path without changing what it finds.
 _FIELD_TRIGGER_RE = re.compile(
     r"pass|pwd|парол|secret|секрет|token|токен|key|ключ|cookie|session|sid|"
-    r"bearer|authorization|seed", re.IGNORECASE)
+    r"bearer|authorization|seed|\bpin\b|пін", re.IGNORECASE)
 _RECOVERY_TRIGGER_RE = re.compile(r"cod|код|парол", re.IGNORECASE)
 
 # ---------- credential TABLES (header row + value rows) ----------
@@ -258,7 +297,7 @@ _RECOVERY_TRIGGER_RE = re.compile(r"cod|код|парол", re.IGNORECASE)
 # misses them. Here the header cell names the column and the cells beneath it
 # are checked positionally.
 
-_CELL_SPLIT_RE = re.compile(r"\s*[|;\t]\s*")
+_CELL_SPLIT_RE = re.compile(r"[ \t]*[|;,\t][ \t]*")
 _HEADER_CATEGORIES: tuple[tuple[SecretCategory, frozenset[str]], ...] = (
     (SecretCategory.PASSWORD, frozenset({
         "пароль", "паролі", "пароль доступу", "password", "passwords",
@@ -273,38 +312,60 @@ _HEADER_CATEGORIES: tuple[tuple[SecretCategory, frozenset[str]], ...] = (
         "private key", "приватний ключ", "закритий ключ"})),
 )
 _HEADER_LOOKUP = {name: cat for cat, names in _HEADER_CATEGORIES for name in names}
-_TABLE_LOOKAHEAD = 60
+_MAX_HEADER_ROWS = 50      # runaway guard: 50 credential headers is already a dump
+_MAX_HEADER_CELL = 40      # a header cell is a label, not a sentence
 
 
-def _table_hits(text: str, offset: int) -> list[tuple[SecretCategory, int]]:
+def _table_hits(text: str, offset: int = 0) -> list[tuple[SecretCategory, int]]:
+    """Positional match for credential COLUMNS (csv / tsv / pipe / semicolon).
+
+    v2 fixes two holes: the value may sit on ANY row (v1 stopped after 60),
+    and comma-separated files count as tables. False positives are held down
+    by shape, not by distance: the header row must look like a header (short
+    label cells) and a data row must have exactly the same cell count, so a
+    prose line that happens to contain «пароль,» never pairs with the next
+    sentence.
+    """
     lines = text.split("\n")
     starts, pos = [], 0
     for line in lines:
         starts.append(pos)
         pos += len(line) + 1
     hits: list[tuple[SecretCategory, int]] = []
+    headers_seen = 0
     for i, line in enumerate(lines):
-        cells = _CELL_SPLIT_RE.split(line.strip())
-        if len(cells) < 2:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cells = _CELL_SPLIT_RE.split(stripped)
+        if len(cells) < 2 or any(len(c) > _MAX_HEADER_CELL for c in cells):
             continue
         columns = {idx: _HEADER_LOOKUP[c.strip().lower()]
                    for idx, c in enumerate(cells)
                    if c.strip().lower() in _HEADER_LOOKUP}
         if not columns:
             continue
-        for j in range(i + 1, min(i + 1 + _TABLE_LOOKAHEAD, len(lines))):
-            row = _CELL_SPLIT_RE.split(lines[j].strip())
-            if len(row) < 2:
+        headers_seen += 1
+        if headers_seen > _MAX_HEADER_ROWS:
+            break
+        pending = dict(columns)
+        for j in range(i + 1, len(lines)):
+            if not pending:
+                break
+            row_line = lines[j].strip()
+            if not row_line:
                 continue
-            for idx, category in columns.items():
-                if idx >= len(row):
-                    continue
+            row = _CELL_SPLIT_RE.split(row_line)
+            if len(row) != len(cells):      # not a row of THIS table
+                continue
+            for idx in list(pending):
                 value = row[idx].strip()
                 # a credential has no spaces; a description does
                 if (value and " " not in value
                         and value.lower() not in _HEADER_LOOKUP
                         and _is_concrete_value(value)):
-                    hits.append((category, offset + starts[j]))
+                    hits.append((pending[idx], offset + starts[j]))
+                    del pending[idx]        # one finding per column is enough
     return hits
 
 
@@ -316,6 +377,7 @@ _RECOVERY_MARKER_RE = re.compile(
     r"(?:codes?|код\w*|парол\w*)", re.IGNORECASE)
 _RECOVERY_WINDOW = 400
 _CODE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9\-]{4,15}\b")
+_NUMERIC_CODE_RE = re.compile(r"\b\d{6,12}\b")   # 12345678, 23456789 …
 _MIN_RECOVERY_CODES = 3
 
 # ---------- seed phrases ----------
@@ -387,6 +449,13 @@ def _seed_hits(text: str, offset: int) -> list[tuple[SecretCategory, int]]:
 
 
 def _recovery_hits(text: str, offset: int) -> list[tuple[SecretCategory, int]]:
+    """Code LISTS under an explicit recovery/backup marker.
+
+    v2 also counts plain numeric codes («Recovery codes: 12345678, 23456789,
+    34567890»), which v1 missed because it required a letter+digit mix. The
+    marker is still mandatory: a bare list of numbers is an invoice register,
+    not a credential.
+    """
     hits: list[tuple[SecretCategory, int]] = []
     for m in _RECOVERY_MARKER_RE.finditer(text):
         window = text[m.end():m.end() + _RECOVERY_WINDOW]
@@ -397,6 +466,7 @@ def _recovery_hits(text: str, offset: int) -> list[tuple[SecretCategory, int]]:
                 codes += 1
             elif "-" in tok and bare.isdigit() and len(bare) >= 8:
                 codes += 1
+        codes += len(_NUMERIC_CODE_RE.findall(window))
         if codes >= _MIN_RECOVERY_CODES:
             hits.append((SecretCategory.RECOVERY_CODE, offset + m.start()))
     return hits
@@ -417,7 +487,6 @@ def _section_hits(section: str, offset: int) -> list[tuple[SecretCategory, int]]
             for m in pattern.finditer(section):
                 if check(m.group(1)):
                     hits.append((category, offset + m.start()))
-        hits.extend(_table_hits(section, offset))
     if _RECOVERY_TRIGGER_RE.search(section):
         hits.extend(_recovery_hits(section, offset))
     hits.extend(_seed_hits(section, offset))
@@ -448,6 +517,11 @@ def scan_text(text: str, *, blocking=None) -> SecretScanResult:
         return CLEAN
     normalised = _normalise(text)
     seen: set[tuple[SecretCategory, int]] = set()
+    # Tables are matched over the WHOLE text, not per window: a «Пароль»
+    # column header and the row that fills it can be megabytes apart, and a
+    # 20k window would never see both.
+    if _FIELD_TRIGGER_RE.search(normalised):
+        seen.update(_table_hits(normalised))
     for section, offset in _sections(normalised):
         for hit in _section_hits(section, offset):
             seen.add(hit)

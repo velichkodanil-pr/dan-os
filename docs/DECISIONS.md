@@ -2,6 +2,53 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-15 — R6.1A.1: secret boundary hardening (independent audit)
+
+An independent audit of R6.1A found that the gate was real but its perimeter
+was not. Four classes of gap, all fixed here; passwords stay searchable per
+the owner decision above — this round is about WHERE the scan runs and HOW
+well it sees, not about re-litigating that.
+
+- **Scanner v2.** v1 could not see a Cyrillic password («пароль: Секретний»
+  was rejected as prose because it rejected ALL-Cyrillic values), a PIN or any
+  repeated-digit value (`0000` looked like masking), a value starting with
+  `$ % {` (it treated the first character as a placeholder marker), a
+  comma-separated credential table, a column value more than 60 rows below its
+  header, or a plain numeric recovery-code list. Placeholders are now matched
+  EXACTLY (`<PASSWORD>`, `${TOKEN}`, `%TOKEN%`, `[REDACTED]`, `YOUR_API_KEY`,
+  `***`) instead of by first character, and table detection runs over the whole
+  document rather than per 20k window. `SCANNER_VERSION` 1 → 2, so the previous
+  scan-complete marker no longer satisfies the gate.
+- **Recursive envelope scan.** A resource is more than its body: a filename, a
+  `source_ref` URL with a token in the query string, and a free-form `meta`
+  dict all get persisted, logged and shown. `scan_envelope()` walks strings,
+  dicts and lists (bounded depth and node count); a blocked title is replaced
+  with a generic safe title, blocked meta keys are dropped whole rather than
+  partially redacted, and no unsafe title reaches the audit log.
+- **No raw fingerprint of a blocked body.** `content_hash` was a plain SHA-256
+  of the document text — for a short credential that is reversible in practice,
+  which re-created the leak inside the row meant to contain it. Quarantined
+  rows now use a keyed HMAC (`quarantine_fingerprint`) under a key that never
+  leaves the deployment: same dedupe behaviour, useless to a reader of the table.
+- **Provider ARGUMENTS are input too.** The gate only checked what came back.
+  A RAG query goes to OpenAI verbatim; tool arguments go to Gmail and Calendar;
+  a goal title is written from two different adapters. Scans now sit in
+  `rag.retrieve`, `chat_tools.run_tool` (before the executor), `/admin/search`,
+  the Gmail reply-draft search, and `coach.create_goal/create_habit` — in core,
+  so Telegram and the Mini App share one gate instead of each having their own.
+- **Model OUTPUT is scanned before it becomes anything.** Extractor output,
+  the final chat reply, the meeting digest and the composed draft body are all
+  checked before persistence, before the Telegram reply, before TTS and before
+  a Gmail draft. A blocked reply is dropped whole and its turn is marked
+  `provider_eligible=False` so it can never replay into a later prompt. The
+  read path re-scans stored turns for the same reason.
+- **Voice STT exception, stated honestly.** DAN.OS cannot scan speech before
+  transcribing it: the audio reaches the STT provider first, by construction.
+  This round does not pretend otherwise — it scans the transcript before the
+  Telegram echo, RawEvent, ChatLog and the chat model, and warns in `/start`
+  not to dictate keys. A local STT model is the only real fix; it is recorded
+  in NEXT.md, not claimed here.
+
 ## 2026-08-15 — R6.1A.1: passwords allowed, hard tokens still blocked (Danylo)
 
 After R6.1A deployed and `/kb_security_scan` ran, the quarantine list showed

@@ -130,6 +130,13 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
                    k: int = TOP_K) -> list[RetrievedChunk]:
     if len(query.strip()) < 6:
         return []
+    # R6.1A.1: the QUERY is provider input too — an embedding call ships it to
+    # OpenAI verbatim. A blocked query costs zero provider calls, here in core
+    # so every caller (chat tool, /admin/search, orchestrator) is covered.
+    from app.core import security
+    if security.scan(query).blocked:
+        logger.info("retrieval refused: query carries a blocked secret")
+        return []
     try:
         qvec = (await get_embedder().embed([query]))[0]
     except Exception:

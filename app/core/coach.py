@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core import security
 from app.core.audit import audit
 from app.core.policy import PolicyDenied, evaluate
 from app.models import Goal, Habit, HabitLog
@@ -25,6 +26,20 @@ def _check(action: str) -> None:
     d = evaluate(action)
     if not d.allowed:
         raise PolicyDenied(action, d)
+
+
+async def _guard_text(db: AsyncSession, user_id: int, text: str,
+                      kind: str) -> None:
+    """Nothing is written when the text is blocked — not even a stub row."""
+    result = security.scan(text)
+    if not result.blocked:
+        return
+    await security.record_finding(db, user_id=user_id, resource_type=kind,
+                                  resource_id="rejected", result=result)
+    await security.audit_blocked(db, user_id=user_id, action=f"{kind}.blocked",
+                                 resource_type=kind, result=result)
+    await db.commit()
+    raise security.SecretBlocked(result, kind)
 
 
 def _today_local() -> str:
@@ -43,7 +58,13 @@ def week_dates(today: str | None = None) -> list[str]:
 
 async def create_goal(db: AsyncSession, *, user_id: int, title: str,
                       domain: str = "personal") -> Goal:
+    """Raises security.SecretBlocked if the title carries a blocked secret.
+
+    The check is HERE, not in the Telegram handler: /goal and the Mini App's
+    goal_add both land on this function, and a gate that only guards one of
+    them guards neither."""
     _check("goal.create")
+    await _guard_text(db, user_id, title, "goal")
     goal = Goal(user_id=user_id, title=title.strip()[:300], domain=domain)
     db.add(goal)
     await db.flush()
@@ -79,7 +100,9 @@ async def set_goal_status(db: AsyncSession, *, user_id: int, goal_id: uuid.UUID,
 # ---------- habits ----------
 
 async def create_habit(db: AsyncSession, *, user_id: int, title: str) -> Habit:
+    """Raises security.SecretBlocked if the title carries a blocked secret."""
     _check("habit.create")
+    await _guard_text(db, user_id, title, "habit")
     habit = Habit(user_id=user_id, title=title.strip()[:200])
     db.add(habit)
     await db.flush()

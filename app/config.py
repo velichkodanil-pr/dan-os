@@ -5,8 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r6.1a"
-APP_RELEASE = "R6.1A — emergency knowledge safety"
+APP_VERSION = "r6.1a.1"
+APP_RELEASE = "R6.1A.1 — secret boundary hardening"
+SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
 class Settings(BaseSettings):

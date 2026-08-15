@@ -147,7 +147,9 @@ async def cmd_start(message: Message) -> None:
         "🔒 Технічні секрети (API-ключі, токени, приватні ключі, seed-фрази) "
         "НЕ зберігаю — відсікаю до бази й до моделі. Логіни й паролі до "
         "кабінетів партнерів зберігаю і знаходжу · перевірка бази: "
-        "/kb_security_scan · що ізольовано: /kb_quarantine\n\n"
+        "/kb_security_scan · що ізольовано: /kb_quarantine\n"
+        "🎙 Ключі й токени не диктуй голосом: аудіо йде на розпізнавання "
+        "ДО того, як я можу його перевірити.\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
@@ -1301,6 +1303,18 @@ async def on_voice(message: Message) -> None:
         await message.answer("🎙 Не вдалося обробити голосове, спробуй ще раз.")
         return
     import html as _html
+    from app.core import security
+    # HONEST LIMIT (R6.1A.1): the audio ALREADY went to the STT provider before
+    # this line — DAN.OS cannot scan speech it has not transcribed yet. What the
+    # gate can still do is stop the TEXT from being echoed, stored, embedded or
+    # sent to the chat model. See docs/DECISIONS.md «voice STT exception».
+    if security.scan(text).blocked:
+        await message.answer(
+            "🎙 Розшифрував, але у сказаному є технічний секрет "
+            "(ключ/токен), тому я не показую текст і нічого не зберігаю.\n\n"
+            "⚠️ Врахуй: аудіо вже пішло в сервіс розпізнавання — секрети "
+            "краще не диктувати взагалі.")
+        return
     await _process_note(message, text,
                         prefix=f"🎙 <i>Розчув:</i> {_html.escape(text)}\n\n",
                         want_voice=await _voice_enabled(message.from_user.id))

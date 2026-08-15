@@ -222,6 +222,11 @@ _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
               "travelon_order": _t_travelon_order}
 
 
+_REFUSED_ARGS = {"refused": True, "reason": "secret_in_arguments",
+                 "note": "У запиті до інструмента був ключ/токен. Я його "
+                         "нікуди не відправив. Скажи Данилу, що шукати за "
+                         "секретом я не буду; значення не повторюй."}
+
 _WITHHELD = {"withheld": True, "reason": "secret_detected",
              "note": "У знайденому фрагменті є пароль/токен/ключ. DAN.OS не "
                      "передає такі значення. Скажи Данилу, ЩО саме знайшлось "
@@ -242,6 +247,21 @@ async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str
     if action is None or not evaluate(action).allowed:
         return json.dumps({"error": f"інструмент {name} не дозволено"},
                           ensure_ascii=False)
+    # R6.1A.1: ARGUMENTS are provider input. A search query, a mail query or a
+    # page name goes straight out to Gmail / Calendar / the embedder, so it is
+    # scanned before the executor runs — not only on the way back.
+    arg_scan = security.scan_envelope(args or {})
+    if arg_scan.blocked:
+        logger.info("tool %s: refused, arguments carry a blocked secret", name)
+        await security.record_finding(db, user_id=user_id,
+                                      resource_type="tool_args",
+                                      resource_id=name, result=arg_scan)
+        await security.audit_blocked(db, user_id=user_id,
+                                     action="tool.args_refused",
+                                     resource_type="tool", resource_id=name,
+                                     result=arg_scan)
+        await db.commit()
+        return json.dumps(_REFUSED_ARGS, ensure_ascii=False)
     try:
         result = await _EXECUTORS[name](db, user_id, args or {})
     except Exception:

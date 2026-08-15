@@ -1,6 +1,30 @@
 # NEXT — the one authorized round
 
-## Round 6.1B — Domain isolation (AUTHORIZED NEXT, not started)
+## Round 6.1A.1 — Secret boundary hardening (CURRENT, code complete)
+
+The authorized round right now. Code is complete locally and NOT deployed.
+Remaining steps, in order:
+
+1. Review and deploy the hotfix commit.
+2. Run `/kb_security_scan` in production — this is a scanner-v2 pass and the
+   v1 completion does not count. Record the counts in STATUS.md.
+3. Only then may R6.1B start.
+
+**R6.1B is BLOCKED** until both the hotfix is deployed and the scanner-v2
+production scan has completed.
+
+### Deferred out of this round (deliberately)
+
+- **Local STT.** Voice audio reaches the external transcription provider
+  before any scan can run — an unavoidable ordering, not a bug we can gate
+  around. A local Whisper-class model is the only real fix; it is a round of
+  its own, not a line item in a security hotfix.
+- Containment COLUMNS for Proposal / PendingDraft / Task / Goal / Habit /
+  KnowledgeGap. v2 records findings for these and the read paths apply the
+  scan filter, which contains them without a migration. Dedicated status
+  columns would be cleaner and belong with R6.2's schema work.
+
+## Round 6.1B — Domain isolation (BLOCKED until R6.1A.1 is deployed and scanned)
 
 R6.1A closed the credential leak. The next round closes the second half of
 the same architectural gap: `domain` (personal | travelon | tech) exists on

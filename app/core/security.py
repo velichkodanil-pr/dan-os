@@ -42,10 +42,11 @@ secret_policy.set_blocking_categories(
     else secret_policy.HARD_SECRET_CATEGORIES)
 
 __all__ = ["SCANNER_VERSION", "SecretCategory", "SecretScanResult",
-           "SAFE_REFUSAL", "SAFE_NOT_STORED", "scan", "scan_parts",
-           "record_finding", "resolve_findings", "audit_blocked",
-           "is_credential_request", "scan_complete", "mark_scan_complete",
-           "clear_scan_complete", "SCAN_COMPLETE_KEY"]
+           "SecretBlocked", "SAFE_REFUSAL", "SAFE_NOT_STORED", "SAFE_OUTPUT",
+           "scan", "scan_parts", "scan_envelope", "safe_title", "safe_meta",
+           "quarantine_fingerprint", "record_finding", "resolve_findings",
+           "audit_blocked", "is_credential_request", "scan_complete",
+           "mark_scan_complete", "clear_scan_complete", "SCAN_COMPLETE_KEY"]
 
 # What Danylo sees instead of a hard technical secret. It names the boundary
 # and points at the right place — it does not echo back what he sent. Partner
@@ -66,6 +67,14 @@ SAFE_NOT_STORED = (
     "партнерів (логін, пароль, умови) — знайду, якщо є в базі."
 )
 
+# What the user gets when the MODEL produced something blocked. The reply is
+# discarded whole: no persistence, no Telegram echo, no TTS, no Gmail draft.
+SAFE_OUTPUT = (
+    "🔒 У відповіді опинився технічний секрет (ключ/токен), тому я її не "
+    "показую і не зберігаю. Перепитай інакше — або візьми доступ там, де він "
+    "виданий."
+)
+
 SCAN_COMPLETE_KEY = "kb_security_scan_complete"
 
 # ---------- credential REQUESTS (no secret in the text, but a lookup intent) ----------
@@ -77,21 +86,37 @@ SCAN_COMPLETE_KEY = "kb_security_scan_complete"
 # HARD-secret words: a request for one of these is always refused, because
 # DAN.OS never stores them and starting a lookup would be dishonest.
 _HARD_SECRET_WORD_RE = re.compile(
-    r"токен|token|ключ\s+доступу|api[ _-]?key|apikey|"
-    r"сід[ -]?фраз|seed[ -]?phrase|приватн\w+\s+ключ|private\s+key",
+    r"токен|токена|токену|token|ключ\s+доступу|api[ _-]?key|apikey|api[ _-]?ключ|"
+    r"client[ _-]?secret|client[ _-]?id\s+(?:та|і|and)\s+secret|refresh[ _-]?token|"
+    r"access[ _-]?token|bearer|секретн\w*\s+ключ|"
+    r"сід[ -]?фраз|сид[ -]?фраз|seed[ -]?phrase|mnemonic|мнемоні\w*|"
+    r"приватн\w+\s+ключ|закрит\w+\s+ключ|private\s+key|"
+    r"код\s+відновлення|коди\s+відновлення|recovery\s+code",
     re.IGNORECASE)
 # Password words: only refused when passwords are being blocked. With the
 # default (passwords allowed) «який пароль до X» flows to normal retrieval —
 # the bot answers from the business tables, which is the point.
 _PASSWORD_WORD_RE = re.compile(r"парол|password|passwd", re.IGNORECASE)
 _LOOKUP_INTENT_RE = re.compile(
-    r"\b(який|яка|яке|які|скажи|дай|давай|надішли|пришли|покажи|знайди|нагадай|"
-    r"потрібен|потрібно|треба|what\s+is|what'?s|give\s+me|send\s+me|tell\s+me|"
-    r"show\s+me|find)\b", re.IGNORECASE)
+    r"(?:\b(?:який|яка|яке|які|чий|де|звідки|скажи|кажи|дай|давай|надішли|"
+    r"пришли|покажи|показуй|знайди|шукай|пошукай|нагадай|потрібен|потрібно|"
+    r"треба|хочу|можеш\s+дати|скинь|перешли|виведи|напиши\s+мені|підкажи|"
+    r"подскажи|подскажите|скинути\s+мені|"
+    r"какой|какая|где|скажи|дай|покажи|найди|нужен|нужно|надо|пришли|"
+    r"what\s+is|what'?s|which|where|give\s+me|send\s+me|tell\s+me|show\s+me|"
+    r"find|fetch|get\s+me|need\s+the)\b"
+    r"|\b(?:пароль|password|токен|token|ключ|key|секрет|secret)\s+(?:до|від|для|"
+    r"к|от|для|to|for)\b)", re.IGNORECASE)
+# Framing that makes the sentence a QUESTION ABOUT credentials rather than a
+# request FOR one. «Як змінити пароль?» must keep working.
 _POLICY_FRAMING_RE = re.compile(
     r"політик|policy|правил|вимог|requirement|стандарт|як\s+(?:нам\s+)?зберіга|"
     r"де\s+зберіга|менеджер|1password|bitwarden|keeper|vault|ротаці|rotation|"
     r"безпек|security|скільки\s+символ|міняти|change\s+the\s+password|"
+    r"як\s+(?:мені\s+)?змінити|як\s+(?:мені\s+)?поміняти|як\s+скинути|"
+    r"как\s+(?:мне\s+)?(?:изменить|поменять|сбросить)|"
+    r"як\s+працює|как\s+работает|how\s+(?:does|do\s+i|to)\s+|"
+    r"де\s+(?:в\s+)?налаштуванн|где\s+в\s+настройк|settings|"
     r"змінити\s+пароль|скинути\s+пароль|reset", re.IGNORECASE)
 
 
@@ -127,6 +152,19 @@ async def resolve_findings(db: AsyncSession, *, user_id: int, resource_type: str
     return len(rows)
 
 
+class SecretBlocked(Exception):
+    """Raised by a core write path when its input carries a blocked secret.
+
+    Carries categories/counts only — never the offending text.
+    """
+
+    def __init__(self, result: SecretScanResult, where: str = ""):
+        self.result = result
+        self.where = where
+        super().__init__(f"blocked secret in {where or 'input'}: "
+                         f"{','.join(str(c) for c in result.categories) or 'unknown'}")
+
+
 def scan(text: str | None) -> SecretScanResult:
     """Scan text, failing CLOSED if the scanner itself misbehaves."""
     try:
@@ -134,6 +172,96 @@ def scan(text: str | None) -> SecretScanResult:
     except Exception:  # pragma: no cover — defensive: a bug must not open the gate
         logger.exception("secret scanner failed — treating input as blocked")
         return SecretScanResult(blocked=True, categories=(), finding_count=0)
+
+
+# ---------- recursive envelope scan (R6.1A.1) ----------
+#
+# A resource is more than its body. A filename can be «Пароль до ТОКО
+# Qw3rty.xlsx», a source_ref can be a URL with a token in the query string,
+# and meta is a free-form JSONB dict that ends up in logs and audit rows. v1
+# scanned the body and let the envelope through, so the same secret could be
+# persisted in three places while the body was correctly quarantined.
+
+_MAX_DEPTH = 6
+_MAX_NODES = 600
+
+
+def _collect(value, out: list, depth: int = 0) -> None:
+    if depth > _MAX_DEPTH or len(out) >= _MAX_NODES:
+        return
+    if isinstance(value, str):
+        if value.strip():
+            out.append(value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str) and k.strip():
+                out.append(k)          # a KEY can be the secret too
+            _collect(v, out, depth + 1)
+    elif isinstance(value, (list, tuple, set)):
+        for v in value:
+            _collect(v, out, depth + 1)
+    # numbers/bools/None carry nothing scannable
+
+
+def scan_envelope(*values) -> SecretScanResult:
+    """Scan body + title + filename + source_ref + nested meta as ONE unit.
+
+    Recurses into dicts and lists so a secret buried in `meta["sheets"][3]`
+    is found. Depth and node count are bounded so a pathological structure
+    cannot stall ingest.
+    """
+    parts: list = []
+    for value in values:
+        _collect(value, parts)
+    return scan_parts(*parts)
+
+
+SAFE_TITLE = "🔒 Матеріал у карантині"
+
+
+def safe_title(title: str | None, fallback: str = SAFE_TITLE) -> str:
+    """A title that is itself a secret must never be stored, logged or shown."""
+    if title and not scan(title).blocked:
+        return title
+    return fallback
+
+
+def safe_meta(meta: dict | None) -> dict:
+    """Keep only the metadata that is provably clean.
+
+    Non-string scalars (modifiedTime ints, version numbers) pass; any string
+    or nested structure carrying a blocked secret is dropped wholesale rather
+    than partially redacted — a partial redaction still leaks structure.
+    """
+    if not meta:
+        return {}
+    out = {}
+    for key, value in meta.items():
+        if not isinstance(key, str) or scan(key).blocked:
+            continue
+        if isinstance(value, (int, float, bool)) or value is None:
+            out[key] = value
+        elif not scan_envelope(value).blocked:
+            out[key] = value
+    return out
+
+
+def quarantine_fingerprint(text: str) -> str:
+    """Stable dedupe id for quarantined content, WITHOUT fingerprinting it.
+
+    A raw SHA-256 of a short secret is reversible in practice — a rainbow
+    table or a dictionary run recovers it — so storing one as `content_hash`
+    would re-create the leak in the very row meant to contain it. This is an
+    HMAC under a key that never leaves the deployment: it still dedupes a
+    re-uploaded file exactly, but it is worthless to anyone reading the table.
+    """
+    import hashlib
+    import hmac as _hmac
+    key = (settings.cred_key or settings.webhook_secret
+           or settings.telegram_bot_token or "dan-os-local").encode()
+    digest = _hmac.new(key, (text or "").encode("utf-8", "ignore"),
+                       hashlib.sha256).hexdigest()
+    return "q$" + digest[:60]
 
 
 async def record_finding(db: AsyncSession, *, user_id: int, resource_type: str,

@@ -1,6 +1,46 @@
 # STATUS
 
-_Last verified: 2026-08-15 (R6.1A on prod: 6e12ffd, /health/live→r6.1a; prod scan done — 37 docs / 5 wiki pages / 2 chat lines quarantined)_
+_Last verified: 2026-08-15 (prod = 31db942 / r6.1a; R6.1A.1 hotfix is CODE COMPLETE locally and NOT deployed — scanner v2 has never run in production)_
+
+## R6.1A.1 — Secret boundary hardening: CODE COMPLETE, NOT DEPLOYED
+
+Independent audit of R6.1A found the gate real but its perimeter incomplete.
+Fixed here; see DECISIONS.md for the reasoning. **Status discipline: "code
+complete" is not "scan complete".** Scanner v2 has run only against the local
+test database. The production scanner-v2 pass has NOT happened, so no claim is
+made about the current state of the live knowledge base.
+
+- Scanner v2 (`SCANNER_VERSION = 2`): Cyrillic/Russian password values, PINs
+  and repeated-digit values, `$ % {`-prefixed values, comma/semicolon/tab/pipe
+  credential tables, column values at ANY row depth, plain numeric recovery
+  codes, JSON-quoted keys, at-most-one-newline assignments. Placeholders are
+  matched exactly, not by first character. Table detection runs over the whole
+  document, not per window.
+- Recursive envelope scan: body + title + filename + source_ref + nested meta
+  (bounded depth/nodes). Blocked titles are replaced by a generic safe title,
+  blocked meta dropped, and no unsafe title is written to the audit log.
+- Quarantine dedupe uses a keyed HMAC, never a raw SHA-256 of the blocked body.
+- Provider-argument gates in core: `rag.retrieve`, `chat_tools.run_tool`,
+  `/admin/search`, Gmail reply-draft search, `coach.create_goal/create_habit`
+  (so Telegram and the Mini App share one gate).
+- Model-egress gates: extractor output, chat reply, meeting digest, draft body
+  — before persistence, Telegram, TTS and Gmail; blocked turns are marked
+  `provider_eligible=False`; the read path re-scans stored turns.
+- Security scan v2 covers Proposal payloads, PendingDraft, PendingCalCreate,
+  Task/Goal/Habit, KnowledgeGap and RECURSIVE RawEvent payloads. A v1
+  completion no longer satisfies the v2 gate.
+- Voice: the STT exception is documented, not papered over — the transcript is
+  scanned before echo/persistence/model, and `/start` warns against dictating
+  keys. Local STT stays in NEXT.md.
+- Passwords remain searchable (owner decision R6.1A.1); the audit's
+  password-blocking cases are covered as detection under
+  `QUARANTINE_PASSWORDS=true`.
+- Tests: **266 passed** locally (75 new in `tests/test_r61a1.py`). No new
+  migration — the hotfix is code-only; the existing chain was re-verified.
+
+Gate to close before this can be called done: deploy, then run
+`/kb_security_scan` (scanner v2) to completion in production, then record the
+result here.
 
 ## R6.1A — Emergency knowledge safety: DELIVERED (6e12ffd; amended by R6.1A.1)
 
@@ -66,7 +106,7 @@ Not done here (deliberately, own rounds): domain isolation (R6.1B), wiki
 revisions / durable queue / full section compiler (R6.2), confirmed
 save-answer (R6.3), vault connector, and deletion of existing data.
 
-Gate CLOSED 2026-08-15: deployed, prod scan completed (1014 docs / 64 pages
+Gate for R6.1A (scanner v1) CLOSED 2026-08-15: deployed, prod v1 scan completed (1014 docs / 64 pages
 checked; 37 docs, 5 pages, 2 chat lines contained; 44 findings). Remaining
 manual step for Danylo: rotate the credentials named by `/kb_quarantine`,
 strip password columns from the source sheets, then `/drive_all` +

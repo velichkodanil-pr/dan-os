@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import security
 from app.core.audit import audit
 from app.models import (
-    ChatLog, Document, KnowledgeChunk, MemoryItem, RawEvent, SecurityFinding,
+    ChatLog, Document, Goal, Habit, KnowledgeChunk, KnowledgeGap, MemoryItem,
+    PendingCalCreate, PendingDraft, Proposal, RawEvent, SecurityFinding, Task,
     WikiPage,
 )
 
@@ -59,6 +60,8 @@ class ScanReport:
     chat_released: int = 0
     raw_events_scanned: int = 0
     raw_events_flagged: int = 0
+    other_scanned: int = 0
+    other_flagged: int = 0
     findings: int = 0
     # current totals after the pass (not just this run's transitions), so a
     # re-run reports what is STILL held, not «clean» when tokens remain
@@ -77,7 +80,8 @@ class ScanReport:
     def affected(self) -> int:
         """How much is CONTAINED right now (drives the report + autocompile hint)."""
         return (self.documents_in_quarantine + self.wiki_in_quarantine
-                + self.memory_in_quarantine + self.chat_in_quarantine)
+                + self.memory_in_quarantine + self.chat_in_quarantine
+                + self.other_flagged)
 
     @property
     def released(self) -> int:
@@ -138,6 +142,25 @@ async def _scan_documents(db: AsyncSession, user_id: int, report: ScanReport) ->
             if await security.record_finding(
                     db, user_id=user_id, domain=doc.domain,
                     resource_type="document", resource_id=doc.id, result=result):
+                report.findings += 1
+        elif security.scan_envelope(doc.title, doc.source_ref,
+                                    doc.meta or {}).blocked:
+            # v2: the ENVELOPE. A clean body with a secret filename was left
+            # fully indexed by v1 — and the filename is what /kb shows.
+            envelope = security.scan_envelope(doc.title, doc.source_ref,
+                                              doc.meta or {})
+            _note(report, envelope)
+            if doc.status != "quarantined":
+                doc.status = "quarantined"
+                doc.title = security.safe_title(doc.title)
+                doc.source_ref = security.safe_title(doc.source_ref, "")
+                doc.meta = {**security.safe_meta(doc.meta),
+                            "security": envelope.as_meta()}
+                report.documents_quarantined += 1
+            if await security.record_finding(
+                    db, user_id=user_id, domain=doc.domain,
+                    resource_type="document", resource_id=doc.id,
+                    result=envelope):
                 report.findings += 1
         elif doc.status == "quarantined" and doc.id in has_chunks:
             doc.status = "indexed"           # content verified clean now
@@ -262,9 +285,9 @@ async def _scan_raw_events(db: AsyncSession, user_id: int,
         for event in events:
             last = event.id
             report.raw_events_scanned += 1
-            payload = event.payload or {}
-            texts = [str(v) for v in payload.values() if isinstance(v, str)]
-            result = security.scan_parts(*texts)
+            # v2: RECURSIVE. v1 only looked at top-level string values, so a
+            # secret in payload["meeting"]["notes"] was invisible to the scan.
+            result = security.scan_envelope(event.payload or {})
             if not result.blocked:
                 await security.resolve_findings(
                     db, user_id=user_id, resource_type="raw_event",
@@ -277,6 +300,51 @@ async def _scan_raw_events(db: AsyncSession, user_id: int,
                     resource_type="raw_event", resource_id=event.id,
                     result=result):
                 report.findings += 1
+
+
+# Everything else that stores model- or user-authored text and can reach the
+# model context or the UI. v1 stopped at documents/wiki/memory/chat/events, so
+# a Proposal title, a staged Gmail draft or a goal could hold a secret that no
+# scan ever looked at. These have no status column to quarantine, so the scan
+# records a finding (visibility) and the read paths apply the scan filter.
+_OTHER_ENTITIES = (
+    ("proposal", Proposal, lambda r: (r.payload,)),
+    ("task", Task, lambda r: (r.title,)),
+    ("goal", Goal, lambda r: (r.title,)),
+    ("habit", Habit, lambda r: (r.title,)),
+    ("knowledge_gap", KnowledgeGap, lambda r: (r.question,)),
+    ("pending_draft", PendingDraft, lambda r: (r.to_addr, r.subject, r.body)),
+    ("pending_cal_create", PendingCalCreate, lambda r: (r.title,)),
+)
+
+
+async def _scan_other_entities(db: AsyncSession, user_id: int,
+                               report: ScanReport) -> None:
+    for kind, model, fields in _OTHER_ENTITIES:
+        last = None
+        while True:
+            q = (select(model).where(model.user_id == user_id)
+                 .order_by(model.id).limit(BATCH))
+            if last is not None:
+                q = q.where(model.id > last)
+            rows = (await db.execute(q)).scalars().all()
+            if not rows:
+                break
+            for row in rows:
+                last = row.id
+                report.other_scanned += 1
+                result = security.scan_envelope(*fields(row))
+                if not result.blocked:
+                    await security.resolve_findings(
+                        db, user_id=user_id, resource_type=kind,
+                        resource_id=row.id)
+                    continue
+                _note(report, result)
+                report.other_flagged += 1
+                if await security.record_finding(
+                        db, user_id=user_id, resource_type=kind,
+                        resource_id=row.id, result=result):
+                    report.findings += 1
 
 
 async def run_scan(db: AsyncSession, *, user_id: int) -> ScanReport:
@@ -294,6 +362,8 @@ async def run_scan(db: AsyncSession, *, user_id: int) -> ScanReport:
     await _scan_chat(db, user_id, report)
     await db.commit()
     await _scan_raw_events(db, user_id, report)
+    await db.commit()
+    await _scan_other_entities(db, user_id, report)
     await db.commit()
 
     # current totals — what is CONTAINED right now, not just this run's changes
@@ -438,7 +508,8 @@ def report_text(report: ScanReport) -> str:
         f"Перевірено: документів {report.documents_scanned}, "
         f"сторінок вікі {report.wiki_scanned}, фактів пам'яті "
         f"{report.memory_scanned}, реплік чату {report.chat_scanned}, "
-        f"подій {report.raw_events_scanned}.\n\n"
+        f"подій {report.raw_events_scanned}, інших записів "
+        f"{report.other_scanned}.\n\n"
     )
     released = ""
     if report.released:
@@ -457,6 +528,7 @@ def report_text(report: ScanReport) -> str:
         f"• фактів пам'яті: {report.memory_in_quarantine}\n"
         f"• реплік чату: {report.chat_in_quarantine}\n"
         f"• подій позначено (не змінювались): {report.raw_events_flagged}\n"
+        f"• інших записів (задачі/цілі/чернетки): {report.other_flagged}\n"
         f"• відкритих записів у журналі: {report.open_findings}\n"
     )
     cats = (f"Типи: {', '.join(report.categories)}\n" if report.categories else "")
