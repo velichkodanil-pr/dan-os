@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # completed local security scan — see app/core/security.py.
     auto_wiki_compile_enabled: bool = False
 
+    # R6.1A.1 (owner decision): passwords in business tables are searchable
+    # working data for this single-owner bot — the bot is meant to answer
+    # «який логін/пароль до партнера X». Only HARD technical secrets (API keys,
+    # OAuth/bearer tokens, private keys, session cookies, recovery codes, seed
+    # phrases) are blocked from the knowledge base. Set true to also block
+    # password values (the original, stricter R6.1A behaviour).
+    quarantine_passwords: bool = False
+
     @property
     def public_url(self) -> str:
         return f"https://{self.railway_public_domain}" if self.railway_public_domain else ""

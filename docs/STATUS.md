@@ -2,7 +2,9 @@
 
 _Last verified: 2026-08-15 (R6.1A on prod: 6e12ffd, /health/live→r6.1a; prod scan done — 37 docs / 5 wiki pages / 2 chat lines quarantined)_
 
-## R6.1A — Emergency knowledge safety: DELIVERED (deployed 6e12ffd)
+## R6.1A — Emergency knowledge safety: DELIVERED (6e12ffd; amended by R6.1A.1)
+
+> **R6.1A.1 (2026-08-15, owner decision):** passwords are now searchable business data; only HARD technical secrets (API keys, OAuth/bearer tokens, private keys, cookies, recovery codes, seed phrases) are blocked. Toggle `QUARANTINE_PASSWORDS=true` to restore strict mode. `/kb_security_scan` reconciles both ways (releases password content, keeps tokens). Prod scan 2026-08-15: 37 files / 5 wiki pages / 2 chat lines held under strict R6.1A; re-running after the amendment releases the ~29 password files and keeps the 8 token files.
 
 Hard secrets no longer reach persistence, embeddings, the wiki compiler, chat
 context or model tool output. Existing content is contained by an owner-run
@@ -53,7 +55,7 @@ local scan, without any automatic deletion.
   stay in the pending queue; error metadata carries codes, never bodies.
 - **Version metadata** — `APP_VERSION`/`APP_RELEASE` in `app/config.py`;
   `/health/live` and `/start` no longer claim «round 4».
-- Tests: **189 passed** locally (71 new in `tests/test_security.py`; the tests
+- Tests: **191 passed** locally (76 in `tests/test_security.py`; the tests
   that asserted credential retention/retrieval were replaced, not left
   contradicting). Provider tripwires fail a test on any embedder, Anthropic or
   network call on a gated path. Migration verified three ways: fresh DB from

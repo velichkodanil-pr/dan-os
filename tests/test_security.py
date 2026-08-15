@@ -55,6 +55,8 @@ FAKE_JWT = _shape("eyJ", "hbGciOiJIUzI1NiJ9.", "eyJzdWIiOiJmYWtlIn0.",
 FAKE_PEM = ("-----BEGIN RSA PRIVATE KEY-----\n"
             "MIIEXAMPLEONLYnotarealkey0000\n-----END RSA PRIVATE KEY-----")
 FAKE_BEARER = "Authorization: Bearer EXAMPLEONLYnotarealtoken0000"
+# a line that still BLOCKS under the default policy (hard technical secret)
+FAKE_SECRET_LINE = f"Сервіс api.example, ключ доступу {FAKE_API_KEY}"
 BUSINESS_TEXT = ("Toco UA (ТОКО Україна) — партнер-оператор.\n\n"
                  "Сайт: toco-tour.example, менеджер i.k@example.invalid,\n\n"
                  "ЄДРПОУ 46140224, депозит 30%, комісія 12%.")
@@ -89,6 +91,15 @@ class _TripwireExtractor:
         raise AssertionError("extractor must not see this text")
 
 
+@pytest.fixture(autouse=True)
+def _reset_blocking():
+    """Default policy: passwords allowed. Restore it after every test so a
+    test that flips to strict mode cannot leak into the next one."""
+    secret_policy.set_blocking_categories(secret_policy.HARD_SECRET_CATEGORIES)
+    yield
+    secret_policy.set_blocking_categories(secret_policy.HARD_SECRET_CATEGORIES)
+
+
 # ============================================================ 1. the scanner
 
 @pytest.mark.parametrize("text,category", [
@@ -102,8 +113,6 @@ class _TripwireExtractor:
     (FAKE_JWT, SecretCategory.BEARER_TOKEN),
     ('"refresh_token": "EXAMPLEONLYnotreal000"', SecretCategory.OAUTH_TOKEN),
     (f"client_secret={FAKE_OAUTH_SECRET}", SecretCategory.OAUTH_TOKEN),
-    (FAKE_PASSWORD_LINE, SecretCategory.PASSWORD),
-    ("Password: Qw3rty-Zx9-Lm", SecretCategory.PASSWORD),
     ("PHPSESSID=abcd1234efgh5678ijkl", SecretCategory.SESSION_COOKIE),
     ("Recovery codes: a1b2-c3d4, e5f6-g7h8, i9j0-k1l2, m3n4-o5p6",
      SecretCategory.RECOVERY_CODE),
@@ -114,6 +123,22 @@ def test_01_scanner_blocks_every_hard_secret_shape(text, category):
     result = scan_text(text)
     assert result.blocked, text[:40]
     assert category in result.categories
+
+
+def test_01b_password_is_allowed_by_default():
+    """Owner decision (R6.1A.1): a partner-portal password is searchable
+    business data, not a blocked secret."""
+    assert not scan_text(FAKE_PASSWORD_LINE).blocked
+    assert not scan_text("Password: Qw3rty-Zx9-Lm").blocked
+    assert not scan_text("Оператор | Пароль\nToco UA | Qw3rty-Zx9-Lm").blocked
+    mixed = scan_text(FAKE_PASSWORD_LINE + "\n" + FAKE_API_KEY)
+    assert mixed.blocked and mixed.categories == (SecretCategory.API_KEY,)
+
+
+def test_01c_password_blocks_when_flag_on():
+    """The stricter mode stays one env var away."""
+    secret_policy.set_blocking_categories(secret_policy.ALL_CATEGORIES)
+    assert scan_text(FAKE_PASSWORD_LINE).blocked
 
 
 @pytest.mark.parametrize("text", [
@@ -160,13 +185,14 @@ def test_05_scanner_reads_the_whole_document_not_a_prefix():
                          for i in range(4000))
     assert len(filler) > secret_policy.SECTION_CHARS * 3
     assert not scan_text(filler).blocked
-    assert scan_text(filler + "\n\n" + FAKE_PASSWORD_LINE).blocked
-    assert scan_text(FAKE_PASSWORD_LINE + "\n\n" + filler).blocked
-    middle = filler[:len(filler) // 2] + FAKE_PASSWORD_LINE + filler[len(filler) // 2:]
+    assert scan_text(filler + "\n\n" + FAKE_SECRET_LINE).blocked
+    assert scan_text(FAKE_SECRET_LINE + "\n\n" + filler).blocked
+    middle = filler[:len(filler) // 2] + FAKE_SECRET_LINE + filler[len(filler) // 2:]
     assert scan_text(middle).blocked
 
 
 def test_06_scanner_normalises_unicode_evasion():
+    secret_policy.set_blocking_categories(secret_policy.ALL_CATEGORIES)
     assert scan_text("Password: Qw3rty-Zx9-Lm").blocked      # nbsp
     assert scan_text("ｐａｓｓｗｏｒｄ：Qw3rty-Zx9-Lm").blocked        # fullwidth
     assert scan_text("pass​word: Qw3rty-Zx9-Lm").blocked     # zero width
@@ -178,8 +204,8 @@ def test_07_scanner_is_deterministic_local_code(monkeypatch):
         def __init__(self, *a, **kw):
             raise AssertionError("the scanner must not touch the network")
     monkeypatch.setattr(httpx, "AsyncClient", _NoNetwork)
-    first = scan_text(FAKE_PASSWORD_LINE + BUSINESS_TEXT)
-    second = scan_text(FAKE_PASSWORD_LINE + BUSINESS_TEXT)
+    first = scan_text(FAKE_SECRET_LINE + BUSINESS_TEXT)
+    second = scan_text(FAKE_SECRET_LINE + BUSINESS_TEXT)
     assert first == second and first.blocked
 
 
@@ -195,7 +221,7 @@ def test_08_scan_result_is_frozen():
 async def test_09_ingest_quarantines_without_any_provider_call(db, no_providers):
     result = await ingest_document(
         db, user_id=OWNER, title="Доступи DMC.xlsx",
-        text=BUSINESS_TEXT + "\n\n" + FAKE_PASSWORD_LINE,
+        text=BUSINESS_TEXT + "\n\n" + FAKE_SECRET_LINE,
         source_type="telegram_file", source_ref="dmc.xlsx")
     assert result.status == "quarantined"
     assert result.chunks == 0
@@ -205,7 +231,7 @@ async def test_09_ingest_quarantines_without_any_provider_call(db, no_providers)
 @pytest.mark.asyncio
 async def test_10_quarantined_document_stores_no_source_text(db, no_providers):
     await ingest_document(db, user_id=OWNER, title="Доступи.xlsx",
-                          text=BUSINESS_TEXT + "\n" + FAKE_PASSWORD_LINE,
+                          text=BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE,
                           source_type="drive", source_ref="f1")
     doc = (await db.execute(select(Document))).scalar_one()
     chunks = (await db.execute(
@@ -213,29 +239,29 @@ async def test_10_quarantined_document_stores_no_source_text(db, no_providers):
     assert chunks == 0 and doc.chunk_count == 0
     blob = json.dumps({"title": doc.title, "meta": doc.meta, "ref": doc.source_ref},
                       ensure_ascii=False)
-    assert "Zx9-kLm2-Qw7" not in blob
-    assert doc.meta["security"]["categories"] == ["password"]
+    assert "EXAMPLEONLY" not in blob
+    assert doc.meta["security"]["categories"] == ["api_key"]
 
 
 @pytest.mark.asyncio
 async def test_11_finding_is_metadata_only(db, no_providers):
     await ingest_document(db, user_id=OWNER, title="Доступи.txt",
-                          text=FAKE_PASSWORD_LINE + "\n" + FAKE_API_KEY,
+                          text=FAKE_BEARER + "\n" + FAKE_API_KEY,
                           source_type="drive", source_ref="f2")
     finding = (await db.execute(select(SecurityFinding))).scalar_one()
     assert finding.status == "open"
-    assert set(finding.categories) == {"password", "api_key"}
+    assert set(finding.categories) == {"bearer_token", "api_key"}
     assert finding.finding_count >= 2
     columns = {c.name for c in SecurityFinding.__table__.columns}
     assert not columns & {"excerpt", "value", "secret", "hash", "fingerprint",
                           "text", "payload"}
-    assert "Zx9-kLm2-Qw7" not in json.dumps(
+    assert "EXAMPLEONLY" not in json.dumps(
         {c: str(getattr(finding, c)) for c in columns}, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
 async def test_12_repeat_ingest_is_idempotent(db, no_providers):
-    text = BUSINESS_TEXT + "\n" + FAKE_PASSWORD_LINE
+    text = BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE
     first = await ingest_document(db, user_id=OWNER, title="a.txt", text=text,
                                   source_type="drive", source_ref="f3")
     second = await ingest_document(db, user_id=OWNER, title="a.txt", text=text,
@@ -269,7 +295,7 @@ async def test_14_parts_gate_contains_the_whole_source(db, no_providers):
     assert len(body) > PART_CHARS
     results = await ingest_document_parts(
         db, user_id=OWNER, title="Великий.xlsx",
-        text=body + "\n\n" + FAKE_PASSWORD_LINE,
+        text=body + "\n\n" + FAKE_SECRET_LINE,
         source_type="drive", source_ref="big1")
     assert [r.status for r in results] == ["quarantined"]
     assert (await db.execute(
@@ -287,8 +313,8 @@ async def test_15_xlsx_quarantines_only_the_affected_sheet(db):
     for i in range(40):
         ws.append([f"Ідея {i}", f"опис ідеї номер {i} для сезону"])
     ws2 = wb.create_sheet("DMC")
-    ws2.append(["Оператор", "Логін", "Пароль"])
-    ws2.append(["Toco UA", "i.k@example.invalid", "Zx9-kLm2-Qw7"])
+    ws2.append(["Сервіс", "Ключ API"])
+    ws2.append(["Travelon AI", FAKE_API_KEY])
     buf = io.BytesIO()
     wb.save(buf)
     results = await ingest_xlsx_by_sheets(
@@ -323,7 +349,7 @@ async def test_17_retrieval_withholds_a_legacy_secret_chunk(db):
                    content_hash="legacyhash", status="indexed", chunk_count=1)
     db.add(doc)
     await db.flush()
-    text = f"Toco UA депозит комісія {FAKE_PASSWORD_LINE}"
+    text = f"Toco UA депозит комісія {FAKE_SECRET_LINE}"
     emb = (await get_embedder().embed([text]))[0]
     db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
                           text=text, embedding=emb))
@@ -356,7 +382,7 @@ def test_19_credential_words_are_no_longer_lookup_triggers():
 async def test_20_note_with_secret_never_becomes_a_row(db, no_providers):
     orch = Orchestrator(extractor=_TripwireExtractor())
     outcome = await orch.handle_note(
-        db, user_id=OWNER, text=f"збережи: {FAKE_PASSWORD_LINE}",
+        db, user_id=OWNER, text=f"збережи: {FAKE_SECRET_LINE}",
         dedupe_key="tg:1:1")
     assert outcome.kind == "blocked"
     for model in (RawEvent, ChatLog, MemoryItem, Proposal):
@@ -406,15 +432,36 @@ async def _async_none():
 
 
 @pytest.mark.asyncio
-async def test_23_credential_request_answers_not_stored(db, no_providers):
-    """A lookup must not start a credential hunt, or call a model at all."""
+async def test_23_token_request_refused_password_request_flows(db, monkeypatch):
+    """A HARD-secret lookup is still refused without a model call. A password
+    lookup is now an ordinary question — it must reach normal retrieval/chat."""
     orch = Orchestrator(extractor=_TripwireExtractor())
-    outcome = await orch.handle_note(db, user_id=OWNER,
+    monkeypatch.setattr("app.core.extraction.haiku_text",
+                        lambda *a, **kw: _raise())
+    out_token = await orch.handle_note(db, user_id=OWNER,
+                                       text="дай токен доступу до бота",
+                                       dedupe_key="tg:1:4a")
+    assert out_token.kind == "chat"
+    assert out_token.reply == security.SAFE_NOT_STORED
+
+    assert not security.is_credential_request("який пароль до ТОКО Україна?")
+
+    class _Reply:
+        async def extract(self, text, context=None):
+            from app.core.extraction import ExtractResult
+            return ExtractResult(intent="chat", reply="Дивлюсь у базі…")
+    monkeypatch.setattr("app.core.chat.chat_reply",
+                        lambda *a, **kw: _async_none())
+    orch2 = Orchestrator(extractor=_Reply())
+    out_pw = await orch2.handle_note(db, user_id=OWNER,
                                      text="який пароль до ТОКО Україна?",
-                                     dedupe_key="tg:1:4")
-    assert outcome.kind == "chat"
-    assert outcome.reply == security.SAFE_NOT_STORED
-    assert "не зберігає" in outcome.reply
+                                     dedupe_key="tg:1:4b")
+    assert out_pw.kind == "chat"
+    assert out_pw.reply != security.SAFE_NOT_STORED
+
+
+async def _raise():
+    raise AssertionError("no model call on a refused hard-secret lookup")
 
 
 # ============================================================ 5. tools & wiki
@@ -435,10 +482,10 @@ async def test_24_wiki_save_answer_is_gone(db):
 @pytest.mark.asyncio
 async def test_25_tool_output_is_withheld_when_it_carries_a_secret(db, monkeypatch):
     async def leaky(_db, _user_id, _args):
-        return {"open_tasks": [{"title": f"нагадати {FAKE_PASSWORD_LINE}"}]}
+        return {"open_tasks": [{"title": f"ключ {FAKE_API_KEY}"}]}
     monkeypatch.setitem(chat_tools._EXECUTORS, "get_tasks", leaky)
     raw = await chat_tools.run_tool(db, OWNER, "get_tasks", {})
-    assert "Zx9-kLm2-Qw7" not in raw
+    assert "EXAMPLEONLY" not in raw
     assert json.loads(raw)["withheld"] is True
     finding = (await db.execute(select(SecurityFinding))).scalar_one()
     assert finding.resource_type == "tool_output"
@@ -463,7 +510,7 @@ async def test_26_quarantined_page_is_invisible_to_every_reader(db):
 async def test_27_compiler_never_sends_a_secret_source(db, no_providers):
     outcome = await wiki.compile_source(
         db, user_id=OWNER, title="Доступи DMC",
-        text=BUSINESS_TEXT + "\n" + FAKE_PASSWORD_LINE, source_ref="d1")
+        text=BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE, source_ref="d1")
     assert outcome.status == "quarantined"
     assert outcome.pages == [] and outcome.error_code == "secret_detected"
     assert (await db.execute(
@@ -487,8 +534,8 @@ async def test_28_compiler_drops_secret_facts_from_model_output(db, monkeypatch)
     page = await wiki.find_page(db, OWNER, "ТОКО")
     assert page.status == "active"
     assert "Депозит: 30%" in page.content
-    assert "Zx9-kLm2-Qw7" not in page.content
-    assert "EXAMPLEONLY" not in page.content
+    assert "EXAMPLEONLY" not in page.content       # the api-key fact is dropped
+    assert "Zx9-kLm2-Qw7" in page.content          # the password fact is kept
 
 
 @pytest.mark.asyncio
@@ -538,7 +585,7 @@ async def test_30_oversized_source_reports_deferred_large(db, monkeypatch):
 async def test_31_upsert_contains_a_secret_page_on_write(db):
     page, status = await wiki.upsert_page(
         db, user_id=OWNER, kind="entity", title="Партнер X", summary="оператор",
-        content=f"- {FAKE_PASSWORD_LINE}", aliases=[], tags=[])
+        content=f"- {FAKE_SECRET_LINE}", aliases=[], tags=[])
     await db.commit()
     assert status == "quarantined" and page.status == "quarantined"
     assert page.content == "" and page.summary == ""
@@ -563,18 +610,18 @@ async def test_32_scan_contains_existing_content_and_is_idempotent(db, monkeypat
     db.add(doc)
     await db.flush()
     from app.core.embeddings import get_embedder
-    emb = (await get_embedder().embed([FAKE_PASSWORD_LINE]))[0]
+    emb = (await get_embedder().embed([FAKE_API_KEY]))[0]
     db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
-                          text=FAKE_PASSWORD_LINE, embedding=emb))
+                          text=FAKE_API_KEY, embedding=emb))
     page = WikiPage(user_id=OWNER, kind="entity", slug="legacy", title="Legacy",
                     summary="s", content=FAKE_BEARER, contradictions="",
                     aliases=[], tags=[], sources=[], status="active")
     db.add(page)
-    db.add(MemoryItem(user_id=OWNER, content=f"пам'ятай {FAKE_PASSWORD_LINE}",
+    db.add(MemoryItem(user_id=OWNER, content=f"ключ {FAKE_API_KEY}",
                       status="confirmed"))
     db.add(ChatLog(user_id=OWNER, role="user", text=FAKE_API_KEY))
     db.add(RawEvent(event_type="telegram.message", dedupe_key="legacy-1",
-                    user_id=OWNER, payload={"text": FAKE_PASSWORD_LINE}))
+                    user_id=OWNER, payload={"text": FAKE_API_KEY}))
     await db.commit()
 
     # a provider tripwire covering the whole scan
@@ -602,7 +649,7 @@ async def test_32_scan_contains_existing_content_and_is_idempotent(db, monkeypat
     assert (await db.execute(
         select(func.count()).select_from(RawEvent))).scalar_one() == 1
     event = (await db.execute(select(RawEvent))).scalar_one()
-    assert event.payload["text"] == FAKE_PASSWORD_LINE  # immutable, untouched
+    assert event.payload["text"] == FAKE_API_KEY  # immutable, untouched
 
     findings_first = (await db.execute(
         select(func.count()).select_from(SecurityFinding))).scalar_one()
@@ -640,16 +687,16 @@ async def test_34_scan_report_carries_counts_only(db):
                    chunk_count=1)
     db.add(doc)
     await db.flush()
-    emb = (await get_embedder().embed([FAKE_PASSWORD_LINE]))[0]
+    emb = (await get_embedder().embed([FAKE_API_KEY]))[0]
     db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
-                          text=FAKE_PASSWORD_LINE, embedding=emb))
+                          text=FAKE_API_KEY, embedding=emb))
     await db.commit()
     report = await security_scan.run_scan(db, user_id=OWNER)
     assert report.documents_quarantined == 1
     text = security_scan.report_text(report)
-    assert "Zx9-kLm2-Qw7" not in text
+    assert "EXAMPLEONLY" not in text
     assert "Дуже Секретний Файл" not in text
-    assert "менеджер" in text.lower()
+    assert "перевипустити" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -675,8 +722,8 @@ async def test_36_gmail_digest_drops_a_credential_mail(monkeypatch):
             raise AssertionError("nothing may be sent for this mailbox")
     monkeypatch.setattr("app.core.digest.httpx.AsyncClient", _NoNetwork)
 
-    only_secret = [{"from": "noreply@example.invalid", "subject": "Ваш доступ",
-                    "snippet": FAKE_PASSWORD_LINE}]
+    only_secret = [{"from": "noreply@example.invalid", "subject": "Ваш ключ",
+                    "snippet": FAKE_API_KEY}]
     assert digest._digestible(only_secret) == []
     assert await digest._rank_with_haiku(only_secret) is None
 
@@ -698,8 +745,8 @@ async def test_37_reply_draft_refuses_a_credential_letter(db, monkeypatch):
         return "token"
 
     async def _find(_access, _query):
-        return {"from": "noreply@example.invalid", "subject": "Ваш новий доступ",
-                "body": FAKE_PASSWORD_LINE, "thread_id": "t", "message_id": "m",
+        return {"from": "noreply@example.invalid", "subject": "Ваш новий ключ",
+                "body": FAKE_API_KEY, "thread_id": "t", "message_id": "m",
                 "references": ""}
 
     async def _no_model(*a, **kw):
@@ -734,7 +781,7 @@ async def test_38_assembled_context_is_checked_as_a_whole(db, monkeypatch):
     await db.commit()
 
     async def _agenda(_db, _user_id, days=7):
-        return f"\nКалендар: зустріч «{FAKE_PASSWORD_LINE}»"
+        return f"\nКалендар: зустріч «{FAKE_API_KEY}»"
     monkeypatch.setattr("app.core.briefs.agenda_block", _agenda)
     monkeypatch.setattr("app.core.chat.chat_reply", lambda *a, **kw: _async_none())
 
@@ -791,13 +838,13 @@ async def test_39_quarantine_listing_names_sources_without_content(db):
 async def test_40_quarantine_listing_masks_secret_bearing_titles(db):
     """A filename can itself carry the secret — the listing must not echo it."""
     db.add(Document(user_id=OWNER, domain="personal",
-                    title=f"Нотатка {FAKE_PASSWORD_LINE}", source_type="telegram_file",
+                    title=f"Нотатка {FAKE_API_KEY}", source_type="telegram_file",
                     source_ref="n1", content_hash="h-n1",
                     status="quarantined", chunk_count=0))
     await db.commit()
     listing = await security_scan.quarantine_listing(db, OWNER)
     joined = "\n".join(security_scan.quarantine_text(listing))
-    assert "Zx9-kLm2-Qw7" not in joined
+    assert "EXAMPLEONLY" not in joined
     assert "назву приховано" in joined
 
 
@@ -806,3 +853,92 @@ async def test_41_quarantine_listing_empty_is_honest(db):
     listing = await security_scan.quarantine_listing(db, OWNER)
     messages = security_scan.quarantine_text(listing)
     assert len(messages) == 1 and "порожній" in messages[0]
+
+
+# ==================================== 9. reconcile: release passwords, keep tokens
+
+@pytest.mark.asyncio
+async def test_42_rescan_releases_password_content_keeps_tokens(db):
+    """After the owner allowed passwords, re-running the scan must RELEASE the
+    password-only content it had quarantined, while a token document stays put.
+    Documents keep their chunks from the pre-R6.1A indexing, so releasing them
+    restores searchability."""
+    from app.core.embeddings import get_embedder
+
+    async def _quarantined_doc(title, ref, text, chash):
+        doc = Document(user_id=OWNER, domain="personal", title=title,
+                       source_type="drive", source_ref=ref, content_hash=chash,
+                       status="quarantined", chunk_count=1,
+                       meta={"security": {"categories": ["x"], "finding_count": 1,
+                                          "scanner_version": 1}})
+        db.add(doc)
+        await db.flush()
+        emb = (await get_embedder().embed([text]))[0]
+        db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
+                              text=text, embedding=emb))
+        await security.record_finding(
+            db, user_id=OWNER, resource_type="document", resource_id=doc.id,
+            result=security.SecretScanResult(True, (security.SecretCategory.PASSWORD,), 1))
+        return doc
+
+    pw_doc = await _quarantined_doc(
+        "Партнери пароль", "pw", f"Toco UA депозит {FAKE_PASSWORD_LINE}", "h-pw")
+    tok_doc = await _quarantined_doc(
+        "Токени", "tok", f"Сервіс {FAKE_API_KEY}", "h-tok")
+    # a quarantined password wiki page + a contained password chat line
+    page = WikiPage(user_id=OWNER, kind="entity", slug="toco", title="Toco UA",
+                    summary="оператор", content=f"- Пароль: {FAKE_PASSWORD_LINE}",
+                    contradictions="", aliases=["ТОКО"], tags=[], sources=[],
+                    status="quarantined")
+    db.add(page)
+    db.add(ChatLog(user_id=OWNER, role="bot", text=f"пароль {FAKE_PASSWORD_LINE}",
+                   provider_eligible=False))
+    await db.commit()
+
+    report = await security_scan.run_scan(db, user_id=OWNER)
+    assert report.documents_released == 1      # the password doc
+    assert report.wiki_released == 1
+    assert report.chat_released == 1
+    assert report.documents_quarantined == 0   # token doc was already quarantined
+
+    await db.refresh(pw_doc); await db.refresh(tok_doc); await db.refresh(page)
+    assert pw_doc.status == "indexed"          # released, searchable again
+    assert "security" not in (pw_doc.meta or {})
+    assert tok_doc.status == "quarantined"     # token stays contained
+    assert page.status == "active"
+
+    # the password page is found again; its finding is resolved
+    assert await wiki.find_page(db, OWNER, "ТОКО") is not None
+    resolved = (await db.execute(select(SecurityFinding).where(
+        SecurityFinding.resource_type == "document",
+        SecurityFinding.resource_id == str(pw_doc.id)))).scalar_one()
+    assert resolved.status == "resolved"
+    # the token document keeps an OPEN finding
+    open_tok = (await db.execute(select(SecurityFinding).where(
+        SecurityFinding.resource_type == "document",
+        SecurityFinding.resource_id == str(tok_doc.id)))).scalar_one()
+    assert open_tok.status == "open"
+
+
+@pytest.mark.asyncio
+async def test_43_released_password_document_is_retrievable(db):
+    """End to end: a password table quarantined by the old policy answers
+    «який пароль до …» again after the reconciling scan."""
+    from app.core.embeddings import get_embedder
+    doc = Document(user_id=OWNER, domain="personal", title="Доступи операторів",
+                   source_type="drive", source_ref="acc", content_hash="h-acc",
+                   status="quarantined", chunk_count=1,
+                   meta={"security": {"categories": ["password"],
+                                      "finding_count": 1, "scanner_version": 1}})
+    db.add(doc)
+    await db.flush()
+    text = "Toco UA (ТОКО) кабінет: логін i.k@example.invalid, пароль Qw3rty-Zx9-Lm"
+    emb = (await get_embedder().embed([text]))[0]
+    db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
+                          text=text, embedding=emb))
+    await db.commit()
+
+    assert await rag.retrieve(db, user_id=OWNER, query="пароль Toco кабінет") == []
+    await security_scan.run_scan(db, user_id=OWNER)
+    hits = await rag.retrieve(db, user_id=OWNER, query="пароль Toco кабінет")
+    assert any("Qw3rty-Zx9-Lm" in h.text for h in hits)

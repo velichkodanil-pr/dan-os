@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import security
 from app.core.audit import audit
 from app.models import (
-    ChatLog, Document, KnowledgeChunk, MemoryItem, RawEvent, WikiPage,
+    ChatLog, Document, KnowledgeChunk, MemoryItem, RawEvent, SecurityFinding,
+    WikiPage,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,15 +48,25 @@ class ScanReport:
     Telegram, and a «suspicious document» title can itself be a leak."""
     documents_scanned: int = 0
     documents_quarantined: int = 0
+    documents_released: int = 0
     wiki_scanned: int = 0
     wiki_quarantined: int = 0
+    wiki_released: int = 0
     memory_scanned: int = 0
     memory_quarantined: int = 0
     chat_scanned: int = 0
     chat_contained: int = 0
+    chat_released: int = 0
     raw_events_scanned: int = 0
     raw_events_flagged: int = 0
     findings: int = 0
+    # current totals after the pass (not just this run's transitions), so a
+    # re-run reports what is STILL held, not «clean» when tokens remain
+    documents_in_quarantine: int = 0
+    wiki_in_quarantine: int = 0
+    memory_in_quarantine: int = 0
+    chat_in_quarantine: int = 0
+    open_findings: int = 0
     categories: list = field(default_factory=list)
     completed: bool = False
 
@@ -64,9 +75,14 @@ class ScanReport:
 
     @property
     def affected(self) -> int:
-        return (self.documents_quarantined + self.wiki_quarantined
-                + self.memory_quarantined + self.chat_contained
-                + self.raw_events_flagged)
+        """How much is CONTAINED right now (drives the report + autocompile hint)."""
+        return (self.documents_in_quarantine + self.wiki_in_quarantine
+                + self.memory_in_quarantine + self.chat_in_quarantine)
+
+    @property
+    def released(self) -> int:
+        return (self.documents_released + self.wiki_released
+                + self.chat_released)
 
 
 def _note(report: ScanReport, result) -> None:
@@ -76,9 +92,17 @@ def _note(report: ScanReport, result) -> None:
 
 
 async def _scan_documents(db: AsyncSession, user_id: int, report: ScanReport) -> None:
-    """Chunk text grouped by its parent document; the DOCUMENT is contained."""
+    """Chunk text grouped by its parent document; the DOCUMENT is contained.
+
+    Reconciles both ways: a document that trips is quarantined, and a
+    quarantined document whose stored chunks no longer trip (e.g. because
+    passwords are now allowed) is RELEASED back to indexed and its finding
+    resolved. A document quarantined at ingest has no chunks stored, so it is
+    left as-is — there is nothing to re-verify or restore without re-ingesting.
+    """
     last = None
     tripped: dict = {}
+    has_chunks: set = set()
     while True:
         q = (select(KnowledgeChunk.id, KnowledgeChunk.document_id,
                     KnowledgeChunk.text)
@@ -91,6 +115,7 @@ async def _scan_documents(db: AsyncSession, user_id: int, report: ScanReport) ->
             break
         for row in rows:
             last = row.id
+            has_chunks.add(row.document_id)
             result = security.scan(row.text)
             if result.blocked:
                 prev = tripped.get(row.document_id)
@@ -103,18 +128,25 @@ async def _scan_documents(db: AsyncSession, user_id: int, report: ScanReport) ->
     report.documents_scanned = len(docs)
     for doc in docs:
         result = tripped.get(doc.id)
-        if result is None:
-            continue
-        if doc.status != "quarantined":
-            doc.status = "quarantined"
+        if result is not None:
+            if doc.status != "quarantined":
+                doc.status = "quarantined"
+                meta = dict(doc.meta or {})
+                meta["security"] = result.as_meta()
+                doc.meta = meta
+                report.documents_quarantined += 1
+            if await security.record_finding(
+                    db, user_id=user_id, domain=doc.domain,
+                    resource_type="document", resource_id=doc.id, result=result):
+                report.findings += 1
+        elif doc.status == "quarantined" and doc.id in has_chunks:
+            doc.status = "indexed"           # content verified clean now
             meta = dict(doc.meta or {})
-            meta["security"] = result.as_meta()
+            meta.pop("security", None)
             doc.meta = meta
-            report.documents_quarantined += 1
-        if await security.record_finding(
-                db, user_id=user_id, domain=doc.domain,
-                resource_type="document", resource_id=doc.id, result=result):
-            report.findings += 1
+            await security.resolve_findings(
+                db, user_id=user_id, resource_type="document", resource_id=doc.id)
+            report.documents_released += 1
 
 
 async def _scan_wiki(db: AsyncSession, user_id: int, report: ScanReport) -> None:
@@ -137,6 +169,12 @@ async def _scan_wiki(db: AsyncSession, user_id: int, report: ScanReport) -> None
             result = security.scan_parts(page.title, page.summary, page.content,
                                          page.contradictions, aliases, sources)
             if not result.blocked:
+                if page.status == "quarantined":  # no longer trips -> release
+                    page.status = "active"
+                    await security.resolve_findings(
+                        db, user_id=user_id, resource_type="wiki_page",
+                        resource_id=page.id)
+                    report.wiki_released += 1
                 continue
             _note(report, result)
             if page.status != "quarantined":
@@ -192,6 +230,12 @@ async def _scan_chat(db: AsyncSession, user_id: int, report: ScanReport) -> None
             report.chat_scanned += 1
             result = security.scan(row.text)
             if not result.blocked:
+                if not row.provider_eligible:  # contained before, clean now
+                    row.provider_eligible = True
+                    await security.resolve_findings(
+                        db, user_id=user_id, resource_type="chat_log",
+                        resource_id=row.id)
+                    report.chat_released += 1
                 continue
             _note(report, result)
             if row.provider_eligible:
@@ -222,6 +266,9 @@ async def _scan_raw_events(db: AsyncSession, user_id: int,
             texts = [str(v) for v in payload.values() if isinstance(v, str)]
             result = security.scan_parts(*texts)
             if not result.blocked:
+                await security.resolve_findings(
+                    db, user_id=user_id, resource_type="raw_event",
+                    resource_id=event.id)   # e.g. was a password, now allowed
                 continue
             _note(report, result)
             report.raw_events_flagged += 1
@@ -248,6 +295,28 @@ async def run_scan(db: AsyncSession, *, user_id: int) -> ScanReport:
     await db.commit()
     await _scan_raw_events(db, user_id, report)
     await db.commit()
+
+    # current totals — what is CONTAINED right now, not just this run's changes
+    report.documents_in_quarantine = (await db.execute(
+        select(func.count()).select_from(Document).where(
+            Document.user_id == user_id,
+            Document.status == "quarantined"))).scalar_one()
+    report.wiki_in_quarantine = (await db.execute(
+        select(func.count()).select_from(WikiPage).where(
+            WikiPage.user_id == user_id,
+            WikiPage.status == "quarantined"))).scalar_one()
+    report.memory_in_quarantine = (await db.execute(
+        select(func.count()).select_from(MemoryItem).where(
+            MemoryItem.user_id == user_id,
+            MemoryItem.status == "quarantined"))).scalar_one()
+    report.chat_in_quarantine = (await db.execute(
+        select(func.count()).select_from(ChatLog).where(
+            ChatLog.user_id == user_id,
+            ChatLog.provider_eligible.is_(False)))).scalar_one()
+    report.open_findings = (await db.execute(
+        select(func.count()).select_from(SecurityFinding).where(
+            SecurityFinding.user_id == user_id,
+            SecurityFinding.status == "open"))).scalar_one()
 
     report.completed = True
     await security.mark_scan_complete(db)
@@ -371,22 +440,28 @@ def report_text(report: ScanReport) -> str:
         f"{report.memory_scanned}, реплік чату {report.chat_scanned}, "
         f"подій {report.raw_events_scanned}.\n\n"
     )
+    released = ""
+    if report.released:
+        released = (
+            f"\n<b>Повернуто з карантину</b> (паролі тепер дозволені): "
+            f"документів {report.documents_released}, сторінок вікі "
+            f"{report.wiki_released}, реплік чату {report.chat_released}.\n")
     if not report.affected:
-        return head + body + ("Нічого не знайдено — база чиста ✅\n"
-                              "Автокомпіляцію вікі можна вмикати.")
+        return head + body + released + (
+            "\nТехнічних секретів у карантині немає — база чиста ✅\n"
+            "Автокомпіляцію вікі можна вмикати.")
     found = (
-        f"<b>Знайдено і поміщено в карантин:</b>\n"
-        f"• документів: {report.documents_quarantined}\n"
-        f"• сторінок вікі: {report.wiki_quarantined}\n"
-        f"• фактів пам'яті: {report.memory_quarantined}\n"
-        f"• реплік чату (не підуть у модель): {report.chat_contained}\n"
+        f"<b>Технічні секрети в карантині</b> (ключі/токени, у модель не йдуть):\n"
+        f"• документів: {report.documents_in_quarantine}\n"
+        f"• сторінок вікі: {report.wiki_in_quarantine}\n"
+        f"• фактів пам'яті: {report.memory_in_quarantine}\n"
+        f"• реплік чату: {report.chat_in_quarantine}\n"
         f"• подій позначено (не змінювались): {report.raw_events_flagged}\n"
-        f"• записів у журналі знахідок: {report.findings}\n"
+        f"• відкритих записів у журналі: {report.open_findings}\n"
     )
     cats = (f"Типи: {', '.join(report.categories)}\n" if report.categories else "")
-    tail = ("\nКарантин — це ізоляція, не видалення: нічого не стерто, "
-            "але ці дані більше не потрапляють у пошук, у вікі та в модель.\n\n"
-            "⚠️ <b>Далі — вручну:</b> зміни ті доступи, які могли бути в "
-            "проіндексованих джерелах, і перенеси їх у менеджер паролів. "
-            "Значення сюди не надсилай.")
-    return head + body + found + cats + tail
+    tail = ("\nКарантин — це ізоляція, не видалення. У карантині лишились "
+            "тільки технічні секрети (API-ключі, токени, приватні ключі) — "
+            "їм не місце в базі знань. Ключі з тих файлів варто перевипустити "
+            "там, де їх видавали. Значення сюди не надсилай.")
+    return head + body + released + found + cats + tail

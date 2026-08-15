@@ -25,6 +25,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+from app.core import secret_policy
 from app.core.audit import audit
 from app.core.secret_policy import (
     SCANNER_VERSION, SecretCategory, SecretScanResult, scan_parts, scan_text,
@@ -33,28 +35,35 @@ from app.models import AppState, SecurityFinding
 
 logger = logging.getLogger(__name__)
 
+# Configure the scanner's blocking set once, from settings. Passwords are
+# allowed by default (owner decision); hard technical secrets always block.
+secret_policy.set_blocking_categories(
+    secret_policy.ALL_CATEGORIES if settings.quarantine_passwords
+    else secret_policy.HARD_SECRET_CATEGORIES)
+
 __all__ = ["SCANNER_VERSION", "SecretCategory", "SecretScanResult",
            "SAFE_REFUSAL", "SAFE_NOT_STORED", "scan", "scan_parts",
-           "record_finding", "audit_blocked", "is_credential_request",
-           "scan_complete", "mark_scan_complete", "clear_scan_complete",
-           "SCAN_COMPLETE_KEY"]
+           "record_finding", "resolve_findings", "audit_blocked",
+           "is_credential_request", "scan_complete", "mark_scan_complete",
+           "clear_scan_complete", "SCAN_COMPLETE_KEY"]
 
-# What Danylo sees instead of the credential. It names the boundary and points
-# at the right tool — it does not echo back any part of what he sent.
+# What Danylo sees instead of a hard technical secret. It names the boundary
+# and points at the right place — it does not echo back what he sent. Partner
+# passwords are NOT covered here: those are allowed and simply get stored.
 SAFE_REFUSAL = (
-    "🔒 Схоже, тут є пароль / токен / ключ доступу. DAN.OS такого не зберігає "
-    "і не передає моделі — ні в базу знань, ні в чат, ні у вікі.\n\n"
-    "Тримай доступи в менеджері паролів (1Password, Bitwarden, Keeper), а сюди "
-    "клади те, що можна шукати: назву сервісу, посилання, логін, умови, "
-    "контакти. Якщо цей доступ уже десь був — краще зміни його."
+    "🔒 Схоже, тут технічний секрет — API-ключ / токен / приватний ключ. "
+    "DAN.OS такого не зберігає і не передає моделі: у базі знань йому не місце.\n\n"
+    "Тримай його там, де він виданий (консоль сервісу, BotFather, менеджер "
+    "секретів). Логіни й паролі до кабінетів партнерів зберігати можна — їх "
+    "я індексую нормально."
 )
 
 # A blocked lookup gets a different answer: the question was legitimate, the
-# storage of the answer never was.
+# storage of a hard technical secret never was.
 SAFE_NOT_STORED = (
-    "🔒 Паролів і токенів у мене немає — DAN.OS їх не зберігає за архітектурою. "
-    "Візьми доступ у менеджері паролів. Можу знайти все інше: сервіс, "
-    "посилання, логін, умови роботи, контакти."
+    "🔒 Технічних ключів і токенів у мене немає — DAN.OS їх не зберігає за "
+    "архітектурою. Візьми його там, де видавали. Доступи до кабінетів "
+    "партнерів (логін, пароль, умови) — знайду, якщо є в базі."
 )
 
 SCAN_COMPLETE_KEY = "kb_security_scan_complete"
@@ -65,10 +74,16 @@ SCAN_COMPLETE_KEY = "kb_security_scan_complete"
 # hunt. «яка політика паролів?» is an ordinary knowledge question and must keep
 # working — so the secret word alone is never enough, and any policy/process
 # framing wins over the lookup framing.
-_SECRET_WORD_RE = re.compile(
-    r"парол|password|passwd|токен|token|ключ\s+доступу|api[ _-]?key|apikey|"
+# HARD-secret words: a request for one of these is always refused, because
+# DAN.OS never stores them and starting a lookup would be dishonest.
+_HARD_SECRET_WORD_RE = re.compile(
+    r"токен|token|ключ\s+доступу|api[ _-]?key|apikey|"
     r"сід[ -]?фраз|seed[ -]?phrase|приватн\w+\s+ключ|private\s+key",
     re.IGNORECASE)
+# Password words: only refused when passwords are being blocked. With the
+# default (passwords allowed) «який пароль до X» flows to normal retrieval —
+# the bot answers from the business tables, which is the point.
+_PASSWORD_WORD_RE = re.compile(r"парол|password|passwd", re.IGNORECASE)
 _LOOKUP_INTENT_RE = re.compile(
     r"\b(який|яка|яке|які|скажи|дай|давай|надішли|пришли|покажи|знайди|нагадай|"
     r"потрібен|потрібно|треба|what\s+is|what'?s|give\s+me|send\s+me|tell\s+me|"
@@ -81,12 +96,35 @@ _POLICY_FRAMING_RE = re.compile(
 
 
 def is_credential_request(text: str) -> bool:
-    """Deterministic: is this asking DAN.OS to hand over a stored credential?"""
+    """Deterministic: is this asking DAN.OS to hand over a BLOCKED credential?
+
+    A password lookup is a blocked credential request only when passwords are
+    being blocked; otherwise it is an ordinary knowledge question.
+    """
     if not text:
         return False
     if _POLICY_FRAMING_RE.search(text):
         return False
-    return bool(_SECRET_WORD_RE.search(text) and _LOOKUP_INTENT_RE.search(text))
+    if not _LOOKUP_INTENT_RE.search(text):
+        return False
+    if _HARD_SECRET_WORD_RE.search(text):
+        return True
+    if settings.quarantine_passwords and _PASSWORD_WORD_RE.search(text):
+        return True
+    return False
+
+
+async def resolve_findings(db: AsyncSession, *, user_id: int, resource_type: str,
+                           resource_id) -> int:
+    """Mark a resource's open findings resolved (used when it is released)."""
+    rows = (await db.execute(select(SecurityFinding).where(
+        SecurityFinding.user_id == user_id,
+        SecurityFinding.resource_type == resource_type,
+        SecurityFinding.resource_id == str(resource_id)[:64],
+        SecurityFinding.status == "open"))).scalars().all()
+    for r in rows:
+        r.status = "resolved"
+    return len(rows)
 
 
 def scan(text: str | None) -> SecretScanResult:
@@ -116,6 +154,8 @@ async def record_finding(db: AsyncSession, *, user_id: int, resource_type: str,
         SecurityFinding.scanner_version == SCANNER_VERSION,
     ))).scalar_one_or_none()
     if existing is not None:
+        if existing.status == "resolved":  # tripped again after a release
+            existing.status = "open"
         return existing
     finding = SecurityFinding(
         user_id=user_id, domain=domain, resource_type=resource_type,

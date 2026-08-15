@@ -2,6 +2,34 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-15 — R6.1A.1: passwords allowed, hard tokens still blocked (Danylo)
+
+After R6.1A deployed and `/kb_security_scan` ran, the quarantine list showed
+what was actually being held: 29 of 37 documents were partner-portal
+password tables (operator cabinets, agent mailboxes) — the exact data the bot
+is meant to retrieve («який логін/пароль до ТОКО»). Danylo's call: don't
+rotate, just keep the technical tokens quarantined and unblock the passwords.
+
+- Only HARD technical secrets block the knowledge base now: API keys,
+  OAuth/bearer tokens, private keys, session cookies, recovery codes, seed
+  phrases. A password (including a whole «Пароль» spreadsheet column) is
+  searchable business data.
+- This is a deliberate, owner-scoped relaxation of the R6.1A contract for a
+  single-owner bot. The trade-off is explicit and accepted: partner passwords
+  are now indexed, returned in answers (i.e. sent to the model provider) and
+  compiled into wiki pages. Hard tokens never are — those genuinely have no
+  place in a knowledge base and are re-issued at their source, not stored.
+- Implemented as one setting, `QUARANTINE_PASSWORDS` (default false).
+  `secret_policy` blocks only `HARD_SECRET_CATEGORIES`; set the flag true to
+  restore the strict R6.1A behaviour without a code change.
+- `/kb_security_scan` now reconciles both ways: it RELEASES quarantined
+  content that no longer trips (password docs regain their chunks and become
+  searchable; findings resolve) and keeps token content contained. A document
+  quarantined at ingest (no stored chunks) is not auto-released — it needs
+  re-ingesting.
+- A mixed document (password + token) still quarantines, on the token; the
+  password inside it is simply not what caused the block.
+
 ## 2026-08-14 — R6.1A: DAN.OS is not a password manager
 
 The R3–R6 pursuit of «який логін до ТОКО Україна?» was treated as a retrieval

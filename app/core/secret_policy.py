@@ -55,6 +55,31 @@ class SecretCategory(StrEnum):
     SEED_PHRASE = "seed_phrase"
 
 
+ALL_CATEGORIES = frozenset(SecretCategory)
+
+# "Hard" technical secrets grant access to infrastructure (an API, an OAuth
+# app, a host key) and have no place in a searchable knowledge base. PASSWORD
+# is deliberately NOT here: a partner-portal login/password in a business
+# spreadsheet is the working data this owner-only bot exists to retrieve.
+HARD_SECRET_CATEGORIES = ALL_CATEGORIES - {SecretCategory.PASSWORD}
+
+# Which categories make scan_text() return blocked=True. Configured once at
+# startup from settings (see app/core/security.py); passwords allowed by
+# default. Kept as a module global so every caller — including the pure
+# scan_parts path — sees the same policy.
+_BLOCKING: frozenset = HARD_SECRET_CATEGORIES
+
+
+def set_blocking_categories(categories) -> None:
+    """Set which categories block. Call once at startup; safe to re-call."""
+    global _BLOCKING
+    _BLOCKING = frozenset(categories)
+
+
+def blocking_categories() -> frozenset:
+    return _BLOCKING
+
+
 @dataclass(frozen=True)
 class SecretScanResult:
     blocked: bool
@@ -411,8 +436,14 @@ def _sections(text: str):
             return
 
 
-def scan_text(text: str) -> SecretScanResult:
-    """Classify text. Deterministic, local, value-free output."""
+def scan_text(text: str, *, blocking=None) -> SecretScanResult:
+    """Classify text. Deterministic, local, value-free output.
+
+    Only categories in the active blocking set count toward the verdict; a
+    match in a non-blocking category (e.g. a password when passwords are
+    allowed) is ignored entirely — the text is treated as clean.
+    """
+    block = _BLOCKING if blocking is None else frozenset(blocking)
     if not text or not text.strip():
         return CLEAN
     normalised = _normalise(text)
@@ -420,13 +451,14 @@ def scan_text(text: str) -> SecretScanResult:
     for section, offset in _sections(normalised):
         for hit in _section_hits(section, offset):
             seen.add(hit)
-        if len(seen) >= MAX_COUNTED_FINDINGS:
+        if sum(1 for c, _ in seen if c in block) >= MAX_COUNTED_FINDINGS:
             break  # already blocked — no later match can change the verdict
-    if not seen:
+    blocking_hits = [(c, p) for c, p in seen if c in block]
+    if not blocking_hits:
         return CLEAN
-    categories = tuple(sorted({c for c, _ in seen}, key=str))
+    categories = tuple(sorted({c for c, _ in blocking_hits}, key=str))
     return SecretScanResult(blocked=True, categories=categories,
-                            finding_count=len(seen))
+                            finding_count=len(blocking_hits))
 
 
 def scan_parts(*parts: str | None) -> SecretScanResult:
