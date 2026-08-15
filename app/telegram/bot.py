@@ -146,7 +146,8 @@ async def cmd_start(message: Message) -> None:
         f"Привіт, Данило! <b>DAN.OS</b> · {APP_RELEASE} 🟢\n\n"
         "🔒 Паролі, токени, ключі й seed-фрази я НЕ зберігаю: такий текст "
         "відсікається до бази, до пошуку і до моделі. Тримай доступи в "
-        "менеджері паролів · перевірити наявну базу: /kb_security_scan\n\n"
+        "менеджері паролів · перевірка бази: /kb_security_scan · "
+        "список ізольованого: /kb_quarantine\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
@@ -899,6 +900,20 @@ async def _security_scan_job(user_id: int) -> None:
                 "ідемпотентний, повторний запуск безпечний).")
         except Exception:
             pass
+
+
+@router.message(Command("kb_quarantine"))
+async def cmd_kb_quarantine(message: Message) -> None:
+    """Owner-only: WHICH sources are quarantined (titles/dates/categories,
+    never content) — the walk-list for rotating credentials."""
+    if not _is_owner(message):
+        return
+    from app.core import security_scan
+    async with database.session() as db:
+        listing = await security_scan.quarantine_listing(
+            db, message.from_user.id)
+    for chunk in security_scan.quarantine_text(listing):
+        await message.answer(chunk)
 
 
 @router.message(Command("kb_security_scan"))

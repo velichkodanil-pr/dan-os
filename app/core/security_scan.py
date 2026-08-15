@@ -23,9 +23,10 @@ Hard properties, in order of importance:
   only after a full pass finishes; an interrupted run leaves the gate closed.
 """
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import security
@@ -258,6 +259,105 @@ async def run_scan(db: AsyncSession, *, user_id: int) -> ScanReport:
     logger.info("kb security scan finished: affected=%d findings=%d",
                 report.affected, report.findings)
     return report
+
+
+# ---------- owner-facing quarantine listing (/kb_quarantine) ----------
+
+_PART_RE = re.compile(r"\s*\(ч\.\d+\)\s*$")
+
+
+def _base_title(title: str) -> str:
+    """«Доступи (ч.3)» -> «Доступи», so a file split into parts is one line."""
+    return _PART_RE.sub("", title or "").strip()
+
+
+def _safe_title(title: str) -> str:
+    """A file NAME can itself carry a secret; mask it rather than echo it."""
+    if security.scan(title).blocked:
+        return "🔒 (назву приховано — вона сама схожа на секрет)"
+    return title
+
+
+async def quarantine_listing(db: AsyncSession, user_id: int) -> dict:
+    """What is quarantined right now — titles, dates and categories ONLY.
+
+    Owner-only diagnostics for the rotation walk-through. Deliberately never
+    includes content, excerpts, chunk text or chat lines: the listing names
+    WHICH sources to deal with, not what was inside them.
+    """
+    docs = (await db.execute(
+        select(Document).where(Document.user_id == user_id,
+                               Document.status == "quarantined")
+        .order_by(Document.title))).scalars().all()
+    grouped: dict[str, dict] = {}
+    for d in docs:
+        key = _base_title(d.title)
+        entry = grouped.setdefault(key, {
+            "title": _safe_title(key), "parts": 0,
+            "date": d.created_at, "categories": set(), "source": d.source_type})
+        entry["parts"] += 1
+        entry["date"] = min(entry["date"], d.created_at)
+        sec = (d.meta or {}).get("security") or {}
+        entry["categories"] |= {str(c) for c in (sec.get("categories") or [])}
+
+    pages = (await db.execute(
+        select(WikiPage).where(WikiPage.user_id == user_id,
+                               WikiPage.status == "quarantined")
+        .order_by(WikiPage.title))).scalars().all()
+
+    chat_contained = (await db.execute(
+        select(func.count()).select_from(ChatLog)
+        .where(ChatLog.user_id == user_id,
+               ChatLog.provider_eligible.is_(False)))).scalar_one()
+
+    return {
+        "documents": [
+            {"title": e["title"], "parts": e["parts"],
+             "date": e["date"].strftime("%d.%m.%Y"),
+             "categories": sorted(e["categories"])}
+            for e in grouped.values()],
+        "doc_rows": len(docs),
+        "wiki": [{"title": _safe_title(p.title), "slug": p.slug} for p in pages],
+        "chat_contained": int(chat_contained),
+    }
+
+
+def quarantine_text(listing: dict) -> list[str]:
+    """Telegram-ready messages (≤3500 chars each), titles and metadata only."""
+    import html as _html
+    docs = listing["documents"]
+    pages = listing["wiki"]
+    if not docs and not pages and not listing["chat_contained"]:
+        return ["🔒 Карантин порожній — у базі немає ізольованих записів ✅"]
+    lines = [f"🔒 <b>У карантині зараз</b> · файлів {len(docs)} "
+             f"(рядків у базі {listing['doc_rows']}), сторінок вікі {len(pages)}\n"]
+    if docs:
+        lines.append("<b>Файли/аркуші (за ними йди міняти доступи):</b>")
+        for e in docs:
+            parts = f" · {e['parts']} ч." if e["parts"] > 1 else ""
+            cats = f" — {', '.join(e['categories'])}" if e["categories"] else ""
+            lines.append(f" • {_html.escape(e['title'])}{parts} ({e['date']}){cats}")
+    if pages:
+        lines.append("\n<b>Сторінки вікі (перезбереш через /wiki_build "
+                     "після очищення файлів):</b>")
+        lines += [f" • {_html.escape(p['title'])}" for p in pages]
+    if listing["chat_contained"]:
+        lines.append(f"\nРеплік чату ізольовано: {listing['chat_contained']} "
+                     "(текст не показую навмисно).")
+    lines.append("\nПлан: зміни доступи з цих файлів → прибери колонки паролів "
+                 "у самих таблицях → /drive_all → /wiki_build. Нічого з цього "
+                 "списку не видалено — лише ізольовано.")
+    out: list[str] = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 > 3500:
+            out.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        out.append(current)
+    return out
 
 
 def report_text(report: ScanReport) -> str:

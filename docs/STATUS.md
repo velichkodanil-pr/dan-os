@@ -1,8 +1,8 @@
 # STATUS
 
-_Last verified: 2026-08-14 (R6.1A — tests green locally; NOT deployed)_
+_Last verified: 2026-08-15 (R6.1A on prod: 6e12ffd, /health/live→r6.1a; prod scan done — 37 docs / 5 wiki pages / 2 chat lines quarantined)_
 
-## R6.1A — Emergency knowledge safety: CODE COMPLETE, NOT DEPLOYED
+## R6.1A — Emergency knowledge safety: DELIVERED (deployed 6e12ffd)
 
 Hard secrets no longer reach persistence, embeddings, the wiki compiler, chat
 context or model tool output. Existing content is contained by an owner-run
@@ -34,6 +34,9 @@ local scan, without any automatic deletion.
   `MemoryItem.status=quarantined`, `ChatLog.provider_eligible=false`. Every
   retrieval, wiki lookup, index, lint and chat-history path filters them out.
   Raw events are flagged, never modified or deleted.
+- **`/kb_quarantine`** (owner-only) — the rotation walk-list: which
+  files/sheets and wiki pages are quarantined (titles, dates,
+  categories; parts grouped; self-secret titles masked; no content).
 - **`/kb_security_scan`** (owner-only) — bounded keyset batches over chunks
   (grouped by document), wiki pages, memory, chat log and raw-event payloads.
   Zero provider calls, idempotent re-runs, counts-only report with no titles
@@ -50,7 +53,7 @@ local scan, without any automatic deletion.
   stay in the pending queue; error metadata carries codes, never bodies.
 - **Version metadata** — `APP_VERSION`/`APP_RELEASE` in `app/config.py`;
   `/health/live` and `/start` no longer claim «round 4».
-- Tests: **186 passed** locally (68 new in `tests/test_security.py`; the tests
+- Tests: **189 passed** locally (71 new in `tests/test_security.py`; the tests
   that asserted credential retention/retrieval were replaced, not left
   contradicting). Provider tripwires fail a test on any embedder, Anthropic or
   network call on a gated path. Migration verified three ways: fresh DB from
@@ -61,9 +64,11 @@ Not done here (deliberately, own rounds): domain isolation (R6.1B), wiki
 revisions / durable queue / full section compiler (R6.2), confirmed
 save-answer (R6.3), vault connector, and deletion of existing data.
 
-Gate: Danylo reviews and pushes; then deploy → `/kb_security_scan` → rotate
-any credentials that may have been indexed → keep auto-compilation off until
-the result is reviewed.
+Gate CLOSED 2026-08-15: deployed, prod scan completed (1014 docs / 64 pages
+checked; 37 docs, 5 pages, 2 chat lines contained; 44 findings). Remaining
+manual step for Danylo: rotate the credentials named by `/kb_quarantine`,
+strip password columns from the source sheets, then `/drive_all` +
+`/wiki_build`. Auto-compilation may be enabled once rotation is done.
 
 ## R6 — Wiki-пам'ять (compiled knowledge): DELIVERED
 

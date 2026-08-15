@@ -744,3 +744,65 @@ async def test_38_assembled_context_is_checked_as_a_whole(db, monkeypatch):
     assert "EXAMPLEONLY" not in json.dumps(seen, ensure_ascii=False, default=str)
     assert "Zx9-kLm2-Qw7" not in json.dumps(seen, ensure_ascii=False, default=str)
     assert "Данило керує TravelON" in seen["profile"]
+
+
+# ============================================ 8. /kb_quarantine listing
+
+@pytest.mark.asyncio
+async def test_39_quarantine_listing_names_sources_without_content(db):
+    """The rotation walk-list: titles/dates/categories, never content."""
+    # one file in three parts + one clean file + a quarantined wiki page
+    for i in (1, 2, 3):
+        db.add(Document(user_id=OWNER, domain="personal",
+                        title=f"Доступи DMC (ч.{i})", source_type="drive",
+                        source_ref="dmc", content_hash=f"h-dmc-{i}",
+                        status="quarantined", chunk_count=0,
+                        meta={"security": {"categories": ["password"],
+                                           "finding_count": 2,
+                                           "scanner_version": 1}}))
+    db.add(Document(user_id=OWNER, domain="personal", title="Умови операторів",
+                    source_type="drive", source_ref="ok", content_hash="h-ok",
+                    status="indexed", chunk_count=3))
+    db.add(WikiPage(user_id=OWNER, kind="entity", slug="toco", title="Toco UA",
+                    summary="", content="", contradictions="", aliases=[],
+                    tags=[], sources=[], status="quarantined"))
+    db.add(ChatLog(user_id=OWNER, role="bot", text="стара репліка",
+                   provider_eligible=False))
+    await db.commit()
+
+    listing = await security_scan.quarantine_listing(db, OWNER)
+    assert listing["doc_rows"] == 3
+    assert len(listing["documents"]) == 1          # parts merged into one line
+    entry = listing["documents"][0]
+    assert entry["title"] == "Доступи DMC" and entry["parts"] == 3
+    assert entry["categories"] == ["password"]
+    assert [p["title"] for p in listing["wiki"]] == ["Toco UA"]
+    assert listing["chat_contained"] == 1
+
+    messages = security_scan.quarantine_text(listing)
+    joined = "\n".join(messages)
+    assert "Доступи DMC" in joined and "Toco UA" in joined
+    assert "Умови операторів" not in joined        # active docs stay out
+    assert "стара репліка" not in joined           # chat text never shown
+    assert all(len(m) <= 3500 for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_40_quarantine_listing_masks_secret_bearing_titles(db):
+    """A filename can itself carry the secret — the listing must not echo it."""
+    db.add(Document(user_id=OWNER, domain="personal",
+                    title=f"Нотатка {FAKE_PASSWORD_LINE}", source_type="telegram_file",
+                    source_ref="n1", content_hash="h-n1",
+                    status="quarantined", chunk_count=0))
+    await db.commit()
+    listing = await security_scan.quarantine_listing(db, OWNER)
+    joined = "\n".join(security_scan.quarantine_text(listing))
+    assert "Zx9-kLm2-Qw7" not in joined
+    assert "назву приховано" in joined
+
+
+@pytest.mark.asyncio
+async def test_41_quarantine_listing_empty_is_honest(db):
+    listing = await security_scan.quarantine_listing(db, OWNER)
+    messages = security_scan.quarantine_text(listing)
+    assert len(messages) == 1 and "порожній" in messages[0]
