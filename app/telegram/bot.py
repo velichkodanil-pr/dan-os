@@ -4,6 +4,7 @@ Round 1: text/voice note -> preview card (✅/✏️/❌) -> task -> Today -> re
 Non-owners get silence everywhere.
 """
 import logging
+import re
 import uuid
 
 import httpx
@@ -1335,6 +1336,51 @@ async def on_media_caption(message: Message) -> None:
     if not _is_owner(message):
         return
     await _process_note(message, message.caption)
+
+
+# Registered AFTER every Command() handler and BEFORE the media catch-all:
+# aiogram matches in registration order, so a real command still wins here.
+_UNKNOWN_CMD_RE = re.compile(r"^/([A-Za-z0-9_]+)")
+
+_COMMAND_HELP = (
+    "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
+    "/habit · /habits\n"
+    "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
+    "/drive_all · /kb_security_scan · /kb_quarantine\n"
+    "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
+    "<b>Бізнес:</b> /travelon · /order\n"
+    "<b>Інше:</b> /app · /voice · /start"
+)
+# Names people reach for that are HTTP endpoints of the service, not commands
+_HTTP_ENDPOINT_NAMES = ("health", "healthz", "ready", "live", "metrics",
+                        "status", "ping")
+
+
+@router.message(F.text.startswith("/"))
+async def on_unknown_command(message: Message) -> None:
+    """An unknown command is not «media I cannot read».
+
+    The media catch-all used to swallow these, so an obvious typo — or /health,
+    which is a URL — produced an answer about photos. Say what happened and
+    show what actually exists.
+    """
+    if not _is_owner(message):
+        return
+    import html as _html
+    match = _UNKNOWN_CMD_RE.match(message.text or "")
+    name = match.group(1) if match else ""
+    if name.lower() in _HTTP_ENDPOINT_NAMES:
+        base = settings.public_url or "https://<домен>"
+        await message.answer(
+            f"ℹ️ <code>/{_html.escape(name)}</code> — це HTTP-ендпоінт сервісу, "
+            "а не команда бота.\n"
+            f"Відкрий у браузері: <code>{base}/health/live</code> (версія "
+            f"збірки) або <code>{base}/health/ready</code> (база, вебхук, стан "
+            "security-скану).\n\n<b>Команди бота:</b>\n" + _COMMAND_HELP)
+        return
+    await message.answer(
+        f"🤔 Команди <code>/{_html.escape(name)}</code> у мене немає.\n\n"
+        "<b>Ось що є:</b>\n" + _COMMAND_HELP)
 
 
 @router.message()

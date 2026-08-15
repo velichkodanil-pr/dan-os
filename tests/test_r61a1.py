@@ -505,3 +505,50 @@ def test_31_default_policy_is_the_owner_decision():
     assert Cat.PASSWORD not in secret_policy.blocking_categories()
     assert secret_policy.HARD_SECRET_CATEGORIES <= secret_policy.blocking_categories()
     assert secret_policy.SCANNER_VERSION == 2
+
+
+# ============================================ 32-33. unknown-command fallback
+
+def test_32_unknown_command_is_registered_after_real_commands():
+    """A real command must still win: aiogram matches in registration order,
+    so the fallback has to sit after every Command() handler."""
+    from aiogram.filters import Command
+    from app.telegram import bot as botmod
+
+    handlers = botmod.router.message.handlers
+    names = [getattr(h.callback, "__name__", "") for h in handlers]
+    unknown = names.index("on_unknown_command")
+    media = names.index("on_other")
+    text = names.index("on_text")
+    command_positions = [
+        i for i, h in enumerate(handlers)
+        if any(isinstance(f.callback, Command) for f in h.filters)]
+    assert max(command_positions) < unknown
+    assert text < unknown < media
+
+
+@pytest.mark.asyncio
+async def test_33_unknown_command_answers_helpfully(monkeypatch):
+    """«/health» is an HTTP endpoint — say so instead of «media I can't read»."""
+    from app.telegram import bot as botmod
+    monkeypatch.setattr(settings, "owner_telegram_id", OWNER)
+    sent: list = []
+
+    class _Msg:
+        def __init__(self, text, uid=OWNER):
+            self.text = text
+            self.from_user = type("U", (), {"id": uid})()
+
+        async def answer(self, text, **kw):
+            sent.append(text)
+
+    await botmod.on_unknown_command(_Msg("/health"))
+    assert "HTTP-ендпоінт" in sent[-1] and "/health/live" in sent[-1]
+    assert "медіа" not in sent[-1]
+
+    await botmod.on_unknown_command(_Msg("/wiki_buld"))
+    assert "немає" in sent[-1] and "/wiki_build" in sent[-1]
+
+    before = len(sent)                      # non-owner gets silence
+    await botmod.on_unknown_command(_Msg("/today", uid=999))
+    assert len(sent) == before
