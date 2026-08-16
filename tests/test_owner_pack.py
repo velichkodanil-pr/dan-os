@@ -52,6 +52,11 @@ async def test_order_lookup_in_chat(db, monkeypatch):
         return _order(no=no) if no == "59266" else None
     monkeypatch.setattr(travelon, "fetch_order", fake_fetch)
 
+    # the deterministic order lookup fires only in the travelon domain
+    from app.core.domains import set_active_domain
+    await set_active_domain(db, OWNER, "travelon")
+    await db.commit()
+
     orch = Orchestrator()
     out = await orch.handle_note(db, user_id=OWNER, text="що по заявці 59266?",
                                  dedupe_key="ord-1")

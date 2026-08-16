@@ -13,6 +13,7 @@ from app import db as database
 from app.config import APP_RELEASE, APP_VERSION, SCANNER_BUILD, settings
 from app.core import google_client, scheduler
 from app.core.audit import audit
+from app.core.domains import ALLOWED_DOMAINS, label as domain_label
 from app.telegram import bot as botmod
 from app.telegram.bot import router as telegram_router
 from app.webapp.routes import router as webapp_router
@@ -148,19 +149,21 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
     if error:
         return HTMLResponse(_OAUTH_OK_HTML.format(
             title="Скасовано", sub="Доступ не надано. Спробуй /connect_google ще раз."))
-    user_id = google_client.verify_state(state)
-    if user_id is None or user_id != settings.owner_telegram_id:
+    verified = google_client.verify_state(state)
+    if verified is None or verified[0] != settings.owner_telegram_id:
         logger.warning("OAuth callback with invalid state rejected.")
         return HTMLResponse(status_code=403, content=_OAUTH_OK_HTML.format(
             title="Відхилено", sub="Недійсний або протермінований запит."))
+    user_id, oauth_domain = verified   # domain came from the signed state (§11)
     try:
         tokens = await google_client.exchange_code(code)
         async with database.session() as db:
-            email = await google_client.store_tokens(db, user_id, tokens)
-            total = len(await google_client.get_accounts(db, user_id))
+            email = await google_client.store_tokens(db, user_id, tokens, oauth_domain)
+            total = len(await google_client.get_all_accounts(db, user_id))
             await audit(db, actor=f"user:{user_id}", action="google.connected",
                         resource_type="connector", resource_id="google",
-                        policy_level="L2", email=email, scopes=tokens.get("scope", ""))
+                        policy_level="L2", email=email, domain=oauth_domain.value,
+                        scopes=tokens.get("scope", ""))
             await db.commit()
     except Exception:
         logger.exception("OAuth exchange failed")
@@ -175,8 +178,8 @@ async def google_oauth_callback(code: str = "", state: str = "", error: str = ""
                     ("drive.readonly", "Drive"))
                    if key not in granted]
         msg = (f"🔐 Google-акаунт <b>{email}</b> підключено ✅ (усього: {total})\n"
-               "Бриф і дайджест тепер збирають усі акаунти. Додати ще: "
-               "/connect_google · керування: /accounts")
+               f"Прив'язано до домену: {domain_label(oauth_domain)}. Цей акаунт "
+               "використовується лише в цьому домені. Керування: /accounts")
         if missing:
             msg += (f"\n\n⚠️ <b>Без дозволів:</b> {', '.join(missing)}.\n"
                     "Ці функції для акаунта працювати НЕ будуть. Запусти "
@@ -196,7 +199,10 @@ from pydantic import BaseModel  # noqa: E402
 class AdminIngestRequest(BaseModel):
     title: str
     text: str
-    domain: str = "personal"
+    # §13: domain is REQUIRED and explicit — but validated INSIDE the handler
+    # (400), after the token gate, so an unauthenticated caller still gets 403
+    # first. Empty/unknown -> 400. There is NO silent 'personal'.
+    domain: str = ""
     source_ref: str = ""
     # R6.1A: compilation is a provider call over stored content — opt-in only,
     # and only when the local security scan of the base has finished.
@@ -216,7 +222,9 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
     text = req.text.strip()
     if len(text) < 20:
         return Response(status_code=400, content="text too short")
-    domain = req.domain if req.domain in ("personal", "travelon", "tech") else "personal"
+    if req.domain not in ALLOWED_DOMAINS:   # §13: explicit valid domain only
+        return Response(status_code=400, content="invalid or missing domain")
+    domain = req.domain
     from app.core import security
     from app.core.ingest import ingest_document
     pages: list = []
@@ -251,6 +259,7 @@ async def admin_ingest(req: AdminIngestRequest, request: Request):
 
 class AdminSearchRequest(BaseModel):
     query: str
+    domain: str = ""   # §13: required, validated in-handler (400) after token
     k: int = 8
 
 
@@ -264,11 +273,14 @@ async def admin_search(req: AdminSearchRequest, request: Request):
             or not _hmac.compare_digest(token, settings.admin_token)):
         return Response(status_code=403)
     from app.core import rag, security
+    if req.domain not in ALLOWED_DOMAINS:   # §13: explicit valid domain only
+        return Response(status_code=400, content="invalid or missing domain")
     if security.scan(req.query).blocked:   # zero embedding / provider calls
         return {"hits": [], "refused": "secret_in_query"}
     async with database.session() as db:
         chunks = await rag.retrieve(db, user_id=settings.owner_telegram_id,
-                                    query=req.query, k=min(req.k, 15))
+                                    domain=req.domain, query=req.query,
+                                    k=min(req.k, 15))
     return {"hits": [{"title": c.title, "distance": round(c.distance, 3),
                       "text": c.text[:400]} for c in chunks]}
 

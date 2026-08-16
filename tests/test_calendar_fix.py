@@ -21,7 +21,7 @@ def google_on(monkeypatch):
 
 
 async def _patch_accounts(monkeypatch, creds, access="tok"):
-    async def fake_accounts(_db, _uid):
+    async def fake_accounts(_db, _uid, _domain=None):
         return creds
 
     async def fake_access(_db, _cred):
@@ -38,7 +38,7 @@ async def test_agenda_block_reports_access_problem(db, monkeypatch, google_on):
         raise google_client.CalendarAccessError("403")
     monkeypatch.setattr(google_client, "calendar_range", denied)
 
-    block = await briefs.agenda_block(db, OWNER)
+    block = await briefs.agenda_block(db, OWNER, "personal")
     assert "НЕДОСТУПНИЙ" in block and "acc@gmail.com" in block
     assert "connect_google" in block
     # the block must forbid the 'calendar is empty' claim
@@ -54,7 +54,7 @@ async def test_agenda_block_lists_events(db, monkeypatch, google_on):
                  "all_day": False}]
     monkeypatch.setattr(google_client, "calendar_range", events)
 
-    block = await briefs.agenda_block(db, OWNER)
+    block = await briefs.agenda_block(db, OWNER, "personal")
     assert "Зустріч з Юрою" in block and "11:00" in block
     assert "НЕДОСТУПНИЙ" not in block
 
@@ -73,7 +73,7 @@ async def test_agenda_block_mixed_accounts(db, monkeypatch, google_on):
         raise google_client.CalendarAccessError("403")
     monkeypatch.setattr(google_client, "calendar_range", per_account)
 
-    block = await briefs.agenda_block(db, OWNER)
+    block = await briefs.agenda_block(db, OWNER, "personal")
     assert "Планерка" in block
     assert "broken@gmail.com" in block and "НЕДОСТУПНИЙ" in block
 
@@ -83,7 +83,7 @@ async def test_calendar_followup_inherits_trigger(db, monkeypatch, google_on):
     """«Що в календарі…» → agenda; short «а сьогодні?» follow-up → agenda again."""
     calls = {"n": 0}
 
-    async def fake_agenda(_db, _uid, days=7):
+    async def fake_agenda(_db, _uid, _domain=None, days=7):
         calls["n"] += 1
         return "\nКалендар користувача: подій немає.\n"
     from app.core import briefs as briefs_mod

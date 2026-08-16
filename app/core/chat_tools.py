@@ -85,18 +85,47 @@ _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
            "travelon_order": "travelon.read"}
 
+# §10: TravelON tools are a domain-scoped capability, not a general one. They
+# are hidden from the model outside the travelon domain (tools_for_domain) AND
+# refused at dispatch (run_tool) — two independent layers, so a stale or
+# hallucinated tool_use cannot reach the TravelON network from personal/tech.
+_TRAVELON_TOOLS = {"travelon_pulse", "travelon_order"}
 
-async def _t_wiki_index(db, user_id, args):
+_TRAVELON_WRONG_DOMAIN = {
+    "error": "wrong_domain",
+    "note": "Інструменти TravelON доступні лише в домені TravelON. Зараз "
+            "активний інший домен — бізнес-дані звідси недоступні. Якщо треба "
+            "пульс/заявки, хай Данило перемкне домен: /domain travelon."}
+
+
+def tools_for_domain(domain) -> list[dict]:
+    """Tool definitions offered to the model for THIS domain.
+
+    The model can only ask for a tool it was shown, so the TravelON business
+    API is invisible in personal/tech — the definitions are simply absent from
+    the list. Fail-closed: an unparseable domain gets the non-TravelON set.
+    run_tool re-checks at dispatch regardless (defence in depth)."""
+    from app.core.domains import Domain, DomainError, parse_domain
+    try:
+        active = parse_domain(domain)
+    except DomainError:
+        active = None
+    if active is Domain.TRAVELON:
+        return list(TOOL_DEFS)
+    return [t for t in TOOL_DEFS if t["name"] not in _TRAVELON_TOOLS]
+
+
+async def _t_wiki_index(db, user_id, domain, args):
     from app.core import wiki
-    return {"index": await wiki.render_index(db, user_id)}
+    return {"index": await wiki.render_index(db, user_id, domain)}
 
 
-async def _t_wiki_page(db, user_id, args):
+async def _t_wiki_page(db, user_id, domain, args):
     from app.core import wiki
     name = str(args.get("name", ""))[:120]
-    page = await wiki.find_page(db, user_id, name)
+    page = await wiki.find_page(db, user_id, domain, name)
     if page is None:
-        found = await wiki.search_pages(db, user_id, name, limit=5)
+        found = await wiki.search_pages(db, user_id, domain, name, limit=5)
         if not found:
             return {"found": False,
                     "note": "сторінки немає — спробуй search_knowledge по сирих документах"}
@@ -109,9 +138,9 @@ async def _t_wiki_page(db, user_id, args):
     return {"found": True, "page": wiki.page_text(page)[:6000]}
 
 
-async def _t_search_knowledge(db, user_id, args):
+async def _t_search_knowledge(db, user_id, domain, args):
     from app.core import rag
-    chunks = await rag.retrieve(db, user_id=user_id,
+    chunks = await rag.retrieve(db, user_id=user_id, domain=domain,
                                 query=str(args.get("query", ""))[:300], k=8)
     if not chunks:
         return {"found": 0, "note": "нічого не знайдено в базі знань"}
@@ -121,19 +150,21 @@ async def _t_search_knowledge(db, user_id, args):
                         "text": c.text[:700]} for c in chunks]}
 
 
-async def _t_get_calendar(db, user_id, args):
+async def _t_get_calendar(db, user_id, domain, args):
     from app.core.briefs import agenda_block
     days = min(max(int(args.get("days") or 7), 1), 30)
-    block = await agenda_block(db, user_id, days=days)
-    return {"agenda": block or "Google-акаунти не підключені"}
+    block = await agenda_block(db, user_id, domain, days=days)
+    return {"agenda": block or "Для цього домену не призначено Google-акаунтів "
+                               "(/accounts)"}
 
 
-async def _t_get_recent_mail(db, user_id, args):
+async def _t_get_recent_mail(db, user_id, domain, args):
     from app.core import google_client
     limit = min(max(int(args.get("limit") or 8), 1), 15)
-    accounts = await google_client.get_accounts(db, user_id)
+    accounts = await google_client.get_accounts(db, user_id, domain)
     if not accounts:
-        return {"error": "Google не підключено (/connect_google)"}
+        return {"error": "Для цього домену не призначено жодного Google-акаунта "
+                         "(/accounts)"}
     out, problems = [], []
     for cred in accounts:
         try:
@@ -160,12 +191,13 @@ async def _t_get_recent_mail(db, user_id, args):
     return result
 
 
-async def _t_search_mail(db, user_id, args):
+async def _t_search_mail(db, user_id, domain, args):
     from app.core import google_client
     query = str(args.get("query", ""))[:200]
-    accounts = await google_client.get_accounts(db, user_id)
+    accounts = await google_client.get_accounts(db, user_id, domain)
     if not accounts:
-        return {"error": "Google не підключено (/connect_google)"}
+        return {"error": "Для цього домену не призначено жодного Google-акаунта "
+                         "(/accounts)"}
     for cred in accounts:
         try:
             access = await google_client.access_for(db, cred)
@@ -180,14 +212,15 @@ async def _t_search_mail(db, user_id, args):
     return {"found": False, "note": "лист не знайдено"}
 
 
-async def _t_get_tasks(db, user_id, args):
+async def _t_get_tasks(db, user_id, domain, args):
     from app.core import coach
     from app.models import Task
     tasks = (await db.execute(
-        select(Task).where(Task.user_id == user_id, Task.status == "open")
+        select(Task).where(Task.user_id == user_id, Task.domain == domain,
+                           Task.status == "open")
         .order_by(Task.due_at.asc().nulls_last()).limit(20))).scalars().all()
-    goals = await coach.list_goals(db, user_id)
-    habits = await coach.habits_overview(db, user_id)
+    goals = await coach.list_goals(db, user_id, domain)
+    habits = await coach.habits_overview(db, user_id, domain)
     return {"open_tasks": [{"title": t.title,
                             "due": t.due_at.isoformat() if t.due_at else None}
                            for t in tasks],
@@ -196,7 +229,13 @@ async def _t_get_tasks(db, user_id, args):
                        for h in habits]}
 
 
-async def _t_travelon_pulse(db, user_id, args):
+async def _t_travelon_pulse(db, user_id, domain, args):
+    # Defence in depth: run_tool already refused this outside travelon, but the
+    # network call itself lives behind the domain check too — zero TravelON
+    # traffic in personal/tech even if this is reached directly.
+    from app.core.domains import Domain
+    if domain != Domain.TRAVELON:
+        return dict(_TRAVELON_WRONG_DOMAIN)
     from app.core import travelon
     if not travelon.configured():
         return {"error": "TravelON не підключено"}
@@ -204,7 +243,10 @@ async def _t_travelon_pulse(db, user_id, args):
     return data or {"error": "звіт тимчасово недоступний"}
 
 
-async def _t_travelon_order(db, user_id, args):
+async def _t_travelon_order(db, user_id, domain, args):
+    from app.core.domains import Domain
+    if domain != Domain.TRAVELON:
+        return dict(_TRAVELON_WRONG_DOMAIN)
     from app.core import travelon
     if not travelon.configured():
         return {"error": "TravelON не підключено"}
@@ -234,8 +276,15 @@ _WITHHELD = {"withheld": True, "reason": "secret_detected",
                      "паролів; значення не називай — ти його не бачив."}
 
 
-async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str:
-    """Execute one read-tool under policy; ALWAYS returns a JSON string.
+async def run_tool(db: AsyncSession, user_id: int, domain, name: str,
+                   args: dict) -> str:
+    """Execute one read-tool under policy, in a fixed domain; ALWAYS returns a
+    JSON string.
+
+    `domain` is the server-side active-domain snapshot for this request — never
+    a value the model chose (it is not in any tool's input schema). It scopes
+    every data lookup the tool makes, so the model cannot read another domain
+    by naming a tool.
 
     The last checkpoint before the model's context: whatever a tool dug up —
     a mailbox thread, a spreadsheet row, a chunk indexed before R6.1A — is
@@ -243,10 +292,26 @@ async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str
     place, because a partial redaction still leaks structure.
     """
     from app.core import security
+    from app.core.domains import Domain, DomainError, parse_domain
     action = _POLICY.get(name)
     if action is None or not evaluate(action).allowed:
         return json.dumps({"error": f"інструмент {name} не дозволено"},
                           ensure_ascii=False)
+    # Fail-closed on the domain itself: the snapshot must be valid before any
+    # data tool runs. An unparseable domain is a server bug, never the model's
+    # doing — refuse rather than let a lookup default to the wrong scope.
+    try:
+        active = parse_domain(domain)
+    except DomainError:
+        logger.error("run_tool: invalid domain %r for tool %s", domain, name)
+        return json.dumps({"error": "внутрішня помилка домену"},
+                          ensure_ascii=False)
+    # §10: TravelON tools are domain-gated. Refuse BEFORE the executor so there
+    # is zero TravelON network activity outside the travelon domain, even if a
+    # stale/replayed tool_use for one arrives here.
+    if name in _TRAVELON_TOOLS and active is not Domain.TRAVELON:
+        logger.info("tool %s: refused, active domain is not travelon", name)
+        return json.dumps(_TRAVELON_WRONG_DOMAIN, ensure_ascii=False)
     # R6.1A.1: ARGUMENTS are provider input. A search query, a mail query or a
     # page name goes straight out to Gmail / Calendar / the embedder, so it is
     # scanned before the executor runs — not only on the way back.
@@ -263,7 +328,7 @@ async def run_tool(db: AsyncSession, user_id: int, name: str, args: dict) -> str
         await db.commit()
         return json.dumps(_REFUSED_ARGS, ensure_ascii=False)
     try:
-        result = await _EXECUTORS[name](db, user_id, args or {})
+        result = await _EXECUTORS[name](db, user_id, active, args or {})
     except Exception:
         logger.exception("tool %s failed", name)
         result = {"error": "інструмент тимчасово не спрацював"}

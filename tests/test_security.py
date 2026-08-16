@@ -220,7 +220,7 @@ def test_08_scan_result_is_frozen():
 @pytest.mark.asyncio
 async def test_09_ingest_quarantines_without_any_provider_call(db, no_providers):
     result = await ingest_document(
-        db, user_id=OWNER, title="Доступи DMC.xlsx",
+        db, user_id=OWNER, domain="personal", title="Доступи DMC.xlsx",
         text=BUSINESS_TEXT + "\n\n" + FAKE_SECRET_LINE,
         source_type="telegram_file", source_ref="dmc.xlsx")
     assert result.status == "quarantined"
@@ -230,7 +230,7 @@ async def test_09_ingest_quarantines_without_any_provider_call(db, no_providers)
 
 @pytest.mark.asyncio
 async def test_10_quarantined_document_stores_no_source_text(db, no_providers):
-    await ingest_document(db, user_id=OWNER, title="Доступи.xlsx",
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Доступи.xlsx",
                           text=BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE,
                           source_type="drive", source_ref="f1")
     doc = (await db.execute(select(Document))).scalar_one()
@@ -245,7 +245,7 @@ async def test_10_quarantined_document_stores_no_source_text(db, no_providers):
 
 @pytest.mark.asyncio
 async def test_11_finding_is_metadata_only(db, no_providers):
-    await ingest_document(db, user_id=OWNER, title="Доступи.txt",
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Доступи.txt",
                           text=FAKE_BEARER + "\n" + FAKE_API_KEY,
                           source_type="drive", source_ref="f2")
     finding = (await db.execute(select(SecurityFinding))).scalar_one()
@@ -262,9 +262,11 @@ async def test_11_finding_is_metadata_only(db, no_providers):
 @pytest.mark.asyncio
 async def test_12_repeat_ingest_is_idempotent(db, no_providers):
     text = BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE
-    first = await ingest_document(db, user_id=OWNER, title="a.txt", text=text,
+    first = await ingest_document(db, user_id=OWNER, domain="personal",
+                                  title="a.txt", text=text,
                                   source_type="drive", source_ref="f3")
-    second = await ingest_document(db, user_id=OWNER, title="a.txt", text=text,
+    second = await ingest_document(db, user_id=OWNER, domain="personal",
+                                   title="a.txt", text=text,
                                    source_type="drive", source_ref="f3")
     assert first.status == second.status == "quarantined"
     assert (await db.execute(
@@ -277,7 +279,7 @@ async def test_12_repeat_ingest_is_idempotent(db, no_providers):
 async def test_13_ordinary_document_still_indexes(db):
     """The round must not turn DAN.OS into a redaction machine."""
     result = await ingest_document(
-        db, user_id=OWNER, title="Умови операторів",
+        db, user_id=OWNER, domain="personal", title="Умови операторів",
         text=BUSINESS_TEXT + "\n\n" + "\n\n".join(
             f"Оператор {i}: депозит {i}%, ЄДРПОУ 4614022{i}" for i in range(20)),
         source_type="drive", source_ref="ok1")
@@ -294,7 +296,7 @@ async def test_14_parts_gate_contains_the_whole_source(db, no_providers):
                        for i in range(9000))
     assert len(body) > PART_CHARS
     results = await ingest_document_parts(
-        db, user_id=OWNER, title="Великий.xlsx",
+        db, user_id=OWNER, domain="personal", title="Великий.xlsx",
         text=body + "\n\n" + FAKE_SECRET_LINE,
         source_type="drive", source_ref="big1")
     assert [r.status for r in results] == ["quarantined"]
@@ -318,8 +320,8 @@ async def test_15_xlsx_quarantines_only_the_affected_sheet(db):
     buf = io.BytesIO()
     wb.save(buf)
     results = await ingest_xlsx_by_sheets(
-        db, user_id=OWNER, filename="Travelon.xlsx", data=buf.getvalue(),
-        source_type="drive", source_ref="TP1")
+        db, user_id=OWNER, domain="personal", filename="Travelon.xlsx",
+        data=buf.getvalue(), source_type="drive", source_ref="TP1")
     by_status = {r.document.title.split("«")[1][:4]: r.status
                  for r in results if r.document}
     assert by_status["Прод"] == "indexed"
@@ -331,12 +333,14 @@ async def test_15_xlsx_quarantines_only_the_affected_sheet(db):
 @pytest.mark.asyncio
 async def test_16_retrieval_excludes_quarantined_documents(db):
     result = await ingest_document(
-        db, user_id=OWNER, title="Умови", text=BUSINESS_TEXT,
+        db, user_id=OWNER, domain="personal", title="Умови", text=BUSINESS_TEXT,
         source_type="drive", source_ref="q1")
-    assert await rag.retrieve(db, user_id=OWNER, query="ТОКО депозит комісія")
+    assert await rag.retrieve(db, user_id=OWNER, domain="personal",
+                              query="ТОКО депозит комісія")
     result.document.status = "quarantined"
     await db.commit()
-    assert await rag.retrieve(db, user_id=OWNER, query="ТОКО депозит комісія") == []
+    assert await rag.retrieve(db, user_id=OWNER, domain="personal",
+                              query="ТОКО депозит комісія") == []
 
 
 @pytest.mark.asyncio
@@ -354,18 +358,19 @@ async def test_17_retrieval_withholds_a_legacy_secret_chunk(db):
     db.add(KnowledgeChunk(document_id=doc.id, user_id=OWNER, seq=0,
                           text=text, embedding=emb))
     await db.commit()
-    hits = await rag.retrieve(db, user_id=OWNER, query=text)
+    hits = await rag.retrieve(db, user_id=OWNER, domain="personal", query=text)
     assert hits == []
 
 
 @pytest.mark.asyncio
 async def test_18_keyword_fallback_survives_for_identifiers(db):
     await ingest_document(
-        db, user_id=OWNER, title="Реквізити",
+        db, user_id=OWNER, domain="personal", title="Реквізити",
         text="Other | Toco UA | toco-tour.example | ЄДРПОУ 46140224\n\n"
              + "\n\n".join(f"Нейтральний рядок {i}" for i in range(30)),
         source_type="drive", source_ref="r1")
-    hits = await rag.retrieve(db, user_id=OWNER, query="реквізити ТОКО")
+    hits = await rag.retrieve(db, user_id=OWNER, domain="personal",
+                              query="реквізити ТОКО")
     assert any("46140224" in h.text for h in hits)
 
 
@@ -473,7 +478,8 @@ async def test_24_wiki_save_answer_is_gone(db):
     assert "wiki_save_answer" not in chat_tools._POLICY
     assert "wiki_save_answer" not in chat_tools._EXECUTORS
     denied = json.loads(await chat_tools.run_tool(
-        db, OWNER, "wiki_save_answer", {"title": "x", "summary": "y", "body": "z"}))
+        db, OWNER, "personal", "wiki_save_answer",
+        {"title": "x", "summary": "y", "body": "z"}))
     assert "не дозволено" in denied["error"]
     from app.core.chat import _SYSTEM
     assert "wiki_save_answer" not in _SYSTEM
@@ -481,10 +487,10 @@ async def test_24_wiki_save_answer_is_gone(db):
 
 @pytest.mark.asyncio
 async def test_25_tool_output_is_withheld_when_it_carries_a_secret(db, monkeypatch):
-    async def leaky(_db, _user_id, _args):
+    async def leaky(_db, _user_id, _domain, _args):
         return {"open_tasks": [{"title": f"ключ {FAKE_API_KEY}"}]}
     monkeypatch.setitem(chat_tools._EXECUTORS, "get_tasks", leaky)
-    raw = await chat_tools.run_tool(db, OWNER, "get_tasks", {})
+    raw = await chat_tools.run_tool(db, OWNER, "personal", "get_tasks", {})
     assert "EXAMPLEONLY" not in raw
     assert json.loads(raw)["withheld"] is True
     finding = (await db.execute(select(SecurityFinding))).scalar_one()
@@ -494,22 +500,23 @@ async def test_25_tool_output_is_withheld_when_it_carries_a_secret(db, monkeypat
 @pytest.mark.asyncio
 async def test_26_quarantined_page_is_invisible_to_every_reader(db):
     page, _ = await wiki.upsert_page(
-        db, user_id=OWNER, kind="entity", title="Toco UA", summary="оператор",
-        content="- Депозит 30%", aliases=["ТОКО"], tags=["partner"])
+        db, user_id=OWNER, domain="personal", kind="entity", title="Toco UA",
+        summary="оператор", content="- Депозит 30%", aliases=["ТОКО"],
+        tags=["partner"])
     await db.commit()
-    assert await wiki.find_page(db, OWNER, "ТОКО") is not None
+    assert await wiki.find_page(db, OWNER, "personal", "ТОКО") is not None
     page.status = "quarantined"
     await db.commit()
-    assert await wiki.find_page(db, OWNER, "ТОКО") is None
-    assert await wiki.search_pages(db, OWNER, "Toco") == []
-    assert "Toco UA" not in await wiki.render_index(db, OWNER)
-    assert (await wiki.lint(db, OWNER))["quarantined"] == 1
+    assert await wiki.find_page(db, OWNER, "personal", "ТОКО") is None
+    assert await wiki.search_pages(db, OWNER, "personal", "Toco") == []
+    assert "Toco UA" not in await wiki.render_index(db, OWNER, "personal")
+    assert (await wiki.lint(db, OWNER, "personal"))["quarantined"] == 1
 
 
 @pytest.mark.asyncio
 async def test_27_compiler_never_sends_a_secret_source(db, no_providers):
     outcome = await wiki.compile_source(
-        db, user_id=OWNER, title="Доступи DMC",
+        db, user_id=OWNER, domain="personal", title="Доступи DMC",
         text=BUSINESS_TEXT + "\n" + FAKE_SECRET_LINE, source_ref="d1")
     assert outcome.status == "quarantined"
     assert outcome.pages == [] and outcome.error_code == "secret_detected"
@@ -528,10 +535,11 @@ async def test_28_compiler_drops_secret_facts_from_model_output(db, monkeypatch)
                       FAKE_PASSWORD_LINE, f"Ключ: {FAKE_API_KEY}"]}]},
             ensure_ascii=False)
     monkeypatch.setattr("app.core.extraction.haiku_text", sloppy)
-    outcome = await wiki.compile_source(db, user_id=OWNER, title="Партнери",
+    outcome = await wiki.compile_source(db, user_id=OWNER, domain="personal",
+                                        title="Партнери",
                                         text=BUSINESS_TEXT, source_ref="d2")
     assert outcome.status == "succeeded"
-    page = await wiki.find_page(db, OWNER, "ТОКО")
+    page = await wiki.find_page(db, OWNER, "personal", "ТОКО")
     assert page.status == "active"
     assert "Депозит: 30%" in page.content
     assert "EXAMPLEONLY" not in page.content       # the api-key fact is dropped
@@ -545,20 +553,22 @@ async def test_29_compile_status_is_structured_and_queue_is_honest(db, monkeypat
     async def broken(prompt, max_tokens=600):
         return None
     monkeypatch.setattr("app.core.extraction.haiku_text", broken)
-    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc)
+    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc,
+                                          domain="personal")
     assert outcome.status == "failed" and outcome.error_code == "provider_unavailable"
     state = wiki.compile_state(doc)
     assert state["compiler_version"] == wiki.COMPILER_VERSION
     assert state["source_chars"] > 0 and "at" in state
     # a provider blip must not remove a source from the base forever
-    assert doc.id in {d.id for d in await wiki.pending_documents(db, OWNER)}
+    assert doc.id in {d.id for d in await wiki.pending_documents(db, OWNER, "personal")}
 
     async def empty(prompt, max_tokens=600):
         return json.dumps({"pages": []})
     monkeypatch.setattr("app.core.extraction.haiku_text", empty)
-    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc)
+    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc,
+                                          domain="personal")
     assert outcome.status == "empty_valid"
-    assert doc.id not in {d.id for d in await wiki.pending_documents(db, OWNER)}
+    assert doc.id not in {d.id for d in await wiki.pending_documents(db, OWNER, "personal")}
 
 
 @pytest.mark.asyncio
@@ -575,17 +585,18 @@ async def test_30_oversized_source_reports_deferred_large(db, monkeypatch):
             "summary": "s", "facts": ["Депозит: 30%"], "tags": []}]},
             ensure_ascii=False)
     monkeypatch.setattr("app.core.extraction.haiku_text", ok)
-    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc)
+    outcome = await wiki.compile_document(db, user_id=OWNER, document=doc,
+                                          domain="personal")
     assert outcome.status == "deferred_large"
     assert outcome.processed_chars < outcome.source_chars
-    assert doc.id in {d.id for d in await wiki.pending_documents(db, OWNER)}
+    assert doc.id in {d.id for d in await wiki.pending_documents(db, OWNER, "personal")}
 
 
 @pytest.mark.asyncio
 async def test_31_upsert_contains_a_secret_page_on_write(db):
     page, status = await wiki.upsert_page(
-        db, user_id=OWNER, kind="entity", title="Партнер X", summary="оператор",
-        content=f"- {FAKE_SECRET_LINE}", aliases=[], tags=[])
+        db, user_id=OWNER, domain="personal", kind="entity", title="Партнер X",
+        summary="оператор", content=f"- {FAKE_SECRET_LINE}", aliases=[], tags=[])
     await db.commit()
     assert status == "quarantined" and page.status == "quarantined"
     assert page.content == "" and page.summary == ""
@@ -596,7 +607,8 @@ async def test_31_upsert_contains_a_secret_page_on_write(db):
 # ============================================================ 6. the DB scan
 
 async def _indexed_doc(db, title, text, *, ref="doc"):
-    result = await ingest_document(db, user_id=OWNER, title=title, text=text,
+    result = await ingest_document(db, user_id=OWNER, domain="personal",
+                                   title=title, text=text,
                                    source_type="drive", source_ref=ref)
     return result.document
 
@@ -738,7 +750,7 @@ async def test_37_reply_draft_refuses_a_credential_letter(db, monkeypatch):
     from app.core import google_client
     from app.models import GoogleCredential, PendingDraft
     db.add(GoogleCredential(user_id=OWNER, account_email="me@example.invalid",
-                            label="me", refresh_token_enc="enc"))
+                            label="me", domain="personal", refresh_token_enc="enc"))
     await db.commit()
 
     async def _access(_db, _cred):
@@ -908,7 +920,7 @@ async def test_42_rescan_releases_password_content_keeps_tokens(db):
     assert page.status == "active"
 
     # the password page is found again; its finding is resolved
-    assert await wiki.find_page(db, OWNER, "ТОКО") is not None
+    assert await wiki.find_page(db, OWNER, "personal", "ТОКО") is not None
     resolved = (await db.execute(select(SecurityFinding).where(
         SecurityFinding.resource_type == "document",
         SecurityFinding.resource_id == str(pw_doc.id)))).scalar_one()
@@ -938,7 +950,9 @@ async def test_43_released_password_document_is_retrievable(db):
                           text=text, embedding=emb))
     await db.commit()
 
-    assert await rag.retrieve(db, user_id=OWNER, query="пароль Toco кабінет") == []
+    assert await rag.retrieve(db, user_id=OWNER, domain="personal",
+                              query="пароль Toco кабінет") == []
     await security_scan.run_scan(db, user_id=OWNER)
-    hits = await rag.retrieve(db, user_id=OWNER, query="пароль Toco кабінет")
+    hits = await rag.retrieve(db, user_id=OWNER, domain="personal",
+                              query="пароль Toco кабінет")
     assert any("Qw3rty-Zx9-Lm" in h.text for h in hits)

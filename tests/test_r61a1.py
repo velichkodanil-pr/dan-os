@@ -207,7 +207,7 @@ def test_11_policy_and_business_text_accepted(strict_passwords, text):
 @pytest.mark.asyncio
 async def test_12_document_title_secret_is_sanitised(db, spies):
     result = await ingest_document(
-        db, user_id=OWNER, title=f"Ключі {FAKE_API_KEY}.txt",
+        db, user_id=OWNER, domain="personal", title=f"Ключі {FAKE_API_KEY}.txt",
         text="Звичайний бізнес-текст про умови роботи з операторами.",
         source_type="drive", source_ref="t1")
     assert result.status == "quarantined"
@@ -219,7 +219,7 @@ async def test_12_document_title_secret_is_sanitised(db, spies):
 @pytest.mark.asyncio
 async def test_13_source_ref_secret_is_sanitised(db, spies):
     result = await ingest_document(
-        db, user_id=OWNER, title="Звіт за серпень",
+        db, user_id=OWNER, domain="personal", title="Звіт за серпень",
         text="Звичайний бізнес-текст про умови роботи з операторами.",
         source_type="drive", source_ref=f"https://x.example/?api_key={FAKE_API_KEY}")
     assert result.status == "quarantined"
@@ -232,7 +232,7 @@ async def test_14_nested_meta_secret_is_sanitised(db, spies):
     meta = {"modifiedTime": "2026-08-15T00:00:00Z", "v": 2,
             "sheets": [{"name": "DMC", "note": f"ключ {FAKE_API_KEY}"}]}
     result = await ingest_document(
-        db, user_id=OWNER, title="Таблиця", text="Звичайний бізнес-текст.",
+        db, user_id=OWNER, domain="personal", title="Таблиця", text="Звичайний бізнес-текст.",
         source_type="drive", source_ref="m1", meta=meta)
     assert result.status == "quarantined"
     doc = (await db.execute(select(Document))).scalar_one()
@@ -247,14 +247,14 @@ async def test_15_no_raw_secret_fingerprint_is_persisted(db, spies):
     """A plain SHA-256 of a short secret is reversible — so it is not stored."""
     import hashlib
     body = f"Доступи\n{FAKE_SECRET_LINE}"
-    await ingest_document(db, user_id=OWNER, title="Доступи", text=body,
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Доступи", text=body,
                           source_type="drive", source_ref="f1")
     doc = (await db.execute(select(Document))).scalar_one()
     raw_sha = hashlib.sha256(body.strip().lower().encode()).hexdigest()
     assert doc.content_hash != raw_sha
     assert doc.content_hash.startswith("q$")
     # …and it is still a STABLE id: re-ingesting dedupes instead of duplicating
-    again = await ingest_document(db, user_id=OWNER, title="Доступи", text=body,
+    again = await ingest_document(db, user_id=OWNER, domain="personal", title="Доступи", text=body,
                                   source_type="drive", source_ref="f1")
     assert again.status == "quarantined"
     assert (await db.execute(
@@ -265,13 +265,13 @@ async def test_15_no_raw_secret_fingerprint_is_persisted(db, spies):
 
 @pytest.mark.asyncio
 async def test_16_blocked_rag_query_makes_zero_embedding_calls(db, spies):
-    assert await rag.retrieve(db, user_id=OWNER,
+    assert await rag.retrieve(db, user_id=OWNER, domain="personal",
                               query=f"знайди {FAKE_API_KEY}") == []
 
 
 @pytest.mark.asyncio
 async def test_17_blocked_tool_arguments_make_zero_connector_calls(db, spies):
-    raw = await chat_tools.run_tool(db, OWNER, "search_mail",
+    raw = await chat_tools.run_tool(db, OWNER, "personal", "search_mail",
                                     {"query": f"лист із {FAKE_API_KEY}"})
     payload = json.loads(raw)
     assert payload["refused"] is True and payload["reason"] == "secret_in_arguments"
@@ -283,10 +283,10 @@ async def test_17_blocked_tool_arguments_make_zero_connector_calls(db, spies):
 @pytest.mark.asyncio
 async def test_18_blocked_goal_and_habit_write_nothing(db, spies):
     with pytest.raises(security.SecretBlocked):
-        await coach.create_goal(db, user_id=OWNER,
+        await coach.create_goal(db, user_id=OWNER, domain="personal",
                                 title=f"оновити {FAKE_API_KEY}")
     with pytest.raises(security.SecretBlocked):
-        await coach.create_habit(db, user_id=OWNER,
+        await coach.create_habit(db, user_id=OWNER, domain="personal",
                                  title=f"перевіряти {FAKE_API_KEY}")
     assert (await db.execute(
         select(func.count()).select_from(Goal))).scalar_one() == 0
@@ -306,7 +306,7 @@ async def test_19_blocked_admin_search_makes_zero_provider_calls(spies, monkeypa
         headers = {"X-Admin-Token": "test-admin-token"}
 
     out = await admin_search(
-        AdminSearchRequest(query=f"знайди {FAKE_API_KEY}"), _Req())
+        AdminSearchRequest(query=f"знайди {FAKE_API_KEY}", domain="personal"), _Req())
     assert out == {"hits": [], "refused": "secret_in_query"}
 
 
@@ -369,7 +369,7 @@ async def test_22_blocked_draft_output_creates_no_pending_draft(db, monkeypatch)
     from app.core import google_client
     from app.models import GoogleCredential
     db.add(GoogleCredential(user_id=OWNER, account_email="me@example.invalid",
-                            label="me", refresh_token_enc="enc"))
+                            label="me", refresh_token_enc="enc", domain="personal"))
     await db.commit()
 
     async def _access(_db, _cred):

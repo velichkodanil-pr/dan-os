@@ -29,11 +29,11 @@ async def test_mock_extraction_create():
 
 async def _setup_account(db, monkeypatch):
     cred = GoogleCredential(user_id=OWNER, account_email="me@gmail.com",
-                            label="me", refresh_token_enc="enc")
+                            label="me", domain="personal", refresh_token_enc="enc")
     db.add(cred)
     await db.commit()
 
-    async def fake_accounts(_db, _uid):
+    async def fake_accounts(_db, _uid, _domain=None):
         return [cred]
 
     async def fake_access(_db, _c):

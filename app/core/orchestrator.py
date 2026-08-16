@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core import security
 from app.core.audit import audit
+from app.core.domains import Domain, get_active_domain
 from app.core.extraction import ExtractionProvider, get_extractor
 from app.core.policy import PolicyDenied, evaluate
 from app.models import ChatLog, MemoryItem, Proposal, RawEvent, Reminder, Task, UserState
@@ -80,6 +81,13 @@ class Orchestrator:
         _guard_owner(user_id)
         actor = f"user:{user_id}"
 
+        # R6.1B: the ACTIVE DOMAIN is read ONCE here, at request start, and used
+        # as an immutable snapshot for everything below — raw event, chat log,
+        # extraction, RAG, wiki, profile, history, chat engine, tools, gaps,
+        # drafts, calendar, audit. It is never re-read mid-request, so a /domain
+        # switch that lands mid-flight cannot change the domain of this request.
+        domain = await get_active_domain(db, user_id)
+
         # 0) the gate (R6.1A). Runs BEFORE the raw event, before the chat log,
         # before extraction, RAG, tools and every provider call — so a pasted
         # credential is never persisted, embedded or sent anywhere. The body is
@@ -87,7 +95,7 @@ class Orchestrator:
         scan = security.scan(text)
         if scan.blocked:
             await security.record_finding(
-                db, user_id=user_id, resource_type="note",
+                db, user_id=user_id, domain=domain, resource_type="note",
                 resource_id=dedupe_key[:64], result=scan)
             await security.audit_blocked(
                 db, user_id=user_id, action="note.blocked",
@@ -101,8 +109,9 @@ class Orchestrator:
         if security.is_credential_request(text):
             await audit(db, actor=actor, action="credential_request.refused",
                         resource_type="chat", policy_level="L0")
-            db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
-            db.add(ChatLog(user_id=user_id, role="bot",
+            db.add(ChatLog(user_id=user_id, domain=domain, role="user",
+                           text=text[:1500]))
+            db.add(ChatLog(user_id=user_id, domain=domain, role="bot",
                            text=security.SAFE_NOT_STORED[:1500]))
             await db.commit()
             return NoteOutcome(kind="chat", reply=security.SAFE_NOT_STORED)
@@ -111,7 +120,7 @@ class Orchestrator:
         _check("raw_event.create")
         event = RawEvent(
             event_type=event_type, dedupe_key=dedupe_key, user_id=user_id,
-            payload={"text": text[:4000]},
+            domain=domain, payload={"text": text[:4000]},
         )
         db.add(event)
         try:
@@ -132,9 +141,12 @@ class Orchestrator:
             editing = await db.get(Proposal, state.pending_edit_proposal)
             state.pending_edit_proposal = None
 
-        # 2a) TravelON order lookup — deterministic, answers directly
+        # 2a) TravelON order lookup — deterministic, answers directly. This is a
+        # TravelON (business) capability: it fires ONLY in the travelon domain,
+        # so «заявка №12345» in personal/tech is just an ordinary note, not a
+        # business lookup, and no TravelON network call is made.
         order_match = _ORDER_RE.search(text)
-        if order_match and editing is None:
+        if order_match and editing is None and domain == Domain.TRAVELON:
             from app.core import travelon
             if travelon.configured():
                 _check("travelon.read")
@@ -150,8 +162,10 @@ class Orchestrator:
                 await audit(db, actor=actor, action="travelon.order_viewed",
                             resource_type="travelon_order", resource_id=order_no,
                             policy_level="L0", found=order is not None)
-                db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
-                db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))
+                db.add(ChatLog(user_id=user_id, domain=domain, role="user",
+                               text=text[:1500]))
+                db.add(ChatLog(user_id=user_id, domain=domain, role="bot",
+                               text=reply[:1500]))
                 await db.commit()
                 return NoteOutcome(kind="chat", reply=reply)
 
@@ -159,17 +173,22 @@ class Orchestrator:
         from app.core import rag  # local import to keep module load light
         chunks = []
         try:
-            chunks = await rag.retrieve(db, user_id=user_id, query=text)
+            chunks = await rag.retrieve(db, user_id=user_id, domain=domain,
+                                        query=text)
         except Exception:
             logger.exception("rag retrieve failed")
 
-        # 3a) context: confirmed profile facts + short dialog window
+        # 3a) context: confirmed profile facts + short dialog window — BOTH
+        # scoped to the active domain, so a personal fact or a prior travelon
+        # turn never leaks into the other domain's prompt.
         profile = (await db.execute(
             select(MemoryItem.content).where(
-                MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
+                MemoryItem.user_id == user_id, MemoryItem.domain == domain,
+                MemoryItem.status == "confirmed")
             .order_by(MemoryItem.created_at.desc()).limit(12))).scalars().all()
         history_rows = (await db.execute(
             select(ChatLog).where(ChatLog.user_id == user_id,
+                                  ChatLog.domain == domain,
                                   ChatLog.provider_eligible.is_(True))
             .order_by(ChatLog.id.desc())
             .limit(max(8, settings.chat_history_window)))).scalars().all()
@@ -186,7 +205,7 @@ class Orchestrator:
                 len(text) <= 40 and any(_CALENDAR_RE.search(m) for m in recent_user)):
             from app.core.briefs import agenda_block
             try:
-                calendar_block = await agenda_block(db, user_id)
+                calendar_block = await agenda_block(db, user_id, domain)
             except Exception:
                 logger.exception("agenda block failed")
 
@@ -225,7 +244,7 @@ class Orchestrator:
             ext.email_to, ext.email_subject, ext.email_body)
         if ext_scan.blocked:
             await security.record_finding(
-                db, user_id=user_id, resource_type="model_output",
+                db, user_id=user_id, domain=domain, resource_type="model_output",
                 resource_id=str(event.id), result=ext_scan)
             await security.audit_blocked(
                 db, user_id=user_id, action="extraction.blocked",
@@ -237,7 +256,7 @@ class Orchestrator:
             _check("proposal.create")
             title = ext.title or text.strip()[:80]
             proposal = Proposal(
-                raw_event_id=event.id, user_id=user_id, kind="task",
+                raw_event_id=event.id, user_id=user_id, domain=domain, kind="task",
                 version=(editing.version + 1) if editing else 1,
                 payload={
                     "title": title,
@@ -261,19 +280,21 @@ class Orchestrator:
             return NoteOutcome(kind="proposal", proposal=proposal)
 
         if ext.intent == "calendar":
-            outcome = await self._propose_cal_actions(db, user_id=user_id, ext=ext)
+            outcome = await self._propose_cal_actions(
+                db, user_id=user_id, domain=domain, ext=ext)
             await db.commit()
             return outcome
 
         if ext.intent == "email" and ext.email_to:
-            outcome = await self._propose_new_email(db, user_id=user_id, ext=ext)
+            outcome = await self._propose_new_email(
+                db, user_id=user_id, domain=domain, ext=ext)
             await db.commit()
             return outcome
 
         if ext.intent == "note" and ext.memory_text:
             _check("memory.candidate_create")
-            item = MemoryItem(user_id=user_id, content=ext.memory_text,
-                              source_event_id=event.id)
+            item = MemoryItem(user_id=user_id, domain=domain,
+                              content=ext.memory_text, source_event_id=event.id)
             db.add(item)
             await db.flush()
             await audit(db, actor=actor, action="memory.candidate_created",
@@ -285,8 +306,9 @@ class Orchestrator:
         # extractor's short reply is only the fallback
         from app.core.chat import chat_reply
         reply = await chat_reply(
-            text, db=db, user_id=user_id, profile=context["profile"],
-            history=context["history"], knowledge=context["knowledge"])
+            text, db=db, user_id=user_id, domain=domain,
+            profile=context["profile"], history=context["history"],
+            knowledge=context["knowledge"])
         reply = reply or ext.reply or "Записав."
         # EGRESS: the reply is about to be persisted, sent to Telegram and
         # possibly spoken by TTS. A blocked reply is dropped whole — and the
@@ -295,19 +317,20 @@ class Orchestrator:
         reply_scan = security.scan(reply)
         if reply_scan.blocked:
             await security.record_finding(
-                db, user_id=user_id, resource_type="chat_reply",
+                db, user_id=user_id, domain=domain, resource_type="chat_reply",
                 resource_id=str(event.id), result=reply_scan)
             await security.audit_blocked(
                 db, user_id=user_id, action="chat_reply.blocked",
                 resource_type="chat", resource_id=event.id, result=reply_scan)
-            db.add(ChatLog(user_id=user_id, role="user", text=text[:1500],
-                           provider_eligible=False))
+            db.add(ChatLog(user_id=user_id, domain=domain, role="user",
+                           text=text[:1500], provider_eligible=False))
             await db.commit()
             return NoteOutcome(kind="blocked", reply=security.SAFE_OUTPUT)
-        db.add(ChatLog(user_id=user_id, role="user", text=text[:1500]))
-        db.add(ChatLog(user_id=user_id, role="bot", text=reply[:1500]))
+        db.add(ChatLog(user_id=user_id, domain=domain, role="user", text=text[:1500]))
+        db.add(ChatLog(user_id=user_id, domain=domain, role="bot", text=reply[:1500]))
         if not chunks and rag.looks_like_question(text):
-            await rag.log_gap(db, user_id=user_id, question=text)  # coverage map (R3b)
+            await rag.log_gap(db, user_id=user_id, domain=domain,
+                              question=text)  # coverage map (R3b)
         await db.commit()
         return NoteOutcome(kind="chat", reply=reply)
 
@@ -323,10 +346,11 @@ class Orchestrator:
         no duplicate proposals (raw-event dedupe is the second safety net)."""
         _guard_owner(user_id)
         actor = f"user:{user_id}"
+        domain = await get_active_domain(db, user_id)   # request-start snapshot
         from app.core import meetings
         from app.core.ingest import ingest_document
         result = await ingest_document(
-            db, user_id=user_id, title=title, text=text,
+            db, user_id=user_id, domain=domain, title=title, text=text,
             source_type="meeting_transcript", source_ref=source_ref)
         out: dict = {"ingest": result, "digest": None, "proposals": []}
         if result.status != "indexed" or result.document is None:
@@ -348,7 +372,7 @@ class Orchestrator:
         _check("raw_event.create")
         event = RawEvent(event_type="meeting.transcript",
                          dedupe_key=f"tr:{result.document.content_hash[:100]}",
-                         user_id=user_id,
+                         user_id=user_id, domain=domain,
                          payload={"title": title[:200]})
         db.add(event)
         try:
@@ -371,7 +395,7 @@ class Orchestrator:
                 except ValueError:
                     due_iso = None
             proposal = Proposal(
-                raw_event_id=event.id, user_id=user_id, kind="task",
+                raw_event_id=event.id, user_id=user_id, domain=domain, kind="task",
                 payload={"title": a["title"], "due_at": due_iso,
                          "remind_at": due_iso, "memory_text": None})
             db.add(proposal)
@@ -386,21 +410,23 @@ class Orchestrator:
     # ---------- calendar: respond to own participation (L3) ----------
 
     async def _propose_cal_create(self, db: AsyncSession, *, user_id: int,
-                                  ext) -> NoteOutcome:
+                                  domain, ext) -> NoteOutcome:
         """Stage a new-event proposal (no write until the button press)."""
         from datetime import timedelta
         from app.core import google_client
         from app.models import PendingCalCreate
-        accounts = await google_client.get_accounts(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id, domain)
         if not accounts:
-            return NoteOutcome(kind="chat", reply="Спершу підключи Google: /connect_google")
+            return NoteOutcome(kind="chat", reply=(
+                "Для цього домену не призначено Google-акаунтів — признач у /accounts."))
         if ext.cal_start.tzinfo is None:
             ext.cal_start = ext.cal_start.replace(tzinfo=ZoneInfo(settings.tz_name))
         if ext.cal_start < datetime.now(timezone.utc).astimezone(ext.cal_start.tzinfo):
             return NoteOutcome(kind="chat", reply=(
                 "Цей час уже минув — назви майбутній час, і я поставлю подію."))
         pending = PendingCalCreate(
-            user_id=user_id, title=ext.cal_title[:200], start_at=ext.cal_start,
+            user_id=user_id, domain=domain, title=ext.cal_title[:200],
+            start_at=ext.cal_start,
             end_at=ext.cal_start + timedelta(minutes=ext.cal_duration_min))
         db.add(pending)
         await db.flush()
@@ -428,7 +454,14 @@ class Orchestrator:
         if pending.status != "proposed":
             await db.commit()
             return pending.status, ""
-        accounts = await google_client.get_accounts(db, user_id)
+        # §9 callback fail-closed: the resource's STORED domain is the source of
+        # truth (never a value from callback data). Act only if the active domain
+        # still matches it — otherwise ask the owner to switch back.
+        active = await get_active_domain(db, user_id)
+        if pending.domain != active:
+            await db.commit()
+            return "wrong_domain", pending.domain
+        accounts = await google_client.get_accounts(db, user_id, pending.domain)
         if not accounts or account_index >= len(accounts):
             await db.commit()
             return "no_google", ""
@@ -472,7 +505,7 @@ class Orchestrator:
         return "rejected"
 
     async def _propose_cal_actions(self, db: AsyncSession, *, user_id: int,
-                                   ext) -> NoteOutcome:
+                                   domain, ext) -> NoteOutcome:
         """Find matching events and stage RSVP proposals (no writes yet)."""
         from app.core import google_client
         from app.models import PendingCalAction
@@ -482,14 +515,16 @@ class Orchestrator:
                 return NoteOutcome(kind="chat", reply=(
                     "Скажи, що за подія і на коли — наприклад: "
                     "«постав зустріч з Юрою завтра о 15»."))
-            return await self._propose_cal_create(db, user_id=user_id, ext=ext)
+            return await self._propose_cal_create(
+                db, user_id=user_id, domain=domain, ext=ext)
         if not ext.cal_query:
             return NoteOutcome(kind="chat", reply=(
                 "Уточни, будь ласка, яку саме подію маєш на увазі — "
                 "назву зустрічі чи з ким вона."))
-        accounts = await google_client.get_accounts(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id, domain)
         if not accounts:
-            return NoteOutcome(kind="chat", reply="Спершу підключи Google: /connect_google")
+            return NoteOutcome(kind="chat", reply=(
+                "Для цього домену не призначено Google-акаунтів — признач у /accounts."))
         matches: list[tuple] = []
         access_broken = False
         for cred in accounts:
@@ -516,7 +551,7 @@ class Orchestrator:
         actions = []
         for cred, ev in matches[:3]:
             pending = PendingCalAction(
-                user_id=user_id, credential_id=cred.id,
+                user_id=user_id, domain=domain, credential_id=cred.id,
                 calendar_id=ev["calendar_id"], event_id=ev["event_id"],
                 summary=ev["summary"], start_str=ev["start"],
                 action=ext.cal_action or "decline")
@@ -544,10 +579,16 @@ class Orchestrator:
         if pending.status != "proposed":
             await db.commit()
             return pending.status
+        # §9 fail-closed: act only while the active domain matches the resource.
+        active = await get_active_domain(db, user_id)
+        if pending.domain != active:
+            await db.commit()
+            return "wrong_domain"
         access, email = None, ""
         if pending.credential_id:
             cred = await db.get(GoogleCredential, pending.credential_id)
-            if cred is not None:
+            # §11: the credential must belong to the SAME domain as the resource.
+            if cred is not None and cred.domain == pending.domain:
                 access = await google_client.access_for(db, cred)
                 email = cred.account_email
         if not access:
@@ -699,8 +740,12 @@ class Orchestrator:
 
         _check("task.create_via_approval")  # L2, the button press IS the confirmation
         p = proposal.payload
+        # §9/§15: the task inherits the proposal's SOURCE domain (its trusted
+        # parent) — approving a travelon proposal while active=personal still
+        # produces a travelon task, never a personal one.
         task = Task(
-            proposal_id=proposal.id, user_id=user_id, title=p.get("title") or "Задача",
+            proposal_id=proposal.id, user_id=user_id, domain=proposal.domain,
+            title=p.get("title") or "Задача",
             due_at=datetime.fromisoformat(p["due_at"]) if p.get("due_at") else None,
         )
         db.add(task)
@@ -723,7 +768,8 @@ class Orchestrator:
             fire_at = datetime.fromisoformat(remind_at)
             if fire_at > datetime.now(timezone.utc):
                 _check("reminder.schedule")
-                reminder = Reminder(task_id=task.id, user_id=user_id, fire_at=fire_at)
+                reminder = Reminder(task_id=task.id, user_id=user_id,
+                                    domain=task.domain, fire_at=fire_at)
                 db.add(reminder)
                 await db.flush()
                 await audit(db, actor=actor, action="reminder.scheduled",
@@ -733,7 +779,8 @@ class Orchestrator:
         memory_text = p.get("memory_text")
         if memory_text:
             _check("memory.candidate_create")
-            item = MemoryItem(user_id=user_id, content=memory_text,
+            item = MemoryItem(user_id=user_id, domain=proposal.domain,
+                              content=memory_text,
                               source_event_id=proposal.raw_event_id)
             db.add(item)
             await db.flush()
@@ -776,17 +823,17 @@ class Orchestrator:
     # ---------- email drafts (L3: preview + confirm, draft-only) ----------
 
     async def _propose_new_email(self, db: AsyncSession, *, user_id: int,
-                                 ext) -> NoteOutcome:
+                                 domain, ext) -> NoteOutcome:
         """Stage a NEW letter (not a reply) as a PendingDraft. No sending —
         the button creates a Gmail DRAFT in the chosen account."""
         from app.core import google_client
         from app.models import PendingDraft
-        accounts = await google_client.get_accounts(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id, domain)
         if not accounts:
-            return NoteOutcome(kind="chat",
-                               reply="Спершу підключи Google: /connect_google")
+            return NoteOutcome(kind="chat", reply=(
+                "Для цього домену не призначено Google-акаунтів — признач у /accounts."))
         draft = PendingDraft(
-            user_id=user_id, to_addr=ext.email_to.strip()[:200],
+            user_id=user_id, domain=domain, to_addr=ext.email_to.strip()[:200],
             subject=(ext.email_subject or "Лист від Данила").strip()[:200],
             body=(ext.email_body or "").strip()[:5000] or "Привіт!",
             credential_id=accounts[0].id if len(accounts) == 1 else None)
@@ -808,7 +855,8 @@ class Orchestrator:
         draft = await db.get(PendingDraft, draft_id, with_for_update=True)
         if draft is None or draft.user_id != user_id:
             return "not_found"
-        accounts = await google_client.get_accounts(db, user_id)
+        # accounts scoped to the DRAFT's stored domain (never the active one)
+        accounts = await google_client.get_accounts(db, user_id, draft.domain)
         if account_index >= len(accounts):
             await db.commit()
             return "no_google"
@@ -823,6 +871,7 @@ class Orchestrator:
         from app.core import google_client
         from app.core.extraction import haiku_text
         from app.models import PendingDraft
+        domain = await get_active_domain(db, user_id)   # request-start snapshot
         # the search string itself is provider input — zero Gmail calls if blocked
         if security.scan(query).blocked:
             await security.audit_blocked(
@@ -830,7 +879,7 @@ class Orchestrator:
                 resource_type="gmail", result=security.scan(query))
             await db.commit()
             return "blocked_secret", None
-        accounts = await google_client.get_accounts(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id, domain)
         if not accounts:
             return "no_google", None
         email, found_cred = None, None
@@ -853,7 +902,8 @@ class Orchestrator:
             return "blocked_secret", None
         profile = (await db.execute(
             select(MemoryItem.content).where(
-                MemoryItem.user_id == user_id, MemoryItem.status == "confirmed")
+                MemoryItem.user_id == user_id, MemoryItem.domain == domain,
+                MemoryItem.status == "confirmed")
             .order_by(MemoryItem.created_at.desc()).limit(10))).scalars().all()
         facts = "\n".join(f"- {f}" for f in profile) or "-"
         body = await haiku_text(
@@ -877,8 +927,8 @@ class Orchestrator:
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
         draft = PendingDraft(
-            user_id=user_id, to_addr=email["from"], subject=subject, body=body,
-            thread_id=email["thread_id"], in_reply_to=email["message_id"],
+            user_id=user_id, domain=domain, to_addr=email["from"], subject=subject,
+            body=body, thread_id=email["thread_id"], in_reply_to=email["message_id"],
             references=email["references"],
             credential_id=found_cred.id if found_cred else None)
         db.add(draft)
@@ -904,14 +954,20 @@ class Orchestrator:
         if draft.status != "proposed":
             await db.commit()
             return draft.status
+        # §9 fail-closed: act only while the active domain matches the resource.
+        active = await get_active_domain(db, user_id)
+        if draft.domain != active:
+            await db.commit()
+            return "wrong_domain"
         access = None
         if draft.credential_id:
             from app.models import GoogleCredential
             cred = await db.get(GoogleCredential, draft.credential_id)
-            if cred is not None:
+            # §11: the sending account must belong to the draft's own domain.
+            if cred is not None and cred.domain == draft.domain:
                 access = await google_client.access_for(db, cred)
         if not access:
-            access = await google_client.get_access_token(db, user_id)
+            access = await google_client.get_access_token(db, user_id, draft.domain)
         if not access:
             await db.commit()
             return "no_google"
@@ -984,14 +1040,17 @@ class Orchestrator:
 
     # ---------- today ----------
 
-    async def today(self, db: AsyncSession, *, user_id: int) -> dict:
+    async def today(self, db: AsyncSession, *, user_id: int, domain) -> dict:
         _guard_owner(user_id)
         _check("today.read")
+        from app.core.domains import parse_domain
+        domain = parse_domain(domain)
         tz = ZoneInfo(settings.tz_name)
         now_local = datetime.now(tz)
         day_end = now_local.replace(hour=23, minute=59, second=59)
         tasks = (await db.execute(
-            select(Task).where(Task.user_id == user_id, Task.status == "open")
+            select(Task).where(Task.user_id == user_id, Task.domain == domain,
+                               Task.status == "open")
             .order_by(Task.due_at.asc().nulls_last()))).scalars().all()
         overdue = [t for t in tasks if t.due_at and t.due_at.astimezone(tz) < now_local]
         today_due = [t for t in tasks if t.due_at and now_local
@@ -999,6 +1058,7 @@ class Orchestrator:
         no_date = [t for t in tasks if not t.due_at]
         candidates = (await db.execute(
             select(MemoryItem).where(MemoryItem.user_id == user_id,
+                                     MemoryItem.domain == domain,
                                      MemoryItem.status == "candidate"))).scalars().all()
         return {"overdue": overdue, "today": today_due, "no_date": no_date,
                 "candidates": len(candidates), "total_open": len(tasks)}

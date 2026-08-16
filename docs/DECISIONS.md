@@ -2,6 +2,61 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-16 — R6.1B: domains as real isolation boundaries
+
+`domain` existed on most tables since earlier rounds but was inert: retrieval,
+wiki, chat context and Google accounts all mixed domains freely. R6.1B makes
+`personal` / `travelon` / `tech` genuine security/context boundaries.
+
+- **Three fixed domains, fail-closed parsing.** Only `personal`, `travelon`,
+  `tech`. `parse_domain` rejects empty, unknown or model-generated values with a
+  `DomainError` — it never falls back to "personal". Case and surrounding
+  whitespace are tolerated at entry (normalised), but the *value* is never
+  guessed. The only place a missing value becomes personal is bootstrap
+  (`get_active_domain` for a user who has never switched) and the migration
+  backfill — both documented, neither is "parsing".
+
+- **Active domain is a server-side request snapshot.** It is read once, at the
+  start of a request (from `UserState.active_domain`), and passed down as an
+  immutable value. It is NEVER taken from model output, tool arguments, callback
+  data or client JSON. A `/domain` switch that lands mid-request does not change
+  the request in flight, and a background job (wiki compile, Drive index) carries
+  the domain it was launched with.
+
+- **The model cannot choose the domain.** `domain` is not a property in any
+  tool's input schema, so the model physically cannot write `{"domain":
+  "travelon"}`. `run_tool` injects the server-side domain positionally. TravelON
+  tools are hidden from the model outside the travelon domain AND refused at
+  dispatch with zero network calls — two independent layers, matching the
+  defence-in-depth style of the secret gates.
+
+- **No `domain="all"`, no cross-domain model context.** No code path builds an
+  LLM prompt from more than one domain's raw RAG/wiki/memory/chat. The only
+  cross-domain operations are deterministic, owner-only and documented: the
+  security scan (global by design, findings grouped by domain), `/accounts`,
+  `/domain_audit`, and the scheduled rituals — and those rituals are assembled
+  from SEPARATE per-domain queries under explicit domain headers, never mixed.
+
+- **Google accounts are domain-scoped and never guessed.** An account belongs to
+  exactly one domain, or is unassigned (NULL). Domain-scoped tools use only the
+  active domain's accounts, with no "all accounts" fallback; if none is assigned
+  they say so honestly. OAuth carries the active domain inside HMAC-signed state;
+  a new account binds to that signed domain; a reconnect refreshes tokens but
+  never moves an account between domains. The owner assigns/changes domains
+  explicitly in `/accounts`.
+
+- **No automatic semantic legacy classification.** The migration backfills only
+  from a TRUSTED PARENT (chunk←document, reminder←task, habit_log←habit);
+  anything without a trusted parent goes to personal; Google credentials go to
+  NULL. It never reads content, titles, tags, email addresses or model output to
+  decide a domain. A legacy row in the wrong domain is fixed by a conscious
+  re-upload, not by a guess — surfaced (counts only) by `/domain_audit`.
+
+- **Unique constraints are per-domain.** The same document hash, wiki slug or
+  dedupe key may exist independently in each domain (they are isolated, so
+  collisions across domains are not conflicts). Global uniques were replaced by
+  `(user_id, domain, …)` scoped ones in the same migration.
+
 ## 2026-08-15 — R6.1A.1: secret boundary hardening (independent audit)
 
 An independent audit of R6.1A found that the gate was real but its perimeter

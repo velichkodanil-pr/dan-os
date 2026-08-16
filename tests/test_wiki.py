@@ -22,26 +22,28 @@ def test_slugify_and_aliases():
 @pytest.mark.asyncio
 async def test_find_page_by_any_alias(db):
     await wiki.upsert_page(
-        db, user_id=OWNER, kind="entity", title="Toco UA (ТОКО Україна)",
+        db, user_id=OWNER, domain="personal", kind="entity",
+        title="Toco UA (ТОКО Україна)",
         summary="Партнер-оператор", content="- Контакт: i.k@travelon.to",
         aliases=["Toco UA", "ТОКО", "toco-tour.com.ua"], tags=["partner"],
         source={"title": "DMC", "ref": "d1", "date": "2026-08-14"})
     await db.commit()
     for name in ("ТОКО", "Toco UA", "toco-tour.com.ua", "токо україна"):
-        page = await wiki.find_page(db, OWNER, name)
+        page = await wiki.find_page(db, OWNER, "personal", name)
         assert page is not None, name
         assert "i.k@travelon.to" in page.content
-    assert await wiki.find_page(db, OWNER, "Анекс") is None
+    assert await wiki.find_page(db, OWNER, "personal", "Анекс") is None
 
 
 @pytest.mark.asyncio
 async def test_search_pages_cyrillic_to_latin(db):
     await wiki.upsert_page(
-        db, user_id=OWNER, kind="entity", title="Toco UA", summary="оператор",
+        db, user_id=OWNER, domain="personal", kind="entity", title="Toco UA",
+        summary="оператор",
         content="- сайт toco-tour.com.ua", aliases=["Toco UA", "ТОКО"],
         tags=["partner"])
     await db.commit()
-    found = await wiki.search_pages(db, OWNER, "ТОКО логін")
+    found = await wiki.search_pages(db, OWNER, "personal", "ТОКО логін")
     assert found and found[0].title == "Toco UA"
 
 
@@ -79,7 +81,8 @@ async def test_compile_creates_then_merges(db, monkeypatch):
     monkeypatch.setattr("app.core.extraction.haiku_text", fake_haiku)
 
     first = await wiki.compile_source(
-        db, user_id=OWNER, title="Travelon Project · аркуш «DMC»",
+        db, user_id=OWNER, domain="personal",
+        title="Travelon Project · аркуш «DMC»",
         text="Other | Toco UA | https://toco-tour.com.ua | i.kornienko@travelon.to",
         source_ref="doc-1")
     assert first.status == "succeeded"
@@ -87,11 +90,11 @@ async def test_compile_creates_then_merges(db, monkeypatch):
 
     # a DIFFERENT source about the same partner must MERGE into the same page
     second = await wiki.compile_source(
-        db, user_id=OWNER, title="Умови роботи з операторами",
+        db, user_id=OWNER, domain="personal", title="Умови роботи з операторами",
         text="ТОКО Україна: контакт Ірина, депозит 30%", source_ref="doc-2")
     assert second.pages and second.pages[0][1] == "updated"
 
-    page = await wiki.find_page(db, OWNER, "ТОКО")
+    page = await wiki.find_page(db, OWNER, "personal", "ТОКО")
     assert "i.kornienko@travelon.to" in page.content  # old facts kept
     assert "депозит 30%" in page.content              # new facts added
     assert len(page.sources) == 2                     # provenance from both
@@ -111,7 +114,7 @@ async def test_compile_merge_failure_keeps_facts(db, monkeypatch):
         return None  # merge fails
     monkeypatch.setattr("app.core.extraction.haiku_text", flaky)
 
-    await wiki.compile_source(db, user_id=OWNER, title="Джерело 1",
+    await wiki.compile_source(db, user_id=OWNER, domain="personal", title="Джерело 1",
                               text="Анекс менеджер anex_manager", source_ref="d1")
 
     async def flaky2(prompt, max_tokens=600):
@@ -122,10 +125,10 @@ async def test_compile_merge_failure_keeps_facts(db, monkeypatch):
                 "tags": ["partner"]}]}, ensure_ascii=False)
         return None
     monkeypatch.setattr("app.core.extraction.haiku_text", flaky2)
-    await wiki.compile_source(db, user_id=OWNER, title="Джерело 2",
+    await wiki.compile_source(db, user_id=OWNER, domain="personal", title="Джерело 2",
                               text="Anex новий контакт Марія", source_ref="d2")
 
-    page = await wiki.find_page(db, OWNER, "Анекс")
+    page = await wiki.find_page(db, OWNER, "personal", "Анекс")
     assert "anex_manager" in page.content and "Марія" in page.content
 
 
@@ -134,7 +137,8 @@ async def test_compile_ignores_empty_result(db, monkeypatch):
     async def nothing(prompt, max_tokens=600):
         return json.dumps({"pages": []})
     monkeypatch.setattr("app.core.extraction.haiku_text", nothing)
-    outcome = await wiki.compile_source(db, user_id=OWNER, title="Реєстр",
+    outcome = await wiki.compile_source(db, user_id=OWNER, domain="personal",
+                                        title="Реєстр",
                                         text="1 | 2 | 3", source_ref="d9")
     assert outcome.pages == [] and outcome.status == "empty_valid"
 
@@ -144,14 +148,15 @@ async def test_compile_ignores_empty_result(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_save_archive_and_index(db):
     page = await wiki.save_archive(
-        db, user_id=OWNER, title="Скільки перерахували Гепард",
+        db, user_id=OWNER, domain="personal",
+        title="Скільки перерахували Гепард",
         summary="50 662,86 EUR за 01.01.2026",
         body="Платіж GEPARD TURIZM: 50 662,86 EUR (2 526 556,83 грн, курс 49,87)",
         used=["Валютування · аркуш Дані1-Приватбанк"])
     assert page.kind == "archive" and "GEPARD" in page.content
-    index = await wiki.render_index(db, OWNER)
+    index = await wiki.render_index(db, OWNER, "personal")
     assert "Архів відповідей" in index and "Гепард" in index
-    found = await wiki.find_page(db, OWNER, "Скільки перерахували Гепард")
+    found = await wiki.find_page(db, OWNER, "personal", "Скільки перерахували Гепард")
     assert found is not None
 
 
@@ -159,15 +164,17 @@ async def test_save_archive_and_index(db):
 
 @pytest.mark.asyncio
 async def test_lint_flags_conflicts_and_dupes(db):
-    await wiki.upsert_page(db, user_id=OWNER, kind="entity", title="Партнер X",
+    await wiki.upsert_page(db, user_id=OWNER, domain="personal", kind="entity",
+                           title="Партнер X",
                            summary="s", content="- факт", aliases=[], tags=[],
                            contradictions="Джерело А: 30%, Джерело Б: 50%",
                            source={"title": "s1", "ref": "r1", "date": "2026-08-14"})
-    await wiki.upsert_page(db, user_id=OWNER, kind="entity", title="Партнер-X",
+    await wiki.upsert_page(db, user_id=OWNER, domain="personal", kind="entity",
+                           title="Партнер-X",
                            summary="s", content="", aliases=[], tags=[],
                            slug="partner-x-duplicate")
     await db.commit()
-    r = await wiki.lint(db, OWNER)
+    r = await wiki.lint(db, OWNER, "personal")
     assert r["total"] == 2 and r["conflicts"] == ["Партнер X"]
     assert r["thin"] and r["no_source"]
     assert wiki.lint_block(r) and "Вікі знань" in wiki.lint_block(r)
@@ -186,23 +193,24 @@ def test_policy_wiki_levels():
 async def test_wiki_tools_for_agent(db):
     from app.core import chat_tools
     await wiki.upsert_page(
-        db, user_id=OWNER, kind="entity", title="Toco UA", summary="оператор",
+        db, user_id=OWNER, domain="personal", kind="entity", title="Toco UA",
+        summary="оператор",
         content="- Менеджер: i.k@travelon.to", aliases=["ТОКО"], tags=["partner"])
     await db.commit()
 
-    idx = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_index", {}))
+    idx = json.loads(await chat_tools.run_tool(db, OWNER, "personal", "wiki_index", {}))
     assert "Toco UA" in idx["index"]
 
-    page = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_page",
+    page = json.loads(await chat_tools.run_tool(db, OWNER, "personal", "wiki_page",
                                                 {"name": "ТОКО"}))
     assert page["found"] and "i.k@travelon.to" in page["page"]
 
-    miss = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_page",
+    miss = json.loads(await chat_tools.run_tool(db, OWNER, "personal", "wiki_page",
                                                 {"name": "Невідомий партнер"}))
     assert miss["found"] is False
 
     # R6.1A: the model can no longer write to long-term memory on its own
-    denied = json.loads(await chat_tools.run_tool(db, OWNER, "wiki_save_answer", {
+    denied = json.loads(await chat_tools.run_tool(db, OWNER, "personal", "wiki_save_answer", {
         "title": "Порівняння операторів", "summary": "коротко",
         "body": "Детальний аналіз з кількох джерел " * 3}))
     assert "не дозволено" in denied["error"]

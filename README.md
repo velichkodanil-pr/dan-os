@@ -38,6 +38,29 @@ Usernames, e-mail addresses, URLs, IBAN/ЄДРПОУ/ІПН, invoice and order n
 and ordinary requisites stay fully searchable — the gate targets credentials,
 not business data.
 
+## Domains: three isolated spaces (R6.1B)
+
+DAN.OS keeps three separate worlds — `🏠 personal`, `🧳 travelon`, `🛠 tech`.
+Knowledge, tasks, mail, calendar and memory of one are invisible to the others;
+a personal note can never surface inside a business answer. The active domain is
+chosen server-side and the model cannot change it.
+
+- `/domain` — show the active domain and switch it with buttons;
+  `/domain travelon` switches directly (`/personal` and `/tech` are aliases).
+  `/travelon` stays the business pulse, it is NOT a switch.
+- Everything you do — uploads, forwards, notes, questions, goals, habits,
+  drafts, calendar actions — happens in whatever domain is active at that moment.
+- `/accounts` — connect Google accounts and **assign each one to a domain**.
+  After the R6.1B migration every existing account is unassigned; until you
+  assign it, Gmail/Calendar/Drive for that domain will honestly say there is no
+  account. A new `/connect_google` binds the account to the domain you are in;
+  reconnecting never moves an account between domains.
+- `/domain_audit` — owner-only integrity report: how many resources sit in each
+  domain, unassigned accounts, parent/child mismatches. Counts only, no content.
+- **Legacy note:** the migration never guesses a domain from content. Anything
+  that historically landed in the wrong domain is not moved automatically — to
+  re-file it, re-upload the material while that domain is active.
+
 - `/kb_security_scan` (owner-only) — one local, bounded, idempotent pass over
   the existing base. Zero provider calls; counts-only report; nothing deleted.
 - `AUTO_WIKI_COMPILE_ENABLED` (default `false`) — automatic wiki compilation

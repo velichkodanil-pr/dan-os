@@ -28,12 +28,12 @@ async def test_tool_search_knowledge(db):
     """Business facts stay findable (R6.1A replaced the credential fixture:
     the tool must find WHO and WHERE, never a password)."""
     from app.core.ingest import ingest_document
-    await ingest_document(db, user_id=OWNER, title="Партнери",
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Партнери",
                           text="Other | Toco UA | toco-tour.example | "
                                "менеджер i.k@travelon.to | ЄДРПОУ 46140224"
                                + "\n\n" + "\n\n".join(f"рядок {i}" for i in range(30)),
                           source_type="drive", source_ref="x1")
-    raw = await chat_tools.run_tool(db, OWNER, "search_knowledge",
+    raw = await chat_tools.run_tool(db, OWNER, "personal", "search_knowledge",
                                     {"query": "реквізити Toco"})
     data = json.loads(raw)
     assert data["found"] >= 1
@@ -42,19 +42,22 @@ async def test_tool_search_knowledge(db):
 
 @pytest.mark.asyncio
 async def test_tool_recent_mail_no_google(db):
-    raw = await chat_tools.run_tool(db, OWNER, "get_recent_mail", {})
-    assert "connect_google" in json.loads(raw)["error"]
+    raw = await chat_tools.run_tool(db, OWNER, "personal", "get_recent_mail", {})
+    # no account assigned to this domain -> honest error pointing at /accounts
+    assert "/accounts" in json.loads(raw)["error"]
 
 
 @pytest.mark.asyncio
 async def test_tool_unknown_denied(db):
-    raw = await chat_tools.run_tool(db, OWNER, "delete_everything", {})
+    raw = await chat_tools.run_tool(db, OWNER, "personal", "delete_everything", {})
     assert "не дозволено" in json.loads(raw)["error"]
 
 
 @pytest.mark.asyncio
 async def test_tool_travelon_unconfigured(db):
-    raw = await chat_tools.run_tool(db, OWNER, "travelon_pulse", {})
+    # in the travelon domain the gate passes; the token is unset in tests, so
+    # the executor returns an honest "not connected" error (still an error key)
+    raw = await chat_tools.run_tool(db, OWNER, "travelon", "travelon_pulse", {})
     assert "error" in json.loads(raw)
 
 
@@ -84,7 +87,7 @@ async def test_chat_loop_calls_tool_then_answers(db, monkeypatch):
     monkeypatch.setattr(chat, "_call_api", fake_api)
 
     reply = await chat.chat_reply("що по задачах?", db=db, user_id=OWNER,
-                                  profile=[], history=[])
+                                  domain="personal", profile=[], history=[])
     assert reply == "У тебе 0 відкритих задач ✅"
     assert calls["n"] == 2
 
@@ -99,7 +102,7 @@ async def test_chat_loop_gives_up_after_rounds(db, monkeypatch):
             {"type": "tool_use", "id": "x", "name": "get_tasks", "input": {}}]}
     monkeypatch.setattr(chat, "_call_api", always_tools)
     reply = await chat.chat_reply("зациклись", db=db, user_id=OWNER,
-                                  profile=[], history=[])
+                                  domain="personal", profile=[], history=[])
     assert reply is None  # falls back gracefully
 
 
@@ -128,14 +131,15 @@ async def test_xlsx_each_sheet_is_own_document(db):
                  "i.k@travelon.to", "депозит 30%"]],
     })
     results = await ingest_xlsx_by_sheets(
-        db, user_id=OWNER, filename="Travelon Project.xlsx", data=data,
-        source_type="drive", source_ref="TP1")
+        db, user_id=OWNER, domain="personal", filename="Travelon Project.xlsx",
+        data=data, source_type="drive", source_ref="TP1")
     titles = [r.document.title for r in results if r.document]
     assert any("аркуш «Продукт»" in t for t in titles)
     assert any("аркуш «DMC»" in t for t in titles)
     # the business row from the LAST tab is searchable (no credential involved)
     from app.core import rag
-    chunks = await rag.retrieve(db, user_id=OWNER, query="Toco депозит умови")
+    chunks = await rag.retrieve(db, user_id=OWNER, domain="personal",
+                                query="Toco депозит умови")
     assert any("i.k@travelon.to" in c.text for c in chunks)
 
 
@@ -147,7 +151,7 @@ async def test_compose_new_email_flow(db, monkeypatch):
     from app.core.orchestrator import Orchestrator
     from app.models import GoogleCredential
     cred = GoogleCredential(user_id=OWNER, account_email="me@gmail.com",
-                            label="me", refresh_token_enc="enc")
+                            label="me", domain="personal", refresh_token_enc="enc")
     db.add(cred)
     await db.commit()
 

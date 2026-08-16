@@ -79,7 +79,7 @@ async def test_draft_approve_idempotent(db, monkeypatch):
         calls.append(kw)
         return "draft123"
 
-    async def fake_access(_db, _uid):
+    async def fake_access(_db, _uid, _domain):
         return "tok"
 
     monkeypatch.setattr(google_client, "gmail_create_draft", fake_create)
@@ -106,7 +106,10 @@ async def test_weekly_coverage_report(db):
     db.add(KnowledgeGap(user_id=OWNER, question="Скільки коштує трансфер у Хургаді?"))
     db.add(KnowledgeGap(user_id=OWNER, question="Який розклад рейсів на Мадейру?"))
     await db.commit()
-    text = await weekly_coverage_report(db, OWNER)
-    assert "Тижневий звіт" in text and "трансфер" in text
+    # R6.1B: weekly_coverage_report now returns ONE domain's labelled section
+    # (the global "Тижневий звіт" header moved to send_weekly, which stitches
+    # the per-domain sections together). The section still lists the gaps.
+    text = await weekly_coverage_report(db, OWNER, "personal")
+    assert text is not None and "Особисте" in text and "трансфер" in text
     gaps = (await db.execute(select(KnowledgeGap))).scalars().all()
     assert all(g.resolved for g in gaps)

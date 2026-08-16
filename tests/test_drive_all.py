@@ -92,7 +92,7 @@ async def test_ingest_document_parts_no_truncation(db):
              "депозит 30%")
     assert len(text) > PART_CHARS  # would have been truncated before
     results = await ingest_document_parts(
-        db, user_id=111, title="Доступи.xlsx", text=text,
+        db, user_id=111, domain="personal", title="Доступи.xlsx", text=text,
         source_type="drive", source_ref="file123",
         meta={"modifiedTime": "2026-08-13T00:00:00Z"})
     assert len(results) >= 2
@@ -115,7 +115,7 @@ async def test_rag_keyword_fallback_finds_requisites_row(db):
     from app.core.ingest import ingest_document
     from app.core import rag
     await ingest_document(
-        db, user_id=111, title="Реквізити партнерів (DMC)",
+        db, user_id=111, domain="personal", title="Реквізити партнерів (DMC)",
         text=("== Аркуш: DMC ==\n\nРеквізити операторів\n\n"
               "Other | Toco UA | https://toco-tour.example | ЄДРПОУ 46140224 | "
               "IBAN UA213223130000026007233566001\n\n"
@@ -123,11 +123,12 @@ async def test_rag_keyword_fallback_finds_requisites_row(db):
         source_type="drive", source_ref="dmc1")
     # thematic decoys that would crowd out the row in pure vector search
     await ingest_document(
-        db, user_id=111, title="Реєстр передоплат ТОКО",
+        db, user_id=111, domain="personal", title="Реєстр передоплат ТОКО",
         text="\n\n".join(f"ТОКО Україна платіж {i} на суму {i*100} грн"
                          for i in range(40)),
         source_type="drive", source_ref="reg1")
-    chunks = await rag.retrieve(db, user_id=111, query="реквізити Toco?")
+    chunks = await rag.retrieve(db, user_id=111, domain="personal",
+                                query="реквізити Toco?")
     joined = " ".join(c.text for c in chunks)
     assert "UA213223130000026007233566001" in joined
 
@@ -138,13 +139,14 @@ async def test_rag_cyrillic_query_finds_latin_brand(db):
     from app.core.ingest import ingest_document
     from app.core import rag
     await ingest_document(
-        db, user_id=111, title="Умови операторів (DMC)",
+        db, user_id=111, domain="personal", title="Умови операторів (DMC)",
         text=("Умови роботи з операторами\n\n"
               "Other | Toco UA | https://toco-tour.example | ЄДРПОУ 46140224 | "
               "депозит 30%\n\n"
               + "\n\n".join(f"Нейтральний рядок {i} про бронювання" for i in range(30))),
         source_type="drive", source_ref="dmc2")
-    chunks = await rag.retrieve(db, user_id=111, query="реквізити ТОКО Україна?")
+    chunks = await rag.retrieve(db, user_id=111, domain="personal",
+                                query="реквізити ТОКО Україна?")
     joined = " ".join(c.text for c in chunks)
     assert "46140224" in joined
 
@@ -190,13 +192,16 @@ def test_xlsx_broken_dimensions_tail_survives():
 @pytest.mark.asyncio
 async def test_delete_stale_versions(db):
     from app.core.ingest import delete_stale_versions, ingest_document
-    old = await ingest_document(db, user_id=111, title="Файл.xlsx",
+    old = await ingest_document(db, user_id=111, domain="personal",
+                                title="Файл.xlsx",
                                 text="Стара обрізана версія файла з даними " * 5,
                                 source_type="drive", source_ref="FID1")
-    new = await ingest_document(db, user_id=111, title="Файл.xlsx (ч.1)",
+    new = await ingest_document(db, user_id=111, domain="personal",
+                                title="Файл.xlsx (ч.1)",
                                 text="Нова повна версія файла з хвостом і паролями " * 5,
                                 source_type="drive", source_ref="FID1")
-    removed = await delete_stale_versions(db, user_id=111, source_ref="FID1",
+    removed = await delete_stale_versions(db, user_id=111, domain="personal",
+                                          source_ref="FID1",
                                           keep_doc_ids={new.document.id})
     assert removed == 1
     from sqlalchemy import select

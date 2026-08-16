@@ -62,12 +62,16 @@ async def _rank_with_haiku(emails: list[dict]) -> str | None:
         return None
 
 
-async def build_digest(db, user_id: int) -> str | None:
-    """Returns HTML digest across all connected accounts, or None when quiet."""
+async def build_digest(db, user_id: int, domain) -> str | None:
+    """Returns an HTML digest for ONE domain's accounts, or None when quiet.
+
+    Domain-scoped: the digest ranks mail through Haiku (a model call), so each
+    call must see only one domain's inbox — a scheduled digest across domains is
+    composed from separate per-domain calls with explicit headers (§14)."""
     if not settings.google_client_id:
         return None
     try:
-        accounts = await google_client.get_accounts(db, user_id)
+        accounts = await google_client.get_accounts(db, user_id, domain)
     except Exception:
         logger.exception("digest: accounts lookup failed")
         return None
@@ -92,4 +96,5 @@ async def build_digest(db, user_id: int) -> str | None:
     ranked = await _rank_with_haiku(emails[:12])
     if not ranked:
         ranked = "\n".join(f"• {m['from']} — {m['subject']}" for m in emails[:12])
-    return f"📬 <b>Поштовий дайджест</b>\n{ranked}"
+    from app.core.domains import label
+    return f"📬 <b>Поштовий дайджест — {label(domain)}</b>\n{ranked}"

@@ -54,8 +54,13 @@ async def test_admin_ingest_happy_path_and_dedupe(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_admin_ingest_validation(db, monkeypatch):
     monkeypatch.setattr(settings, "admin_token", "S3CRET")
-    assert (await _post({"title": "X", "text": "мало"}, "S3CRET")).status_code == 400
-    r = await _post({"title": "X", "text": TEXT, "domain": "hack"}, "S3CRET")
-    assert r.status_code == 200  # unknown domain falls back to personal
+    # text too short -> 400 (checked before domain)
+    assert (await _post({"title": "X", "text": "мало", "domain": "personal"},
+                        "S3CRET")).status_code == 400
+    # §13: an unknown domain is REJECTED (400), never silently 'personal'
+    assert (await _post({"title": "X", "text": TEXT, "domain": "hack"},
+                        "S3CRET")).status_code == 400
+    # §13: a MISSING domain is also rejected — no silent default
+    assert (await _post({"title": "X", "text": TEXT}, "S3CRET")).status_code == 400
     docs = (await db.execute(select(Document))).scalars().all()
-    assert all(d.domain == "personal" for d in docs)
+    assert docs == []

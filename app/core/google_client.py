@@ -37,25 +37,38 @@ def _fernet() -> Fernet:
 
 # ---------- signed state ----------
 
-def sign_state(user_id: int, ttl: int = 900) -> str:
+def sign_state(user_id: int, domain, ttl: int = 900) -> str:
+    """Signed OAuth state carrying the ACTIVE domain (§11).
+
+    The domain the account will be bound to is decided server-side, here, and
+    travels through Google inside a signed, short-lived token — never as a
+    plain query param the callback would otherwise have to trust."""
+    from app.core.domains import parse_domain
+    dom = parse_domain(domain).value
     exp = int(time.time()) + ttl
-    msg = f"{user_id}.{exp}"
-    sig = hmac.new(settings.webhook_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:32]
+    msg = f"{user_id}.{dom}.{exp}"
+    sig = hmac.new(settings.webhook_secret.encode(), msg.encode(),
+                   hashlib.sha256).hexdigest()[:32]
     return f"{msg}.{sig}"
 
 
-def verify_state(state: str) -> int | None:
+def verify_state(state: str):
+    """Return (user_id, Domain) for a valid state, else None.
+
+    Fail-closed on a bad signature, an expired token, or an unknown domain."""
+    from app.core.domains import parse_domain
     try:
-        uid_s, exp_s, sig = state.split(".")
-        msg = f"{uid_s}.{exp_s}"
+        uid_s, dom_s, exp_s, sig = state.split(".")
+        msg = f"{uid_s}.{dom_s}.{exp_s}"
         expected = hmac.new(settings.webhook_secret.encode(), msg.encode(),
                             hashlib.sha256).hexdigest()[:32]
         if not hmac.compare_digest(sig, expected):
             return None
         if int(exp_s) < time.time():
             return None
-        return int(uid_s)
+        return int(uid_s), parse_domain(dom_s)
     except (ValueError, AttributeError):
+        # ValueError also covers DomainError (invalid domain) -> fail closed
         return None
 
 
@@ -65,7 +78,7 @@ def redirect_uri() -> str:
     return f"{settings.public_url}/google/oauth/callback"
 
 
-def auth_url(user_id: int) -> str:
+def auth_url(user_id: int, domain) -> str:
     params = httpx.QueryParams({
         "client_id": settings.google_client_id,
         "redirect_uri": redirect_uri(),
@@ -73,7 +86,7 @@ def auth_url(user_id: int) -> str:
         "scope": SCOPES,
         "access_type": "offline",
         "prompt": "consent",
-        "state": sign_state(user_id),
+        "state": sign_state(user_id, domain),
     })
     return f"{AUTH_URL}?{params}"
 
@@ -127,8 +140,16 @@ async def _account_email(tokens: dict) -> str:
     return ""
 
 
-async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
-    """Adds/updates ONE Google account (multi-account). Returns the account email."""
+async def store_tokens(db: AsyncSession, user_id: int, tokens: dict,
+                       domain=None) -> str:
+    """Adds/updates ONE Google account (multi-account). Returns the account email.
+
+    Domain binding (§11): a BRAND-NEW account is bound to `domain` — the signed
+    active domain from the OAuth state. A RECONNECT of an existing account
+    refreshes tokens only and NEVER changes its domain: an account assigned to
+    travelon cannot be silently moved to personal by reconnecting from there,
+    and an unassigned (NULL) account stays unassigned until the owner assigns it
+    in /accounts. Domain is never guessed from the email or content."""
     from sqlalchemy import select
     refresh = tokens.get("refresh_token")
     if not refresh:
@@ -142,6 +163,11 @@ async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
     if cred is None:
         cred = GoogleCredential(user_id=user_id, account_email=email,
                                 label=email.split("@")[0][:32])
+        # New account only: bind to the signed active domain. If the caller had
+        # no domain context it stays unassigned (NULL) — never guessed.
+        if domain is not None:
+            from app.core.domains import parse_domain
+            cred.domain = parse_domain(domain).value
     cred.refresh_token_enc = _fernet().encrypt(refresh.encode()).decode()
     cred.access_token = tokens.get("access_token", "")
     cred.access_expires_at = datetime.now(timezone.utc) + timedelta(
@@ -152,7 +178,30 @@ async def store_tokens(db: AsyncSession, user_id: int, tokens: dict) -> str:
     return email
 
 
-async def get_accounts(db: AsyncSession, user_id: int) -> list[GoogleCredential]:
+async def get_accounts(db: AsyncSession, user_id: int,
+                       domain) -> list[GoogleCredential]:
+    """Accounts assigned to THIS domain (§11).
+
+    Domain-scoped tools — Gmail, Calendar, Drive — use only these. Unassigned
+    (domain IS NULL) accounts are deliberately excluded: an account with no
+    conscious domain assignment is never used by a domain-scoped operation, and
+    there is NO 'all accounts' fallback. For account management, use
+    get_all_accounts."""
+    from sqlalchemy import select
+    from app.core.domains import parse_domain
+    dom = parse_domain(domain).value
+    return list((await db.execute(
+        select(GoogleCredential).where(
+            GoogleCredential.user_id == user_id,
+            GoogleCredential.domain == dom)
+        .order_by(GoogleCredential.created_at))).scalars().all())
+
+
+async def get_all_accounts(db: AsyncSession,
+                           user_id: int) -> list[GoogleCredential]:
+    """Every account regardless of domain, including unassigned (NULL). ONLY for
+    the owner's account-management surfaces (/accounts) — never for a
+    domain-scoped tool, brief, ingest, or retrieval path."""
     from sqlalchemy import select
     return list((await db.execute(
         select(GoogleCredential).where(GoogleCredential.user_id == user_id)
@@ -183,9 +232,13 @@ async def access_for(db: AsyncSession, cred: GoogleCredential) -> str | None:
     return cred.access_token
 
 
-async def get_access_token(db: AsyncSession, user_id: int) -> str | None:
-    """Back-compat: token of the FIRST connected account."""
-    accounts = await get_accounts(db, user_id)
+async def get_access_token(db: AsyncSession, user_id: int,
+                           domain) -> str | None:
+    """Access token of the FIRST account assigned to `domain`.
+
+    Fallback for a resource that has no explicitly bound credential. Still
+    domain-scoped — it never crosses into another domain's account."""
+    accounts = await get_accounts(db, user_id, domain)
     return await access_for(db, accounts[0]) if accounts else None
 
 

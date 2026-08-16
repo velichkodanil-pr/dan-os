@@ -30,10 +30,10 @@ def test_chunking():
 
 # 2. Ingest is deduplicated by content hash
 async def test_ingest_dedupe(db):
-    r1 = await ingest_document(db, user_id=OWNER, title="Умови.txt", text=DOC_TEXT,
-                               source_type="telegram_file")
-    r2 = await ingest_document(db, user_id=OWNER, title="Умови копія.txt", text=DOC_TEXT,
-                               source_type="telegram_file")
+    r1 = await ingest_document(db, user_id=OWNER, domain="personal", title="Умови.txt",
+                               text=DOC_TEXT, source_type="telegram_file")
+    r2 = await ingest_document(db, user_id=OWNER, domain="personal", title="Умови копія.txt",
+                               text=DOC_TEXT, source_type="telegram_file")
     assert r1.status == "indexed" and r1.chunks > 0
     assert r2.status == "duplicate"
     assert await _count(db, Document) == 1
@@ -42,10 +42,10 @@ async def test_ingest_dedupe(db):
 
 # 3. Retrieval returns the right chunk with provenance (mock embedder: exact text match)
 async def test_retrieval_provenance(db):
-    await ingest_document(db, user_id=OWNER, title="Умови оператора.txt", text=DOC_TEXT,
-                          source_type="telegram_file")
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Умови оператора.txt",
+                          text=DOC_TEXT, source_type="telegram_file")
     query = "Комісія по напрямку Єгипет становить дванадцять відсотків для всіх агентів."
-    found = await rag.retrieve(db, user_id=OWNER, query=query)
+    found = await rag.retrieve(db, user_id=OWNER, domain="personal", query=query)
     assert found, "expected a matching chunk"
     assert "Єгипет" in found[0].text
     assert found[0].title == "Умови оператора.txt"
@@ -64,8 +64,8 @@ async def test_gap_logged_for_unanswered_question(db):
 
 # 5. Question with knowledge available does NOT log a gap
 async def test_no_gap_when_knowledge_found(db):
-    await ingest_document(db, user_id=OWNER, title="Умови.txt", text=DOC_TEXT,
-                          source_type="telegram_file")
+    await ingest_document(db, user_id=OWNER, domain="personal", title="Умови.txt",
+                          text=DOC_TEXT, source_type="telegram_file")
     await Orchestrator().handle_note(
         db, user_id=OWNER,
         text="Комісія по напрямку Єгипет становить дванадцять відсотків для всіх агентів?",

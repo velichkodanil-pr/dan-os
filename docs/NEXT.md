@@ -1,46 +1,42 @@
 # NEXT — the one authorized round
 
-## Round 6.1A.1 — Secret boundary hardening (CURRENT, code complete)
+## Round 6.1B — Domain isolation (CURRENT, code complete, NOT deployed)
 
-The authorized round right now. Code is complete locally and NOT deployed.
-Remaining steps, in order:
+The authorized round right now. Code is complete locally and NOT deployed; the
+migration has run only against local databases. **"Code complete" is not "live".**
+Do not call production done, and do NOT start the next round, until every step
+below has happened and been verified in production:
 
-1. Review and deploy the hotfix commit.
-2. Run `/kb_security_scan` in production — this is a scanner-v2 pass and the
-   v1 completion does not count. Record the counts in STATUS.md.
-3. Only then may R6.1B start.
+1. Review the single commit `feat(r6.1b): enforce domain isolation end to end`.
+2. Deploy it, then run the Alembic migration on production
+   (`a7b1c2d3e4f5`, down_revision `f6a1b2c3d4e7`). It is idempotent and does no
+   provider calls, no embeddings, no content reads — pure schema + parent-based
+   backfill.
+3. **Assign Google accounts to domains** in `/accounts`. After the migration
+   every existing account is UNASSIGNED (domain = NULL) and therefore used by no
+   domain-scoped tool. Until the owner assigns each account, Gmail / Calendar /
+   Drive will honestly report "no account for this domain". This is deliberate —
+   domain is never guessed from the email.
+4. Verify live: `/domain` switches and persists; a personal note never surfaces
+   in a travelon answer and vice-versa; TravelON tools work only in the travelon
+   domain; `/domain_audit` looks sane; the R6.1A.1 secret behaviour is intact
+   (a password question still returns «не зберігаю»; a hard token is still
+   blocked).
+5. Understand that any legacy resource that landed in the wrong domain is NOT
+   moved automatically. Mis-classified material must be consciously re-uploaded
+   in the correct domain (see the runbook note in README).
 
-**R6.1B is BLOCKED** until both the hotfix is deployed and the scanner-v2
-production scan has completed.
+Only after all of that is the next round authorized.
 
-### Deferred out of this round (deliberately)
+### Deferred out of this round (deliberately — do NOT start)
 
-- **Local STT.** Voice audio reaches the external transcription provider
-  before any scan can run — an unavoidable ordering, not a bug we can gate
-  around. A local Whisper-class model is the only real fix; it is a round of
-  its own, not a line item in a security hotfix.
-- Containment COLUMNS for Proposal / PendingDraft / Task / Goal / Habit /
-  KnowledgeGap. v2 records findings for these and the read paths apply the
-  scan filter, which contains them without a migration. Dedicated status
-  columns would be cleaner and belong with R6.2's schema work.
-
-## Round 6.1B — Domain isolation (BLOCKED until R6.1A.1 is deployed and scanned)
-
-R6.1A closed the credential leak. The next round closes the second half of
-the same architectural gap: `domain` (personal | travelon | tech) exists on
-almost every table but is not enforced as a boundary — retrieval, wiki lookup
-and chat context mix domains freely, and a personal note can surface inside a
-business answer.
-
-Scope sketch (to be specified before implementation):
-
-- domain as an enforced filter on retrieval, wiki lookup and compilation, not
-  just a stored column;
-- an explicit active-domain concept for chat and tools;
-- domain-aware provenance in answers;
-- migration + tests; no UI beyond what the Telegram flow needs.
-
-Blocked on nothing. Do NOT start it in the same round as anything else.
+- **R6.2** wiki revisions / durable compile queue (below).
+- **R6.3** confirmed save-answer flow (below).
+- **Local STT.** Voice audio still reaches the external transcription provider
+  before any scan can run — unchanged by R6.1B.
+- Any semantic/LLM re-classification of legacy rows into domains. The migration
+  is deterministic and parent-based on purpose; guessing domains from content is
+  explicitly out of scope, now and later.
 
 ## Round 6.2 — Wiki revisions & durable compile queue (later, separate round)
 

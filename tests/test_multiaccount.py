@@ -25,16 +25,17 @@ def _tokens():
 async def test_store_tokens_multi_upsert(db, monkeypatch):
     settings.cred_key = Fernet.generate_key().decode()
     await _fake_email(monkeypatch, "personal@gmail.com")
-    e1 = await google_client.store_tokens(db, OWNER, _tokens())
+    e1 = await google_client.store_tokens(db, OWNER, _tokens(), domain="personal")
     await _fake_email(monkeypatch, "work@travelon.ua")
-    e2 = await google_client.store_tokens(db, OWNER, _tokens())
+    e2 = await google_client.store_tokens(db, OWNER, _tokens(), domain="personal")
     await _fake_email(monkeypatch, "personal@gmail.com")
-    await google_client.store_tokens(db, OWNER, _tokens())  # re-consent same acc
+    await google_client.store_tokens(db, OWNER, _tokens(),
+                                     domain="personal")  # re-consent same acc
     assert e1 == "personal@gmail.com" and e2 == "work@travelon.ua"
     count = (await db.execute(
         select(func.count()).select_from(GoogleCredential))).scalar_one()
     assert count == 2
-    accounts = await google_client.get_accounts(db, OWNER)
+    accounts = await google_client.get_accounts(db, OWNER, "personal")
     assert [a.account_email for a in accounts] == ["personal@gmail.com", "work@travelon.ua"]
     assert accounts[0].label == "personal"
 
@@ -43,8 +44,8 @@ async def test_store_tokens_multi_upsert(db, monkeypatch):
 async def test_access_for_uses_cached_token(db, monkeypatch):
     settings.cred_key = Fernet.generate_key().decode()
     await _fake_email(monkeypatch, "one@gmail.com")
-    await google_client.store_tokens(db, OWNER, _tokens())
-    cred = (await google_client.get_accounts(db, OWNER))[0]
+    await google_client.store_tokens(db, OWNER, _tokens(), domain="personal")
+    cred = (await google_client.get_accounts(db, OWNER, "personal"))[0]
     assert await google_client.access_for(db, cred) == "a1"
 
 

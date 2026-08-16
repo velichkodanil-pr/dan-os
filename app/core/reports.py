@@ -41,28 +41,44 @@ async def _suggest_with_haiku(gaps: list[str]) -> str | None:
         return None
 
 
-async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
+async def weekly_coverage_report(db: AsyncSession, user_id: int,
+                                 domain) -> str | None:
+    """ONE domain's weekly coverage section (§6, §14).
+
+    Domain-scoped: gaps, counts and the Haiku source-suggestion call all run per
+    domain, so questions from different domains never share a prompt. Returns
+    None for a domain with nothing to report. The caller composes the full
+    Sunday report from separate per-domain sections under a single header."""
+    from app.core.domains import Domain, label
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
     gaps = (await db.execute(
         select(KnowledgeGap).where(
             KnowledgeGap.user_id == user_id,
+            KnowledgeGap.domain == domain,
             KnowledgeGap.resolved.is_(False),
             KnowledgeGap.created_at >= week_ago)
         .order_by(KnowledgeGap.created_at))).scalars().all()
     done = (await db.execute(select(func.count()).select_from(Task).where(
-        Task.user_id == user_id, Task.status == "completed",
+        Task.user_id == user_id, Task.domain == domain,
+        Task.status == "completed",
         Task.updated_at >= week_ago))).scalar_one()
     docs = (await db.execute(select(func.count()).select_from(Document).where(
-        Document.user_id == user_id))).scalar_one()
+        Document.user_id == user_id, Document.domain == domain))).scalar_one()
     facts = (await db.execute(select(func.count()).select_from(MemoryItem).where(
-        MemoryItem.user_id == user_id, MemoryItem.status == "confirmed"))).scalar_one()
+        MemoryItem.user_id == user_id, MemoryItem.domain == domain,
+        MemoryItem.status == "confirmed"))).scalar_one()
 
-    lines = ["📊 <b>Тижневий звіт DAN.OS</b>",
+    # Skip a silent, empty domain (nothing this week and no base) — except
+    # travelon, whose external business block is worth surfacing regardless.
+    if not (gaps or done or docs or facts) and domain != Domain.TRAVELON:
+        return None
+
+    lines = [f"\n<b>{label(domain)}</b>",
              f"Виконано задач: {done} · документів у базі: {docs} · фактів у пам'яті: {facts}"]
 
     try:  # coach progress (R4)
         from app.core import coach
-        block = await coach.weekly_block(db, user_id)
+        block = await coach.weekly_block(db, user_id, domain)
         if block:
             lines.append(block)
     except Exception:
@@ -70,19 +86,20 @@ async def weekly_coverage_report(db: AsyncSession, user_id: int) -> str:
 
     try:  # compiled knowledge health (R6)
         from app.core import wiki
-        w_block = wiki.lint_block(await wiki.lint(db, user_id))
+        w_block = wiki.lint_block(await wiki.lint(db, user_id, domain))
         if w_block:
             lines.append(w_block)
     except Exception:
         logger.exception("wiki lint block failed")
 
-    try:  # TravelON week summary (owner pack)
-        from app.core import travelon
-        t_block = await travelon.weekly_block()
-        if t_block:
-            lines.append(t_block)
-    except Exception:
-        logger.exception("travelon weekly block failed")
+    if domain == Domain.TRAVELON:  # TravelON week summary — travelon only
+        try:
+            from app.core import travelon
+            t_block = await travelon.weekly_block()
+            if t_block:
+                lines.append(t_block)
+        except Exception:
+            logger.exception("travelon weekly block failed")
 
     if gaps:
         gap_texts = [g.question for g in gaps]

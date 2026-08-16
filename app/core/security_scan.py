@@ -71,6 +71,7 @@ class ScanReport:
     chat_in_quarantine: int = 0
     open_findings: int = 0
     categories: list = field(default_factory=list)
+    by_domain: dict = field(default_factory=dict)  # open findings per domain (§13)
     completed: bool = False
 
     def as_dict(self) -> dict:
@@ -265,8 +266,8 @@ async def _scan_chat(db: AsyncSession, user_id: int, report: ScanReport) -> None
                 row.provider_eligible = False
                 report.chat_contained += 1
             if await security.record_finding(
-                    db, user_id=user_id, resource_type="chat_log",
-                    resource_id=row.id, result=result):
+                    db, user_id=user_id, domain=row.domain,
+                    resource_type="chat_log", resource_id=row.id, result=result):
                 report.findings += 1
 
 
@@ -342,8 +343,8 @@ async def _scan_other_entities(db: AsyncSession, user_id: int,
                 _note(report, result)
                 report.other_flagged += 1
                 if await security.record_finding(
-                        db, user_id=user_id, resource_type=kind,
-                        resource_id=row.id, result=result):
+                        db, user_id=user_id, domain=getattr(row, "domain", "personal"),
+                        resource_type=kind, resource_id=row.id, result=result):
                     report.findings += 1
 
 
@@ -387,6 +388,14 @@ async def run_scan(db: AsyncSession, *, user_id: int) -> ScanReport:
         select(func.count()).select_from(SecurityFinding).where(
             SecurityFinding.user_id == user_id,
             SecurityFinding.status == "open"))).scalar_one()
+    # §13: the scan stays global, but the report is grouped by domain — counts
+    # only, so «what is still held, and where» is legible without any content.
+    report.by_domain = {
+        (dom or "—"): int(cnt) for dom, cnt in (await db.execute(
+            select(SecurityFinding.domain, func.count())
+            .where(SecurityFinding.user_id == user_id,
+                   SecurityFinding.status == "open")
+            .group_by(SecurityFinding.domain))).all()}
 
     report.completed = True
     await security.mark_scan_complete(db)
@@ -532,8 +541,12 @@ def report_text(report: ScanReport) -> str:
         f"• відкритих записів у журналі: {report.open_findings}\n"
     )
     cats = (f"Типи: {', '.join(report.categories)}\n" if report.categories else "")
+    by_dom = ""
+    if report.by_domain:
+        parts = ", ".join(f"{d}: {n}" for d, n in sorted(report.by_domain.items()))
+        by_dom = f"У розрізі доменів (відкриті записи): {parts}\n"
     tail = ("\nКарантин — це ізоляція, не видалення. У карантині лишились "
             "тільки технічні секрети (API-ключі, токени, приватні ключі) — "
             "їм не місце в базі знань. Ключі з тих файлів варто перевипустити "
             "там, де їх видавали. Значення сюди не надсилай.")
-    return head + body + released + found + cats + tail
+    return head + body + released + found + cats + by_dom + tail

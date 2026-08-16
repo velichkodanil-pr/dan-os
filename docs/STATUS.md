@@ -1,6 +1,63 @@
 # STATUS
 
-_Last verified: 2026-08-15 (prod = 31db942 / r6.1a; R6.1A.1 hotfix is CODE COMPLETE locally and NOT deployed — scanner v2 has never run in production)_
+_Last verified: 2026-08-16 (R6.1B is CODE COMPLETE locally and NOT deployed; base HEAD = 7057434 / r6.1a.1). "Code complete" is not "deployed": no R6.1B code, migration or `/domain` behaviour has run in production. Production is unchanged by this round._
+
+## R6.1B — End-to-end domain isolation: CODE COMPLETE, NOT DEPLOYED
+
+`personal` / `travelon` / `tech` are now real security/context boundaries, not
+just columns. The active domain is decided server-side at request start, travels
+down as an immutable snapshot, and is never taken from model output, tool
+arguments or client JSON. See DECISIONS.md for the reasoning.
+
+- **Central model** (`app/core/domains.py`): `Domain` StrEnum, `parse_domain`
+  (fail-closed — empty/unknown/model-generated → `DomainError`, never a silent
+  "personal"), `get_active_domain` / `set_active_domain`, labels/descriptions.
+- **Active domain**: `UserState.active_domain` (NOT NULL, CHECK, backfilled
+  personal). Telegram `/domain [personal|travelon|tech]` (+ `/personal`,
+  `/tech` aliases; `/travelon` stays the business pulse, NOT a switch);
+  switching is audited (old→new) and clears any pending edit state.
+- **Schema**: `domain` added to every resource that reaches model context, the
+  UI, actions, retrieval or background jobs (chat_log, knowledge_chunks,
+  knowledge_gaps, reminders, habits, habit_log, pending_drafts/cal_actions/
+  cal_creates; nullable on google_credentials = unassigned, and audit_log =
+  global). DB CHECK constraints on all of them; unique constraints scoped by
+  domain (`documents(user,domain,content_hash)`, `wiki_pages(user,domain,slug)`,
+  `raw_events(user,domain,dedupe_key)`, security-finding idempotency).
+- **Isolation enforced** in RAG (vector + keyword, no fallback), wiki
+  (find/search/index/compile/lint/pending), memory, chat history, tasks, goals,
+  habits, agent tools, and Google accounts. Every core function takes `domain`
+  as a mandatory argument — no production signature defaults to "personal".
+- **Agent tools**: `run_tool(db, user_id, domain, name, args)` with a
+  server-injected domain; `domain` is not in any tool's input schema, so the
+  model cannot choose it. TravelON tools are hidden outside the travelon domain
+  and refused (zero network) at dispatch — two independent layers.
+- **Google**: accounts are domain-scoped (`get_accounts(db, user_id, domain)`;
+  `get_all_accounts` only for `/accounts`); OAuth carries the active domain in
+  HMAC-signed state; a new account binds to the signed domain, a reconnect never
+  changes an existing account's domain, and domain is never guessed from email
+  or content. `/accounts` shows and assigns each account's domain.
+- **Cross-domain rituals** (brief, check-in, digest, weekly report) are built
+  from SEPARATE per-domain queries with explicit domain headers; the digest's
+  Haiku call sees one domain at a time. No LLM prompt ever mixes domains.
+- **Legacy/integrity**: backfill inherits from a trusted parent only
+  (chunk←document, reminder←task, habit_log←habit); orphans → personal;
+  google_credentials → NULL; no content/LLM classification. Owner-only
+  `/domain_audit` reports counts per domain, parent/child mismatches, unassigned
+  accounts and dup slug/hash — counts only, never content.
+- **Migration**: one Alembic migration `a7b1c2d3e4f5` (down_revision
+  `f6a1b2c3d4e7`), idempotent per step. Verified: upgrade from the current prod
+  revision with seeded data (parent-inherited backfill correct, no rows lost),
+  fresh-from-zero, single head, CHECK/uniques/indexes present, invalid domain
+  rejected, downgrade→re-upgrade clean, replay is a no-op.
+- **Tests**: **320 passed** locally (52 new in `tests/test_r61b.py`: the
+  adversarial isolation matrix + 6 ordered-pair cross-domain checks). The
+  R6.1A.1 secret gates were re-run and do NOT regress.
+
+Not deployed. Next steps are in NEXT.md (review → deploy → migrate → assign
+Google accounts → verify live). Production is unchanged.
+
+---
+
 
 ## R6.1A.1 — Secret boundary hardening: CODE COMPLETE, NOT DEPLOYED
 

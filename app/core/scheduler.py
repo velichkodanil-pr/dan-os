@@ -47,8 +47,17 @@ async def _fire_due(send_message) -> None:
                 continue
             late = (datetime.now(timezone.utc) - reminder.fire_at).total_seconds() > 120
             local = reminder.fire_at.astimezone(ZoneInfo(settings.tz_name))
-            text = (f"⏰ <b>Нагадування{' (запізніле)' if late else ''}:</b> {task.title}\n"
-                    f"🕐 {local.strftime('%H:%M %d.%m')}")
+            # §9: a reminder fires regardless of the active domain, but the
+            # message is LABELLED with the reminder's own (stored) domain, so a
+            # travelon reminder arriving while active=personal is unambiguous.
+            dom_tag = ""
+            try:
+                from app.core.domains import label as _dlabel
+                dom_tag = f" · {_dlabel(reminder.domain)}"
+            except Exception:
+                pass
+            text = (f"⏰ <b>Нагадування{' (запізніле)' if late else ''}:</b>{dom_tag}\n"
+                    f"{task.title}\n🕐 {local.strftime('%H:%M %d.%m')}")
             try:
                 await send_message(reminder.user_id, text, task_id=str(task.id))
                 reminder.status = "fired"

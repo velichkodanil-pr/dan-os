@@ -217,13 +217,17 @@ class IngestResult:
 
 
 async def ingest_document(
-    db: AsyncSession, *, user_id: int, title: str, text: str,
-    source_type: str, source_ref: str = "", domain: str = "personal",
-    meta: dict | None = None,
+    db: AsyncSession, *, user_id: int, domain: str, title: str, text: str,
+    source_type: str, source_ref: str = "", meta: dict | None = None,
 ) -> IngestResult:
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value          # fail-closed
     content_hash = hashlib.sha256(text.strip().lower().encode()).hexdigest()
-    existing = (await db.execute(
-        select(Document).where(Document.content_hash == content_hash))).scalar_one_or_none()
+    # dedupe is DOMAIN-SCOPED: the same file in personal and travelon are two
+    # independent documents (R6.1B §5).
+    existing = (await db.execute(select(Document).where(
+        Document.user_id == user_id, Document.domain == domain,
+        Document.content_hash == content_hash))).scalar_one_or_none()
     if existing:
         await audit(db, actor=f"user:{user_id}", action="ingest", resource_type="document",
                     resource_id=existing.id, outcome="dedupe",
@@ -243,6 +247,7 @@ async def ingest_document(
         # dedupe id that is NOT a fingerprint of the secret (see security.py)
         fingerprint = security.quarantine_fingerprint(text)
         prior = (await db.execute(select(Document).where(
+            Document.user_id == user_id, Document.domain == domain,
             Document.content_hash == fingerprint))).scalar_one_or_none()
         if prior is not None:
             return IngestResult(status="quarantined", document=prior, chunks=0,
@@ -291,8 +296,8 @@ async def ingest_document(
         await db.rollback()
         return IngestResult(status="duplicate")
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-        db.add(KnowledgeChunk(document_id=doc.id, user_id=user_id, seq=i,
-                              text=chunk, embedding=emb))
+        db.add(KnowledgeChunk(document_id=doc.id, user_id=user_id, domain=domain,
+                              seq=i, text=chunk, embedding=emb))
     await audit(db, actor=f"user:{user_id}", action="ingest", resource_type="document",
                 resource_id=doc.id, policy_level="L1",
                 title=security.safe_title(title), chunks=len(chunks))
@@ -300,7 +305,7 @@ async def ingest_document(
     return IngestResult(status="indexed", document=doc, chunks=len(chunks))
 
 
-async def delete_stale_versions(db: AsyncSession, *, user_id: int,
+async def delete_stale_versions(db: AsyncSession, *, user_id: int, domain: str,
                                 source_ref: str, keep_doc_ids: set) -> int:
     """Drop older ingested versions of the same Drive file (truncated extracts,
     first-tab csv exports) so retrieval sees ONE current version. Chunks go via
@@ -309,6 +314,7 @@ async def delete_stale_versions(db: AsyncSession, *, user_id: int,
         return 0
     stale = (await db.execute(
         select(Document).where(Document.user_id == user_id,
+                               Document.domain == domain,
                                Document.source_type == "drive",
                                Document.source_ref == source_ref))).scalars().all()
     removed = 0
@@ -325,9 +331,8 @@ async def delete_stale_versions(db: AsyncSession, *, user_id: int,
 
 
 async def ingest_xlsx_by_sheets(
-    db: AsyncSession, *, user_id: int, filename: str, data: bytes,
-    source_type: str, source_ref: str = "", domain: str = "personal",
-    meta: dict | None = None,
+    db: AsyncSession, *, user_id: int, domain: str, filename: str, data: bytes,
+    source_type: str, source_ref: str = "", meta: dict | None = None,
 ) -> list[IngestResult]:
     """Every sheet -> its own document «файл · аркуш "Назва"» (parts if huge)."""
     try:
@@ -344,9 +349,8 @@ async def ingest_xlsx_by_sheets(
             continue
         title = f"{base} · аркуш «{sheet_title[:40]}»"
         results.extend(await ingest_document_parts(
-            db, user_id=user_id, title=title, text=text,
-            source_type=source_type, source_ref=source_ref,
-            domain=domain, meta=meta))
+            db, user_id=user_id, domain=domain, title=title, text=text,
+            source_type=source_type, source_ref=source_ref, meta=meta))
     return results
 
 
@@ -354,9 +358,8 @@ PART_CHARS = 350_000
 
 
 async def ingest_document_parts(
-    db: AsyncSession, *, user_id: int, title: str, text: str,
-    source_type: str, source_ref: str = "", domain: str = "personal",
-    meta: dict | None = None,
+    db: AsyncSession, *, user_id: int, domain: str, title: str, text: str,
+    source_type: str, source_ref: str = "", meta: dict | None = None,
 ) -> list[IngestResult]:
     """Oversized texts (huge workbooks/exports) become «title (ч.N)» parts.
 
@@ -367,12 +370,12 @@ async def ingest_document_parts(
     scan = security.scan_envelope(text, title, source_ref, meta)
     if scan.blocked:
         return [await ingest_document(
-            db, user_id=user_id, title=title, text=text, source_type=source_type,
-            source_ref=source_ref, domain=domain, meta=meta)]
+            db, user_id=user_id, domain=domain, title=title, text=text,
+            source_type=source_type, source_ref=source_ref, meta=meta)]
     if len(text) <= PART_CHARS:
-        return [await ingest_document(db, user_id=user_id, title=title, text=text,
-                                      source_type=source_type, source_ref=source_ref,
-                                      domain=domain, meta=meta)]
+        return [await ingest_document(db, user_id=user_id, domain=domain, title=title,
+                                      text=text, source_type=source_type,
+                                      source_ref=source_ref, meta=meta)]
     paragraphs = text.split("\n\n")
     parts: list[str] = []
     current: list[str] = []
@@ -388,7 +391,7 @@ async def ingest_document_parts(
     results = []
     for i, part in enumerate(parts, 1):
         results.append(await ingest_document(
-            db, user_id=user_id, title=f"{title} (ч.{i})" if len(parts) > 1 else title,
-            text=part, source_type=source_type, source_ref=source_ref,
-            domain=domain, meta=meta))
+            db, user_id=user_id, domain=domain,
+            title=f"{title} (ч.{i})" if len(parts) > 1 else title,
+            text=part, source_type=source_type, source_ref=source_ref, meta=meta))
     return results

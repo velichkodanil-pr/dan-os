@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from app import db as database
 from app.config import settings
 from app.core import coach
+from app.core.domains import Domain, get_active_domain, label as domain_label
 from app.core.orchestrator import Orchestrator
 from app.core.policy import PolicyDenied
 from app.models import Document, MemoryItem, Proposal
@@ -53,25 +54,31 @@ async def overview(x_telegram_init_data: str = Header(default="")) -> dict:
     user_id = _auth(x_telegram_init_data)
     now = datetime.now(ZoneInfo(settings.tz_name))
     async with database.session() as db:
-        today = await orch.today(db, user_id=user_id)
+        # §13: the domain is the server-side active domain from UserState — the
+        # client cannot spoof it. Every panel below is scoped to it.
+        domain = await get_active_domain(db, user_id)
+        today = await orch.today(db, user_id=user_id, domain=domain)
         approvals = (await db.execute(
             select(Proposal).where(Proposal.user_id == user_id,
+                                   Proposal.domain == domain,
                                    Proposal.status == "proposed")
             .order_by(Proposal.created_at.desc()).limit(10))).scalars().all()
         candidates = (await db.execute(
             select(MemoryItem).where(MemoryItem.user_id == user_id,
+                                     MemoryItem.domain == domain,
                                      MemoryItem.status == "candidate")
             .order_by(MemoryItem.created_at).limit(15))).scalars().all()
         confirmed = (await db.execute(
             select(MemoryItem).where(MemoryItem.user_id == user_id,
+                                     MemoryItem.domain == domain,
                                      MemoryItem.status == "confirmed")
             .order_by(MemoryItem.created_at.desc()).limit(30))).scalars().all()
         kb_docs = (await db.execute(  # searchable documents only (R6.1A)
             select(func.count()).select_from(Document)
-            .where(Document.user_id == user_id,
+            .where(Document.user_id == user_id, Document.domain == domain,
                    Document.status != "quarantined"))).scalar_one()
-        goals = await coach.list_goals(db, user_id)
-        habits = await coach.habits_overview(db, user_id)
+        goals = await coach.list_goals(db, user_id, domain)
+        habits = await coach.habits_overview(db, user_id, domain)
 
     def task_json(t):
         return {"id": str(t.id), "title": t.title, "due": _fmt_due(t.due_at),
@@ -96,18 +103,24 @@ async def overview(x_telegram_init_data: str = Header(default="")) -> dict:
         "goals": [{"id": str(g.id), "title": g.title} for g in goals],
         "habits": habits,
         "kb_docs": kb_docs,
-        "travelon": bool(settings.travelon_token),
+        # TravelON tab only in the travelon domain (isolation, §13)
+        "travelon": bool(settings.travelon_token) and domain == Domain.TRAVELON,
+        "domain": domain.value,
+        "domain_label": domain_label(domain),
     }
 
 
 @router.get("/webapp/api/travelon")
 async def travelon_tab(x_telegram_init_data: str = Header(default="")) -> dict:
     """Pulse for the 🧳 tab (app_state-cached; first load can take ~20s)."""
-    _auth(x_telegram_init_data)
+    user_id = _auth(x_telegram_init_data)
     from app.core import travelon
     if not travelon.configured():
         return {"configured": False, "data": None}
     async with database.session() as db:
+        # TravelON pulse is served ONLY in the travelon domain (§10/§13).
+        if await get_active_domain(db, user_id) != Domain.TRAVELON:
+            return {"configured": False, "data": None, "wrong_domain": True}
         data = await travelon.pulse_data(db)
     return {"configured": True, "data": data}
 
@@ -128,10 +141,13 @@ async def act(req: ActRequest, x_telegram_init_data: str = Header(default="")) -
             raise HTTPException(status_code=400, detail="bad title")
         try:
             async with database.session() as db:
+                domain = await get_active_domain(db, user_id)  # server-side, §13
                 if req.action == "goal_add":
-                    await coach.create_goal(db, user_id=user_id, title=title)
+                    await coach.create_goal(db, user_id=user_id, domain=domain,
+                                            title=title)
                 else:
-                    await coach.create_habit(db, user_id=user_id, title=title)
+                    await coach.create_habit(db, user_id=user_id, domain=domain,
+                                             title=title)
         except PolicyDenied as e:
             raise HTTPException(status_code=403, detail=e.decision.reason)
         return {"status": "created"}

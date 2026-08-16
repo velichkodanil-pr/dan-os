@@ -11,13 +11,20 @@ from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer,
-    String, Text, UniqueConstraint,
+    BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey,
+    Index, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 EMBED_DIM = 1536
+
+ALLOWED_DOMAINS = ("personal", "travelon", "tech")
+_DOMAIN_SQL = "domain IN ('personal','travelon','tech')"
+
+
+def _domain_check(name: str) -> CheckConstraint:
+    return CheckConstraint(_DOMAIN_SQL, name=name)
 
 
 def utcnow() -> datetime:
@@ -30,10 +37,14 @@ class Base(DeclarativeBase):
 
 class RawEvent(Base):
     __tablename__ = "raw_events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "domain", "dedupe_key", name="uq_rawevent_scope"),
+        _domain_check("ck_raw_events_domain"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     source: Mapped[str] = mapped_column(String(32), default="telegram")
     event_type: Mapped[str] = mapped_column(String(64))
-    dedupe_key: Mapped[str] = mapped_column(String(128), unique=True)
+    dedupe_key: Mapped[str] = mapped_column(String(128))
     user_id: Mapped[int] = mapped_column(BigInteger)
     domain: Mapped[str] = mapped_column(String(32), default="personal")
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -42,6 +53,7 @@ class RawEvent(Base):
 
 class Proposal(Base):
     __tablename__ = "proposals"
+    __table_args__ = (_domain_check("ck_proposals_domain"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     raw_event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("raw_events.id"))
     kind: Mapped[str] = mapped_column(String(16), default="task")
@@ -57,7 +69,9 @@ class Proposal(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
-    __table_args__ = (UniqueConstraint("proposal_id", name="uq_tasks_proposal"),)
+    __table_args__ = (UniqueConstraint("proposal_id", name="uq_tasks_proposal"),
+                      _domain_check("ck_tasks_domain"),
+                      Index("ix_tasks_domain", "user_id", "domain", "status"))
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     proposal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("proposals.id"), nullable=True)
     user_id: Mapped[int] = mapped_column(BigInteger)
@@ -74,6 +88,7 @@ class Reminder(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"))
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="scheduled")  # scheduled|fired|cancelled
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -84,6 +99,8 @@ Index("ix_reminders_due", Reminder.status, Reminder.fire_at)
 
 class MemoryItem(Base):
     __tablename__ = "memory_items"
+    __table_args__ = (_domain_check("ck_memory_items_domain"),
+                      Index("ix_memory_domain", "user_id", "domain", "status"))
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
     domain: Mapped[str] = mapped_column(String(32), default="personal")
@@ -108,12 +125,19 @@ class AuditRecord(Base):
     resource_id: Mapped[str] = mapped_column(String(64), default="")
     outcome: Mapped[str] = mapped_column(String(16), default="ok")  # ok|denied|dedupe|error
     policy_level: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # R6.1B: nullable — NULL for genuinely global/system operations
+    domain: Mapped[str | None] = mapped_column(String(32), nullable=True)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)  # short metadata only — never full bodies/secrets
 
 
 class UserState(Base):
     __tablename__ = "user_state"
+    __table_args__ = (CheckConstraint(
+        "active_domain IN ('personal','travelon','tech')",
+        name="ck_user_state_domain"),)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # R6.1B: the server-side active domain. NOT NULL, backfilled to personal.
+    active_domain: Mapped[str] = mapped_column(String(16), default="personal")
     pending_edit_proposal: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -121,11 +145,18 @@ class UserState(Base):
 class GoogleCredential(Base):
     """OAuth tokens for one Google account (multi-account; Fernet-encrypted)."""
     __tablename__ = "google_credentials"
-    __table_args__ = (UniqueConstraint("user_id", "account_email", name="uq_gcred_user_email"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "account_email", name="uq_gcred_user_email"),
+        CheckConstraint("domain IS NULL OR domain IN ('personal','travelon','tech')",
+                        name="ck_gcred_domain"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
     account_email: Mapped[str] = mapped_column(String(255))
     label: Mapped[str] = mapped_column(String(64), default="")  # short tag, e.g. mail local part
+    # R6.1B: which domain this account serves. NULL = unassigned (never used
+    # by any domain-scoped tool until the owner assigns it). Never guessed.
+    domain: Mapped[str | None] = mapped_column(String(32), nullable=True)
     refresh_token_enc: Mapped[str] = mapped_column(Text)
     access_token: Mapped[str] = mapped_column(Text, default="")
     access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -145,13 +176,18 @@ class AppState(Base):
 class Document(Base):
     """Ingested knowledge source (raw -> indexed) with provenance."""
     __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "domain", "content_hash", name="uq_document_scope"),
+        _domain_check("ck_documents_domain"),
+        Index("ix_documents_domain", "user_id", "domain", "status"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
     domain: Mapped[str] = mapped_column(String(32), default="personal")
     title: Mapped[str] = mapped_column(Text)
     source_type: Mapped[str] = mapped_column(String(32))  # telegram_file|telegram_forward|drive|email
     source_ref: Mapped[str] = mapped_column(Text, default="")
-    content_hash: Mapped[str] = mapped_column(String(64), unique=True)  # dedupe
+    content_hash: Mapped[str] = mapped_column(String(64))  # dedupe (scoped by user+domain)
     # raw|indexed|failed|quarantined (quarantined = contained, never retrieved)
     status: Mapped[str] = mapped_column(String(16), default="indexed")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -161,9 +197,12 @@ class Document(Base):
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
+    __table_args__ = (_domain_check("ck_knowledge_chunks_domain"),
+                      Index("ix_chunks_domain", "user_id", "domain"))
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     seq: Mapped[int] = mapped_column(Integer, default=0)
     text: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list] = mapped_column(Vector(EMBED_DIM))
@@ -173,8 +212,11 @@ class KnowledgeChunk(Base):
 class KnowledgeGap(Base):
     """Questions the knowledge base could not answer — feeds the coverage map (R3b)."""
     __tablename__ = "knowledge_gaps"
+    __table_args__ = (_domain_check("ck_knowledge_gaps_domain"),
+                      Index("ix_gaps_domain", "user_id", "domain", "resolved"))
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     question: Mapped[str] = mapped_column(Text)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -185,6 +227,7 @@ class PendingDraft(Base):
     __tablename__ = "pending_drafts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     to_addr: Mapped[str] = mapped_column(Text)
     subject: Mapped[str] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text)
@@ -199,8 +242,11 @@ class PendingDraft(Base):
 class ChatLog(Base):
     """Short conversation window for multi-turn chat context (trimmed reads)."""
     __tablename__ = "chat_log"
+    __table_args__ = (_domain_check("ck_chat_log_domain"),
+                      Index("ix_chat_log_domain", "user_id", "domain", "ts"))
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     role: Mapped[str] = mapped_column(String(8))  # user|bot
     text: Mapped[str] = mapped_column(Text)
     # False = contained turn: never replayed into a provider prompt (R6.1A)
@@ -213,6 +259,7 @@ class PendingCalAction(Base):
     __tablename__ = "pending_cal_actions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     calendar_id: Mapped[str] = mapped_column(Text)
     event_id: Mapped[str] = mapped_column(Text)
@@ -228,6 +275,7 @@ class PendingCalCreate(Base):
     __tablename__ = "pending_cal_creates"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     title: Mapped[str] = mapped_column(Text)
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -238,6 +286,8 @@ class PendingCalCreate(Base):
 class Goal(Base):
     """Coach (R4): a mid-term goal Danylo tracks with DAN.OS."""
     __tablename__ = "goals"
+    __table_args__ = (_domain_check("ck_goals_domain"),
+                      Index("ix_goals_domain", "user_id", "domain", "status"))
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
     domain: Mapped[str] = mapped_column(String(32), default="personal")
@@ -251,8 +301,11 @@ class Goal(Base):
 class Habit(Base):
     """Coach (R4): a daily habit; done-marks live in habit_log."""
     __tablename__ = "habits"
+    __table_args__ = (_domain_check("ck_habits_domain"),
+                      Index("ix_habits_domain", "user_id", "domain", "active"))
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     title: Mapped[str] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -265,6 +318,7 @@ class HabitLog(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
     user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
     log_date: Mapped[str] = mapped_column(String(10))  # ISO YYYY-MM-DD in Europe/Kyiv
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -278,7 +332,11 @@ class WikiPage(Base):
     explicit contradictions section. kind: concept | entity | archive.
     """
     __tablename__ = "wiki_pages"
-    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_wiki_slug"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "domain", "slug", name="uq_wiki_slug"),
+        _domain_check("ck_wiki_pages_domain"),
+        Index("ix_wiki_domain", "user_id", "domain", "status"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger)
     kind: Mapped[str] = mapped_column(String(16), default="entity")
@@ -313,8 +371,9 @@ class SecurityFinding(Base):
     """
     __tablename__ = "security_findings"
     __table_args__ = (
-        UniqueConstraint("user_id", "resource_type", "resource_id",
+        UniqueConstraint("user_id", "domain", "resource_type", "resource_id",
                          "scanner_version", name="uq_secfinding_resource"),
+        _domain_check("ck_security_findings_domain"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger)

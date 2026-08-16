@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core import briefs, google_client
+from app.core.domains import Domain
 from app.core.orchestrator import NotOwner, Orchestrator
 from app.core.scheduler import ritual_due
 from app.models import ChatLog, MemoryItem
@@ -43,12 +44,12 @@ async def test_memory_review_owner_only(db):
         await orch().confirm_memory(db, user_id=STRANGER, item_id=item.id)
 
 
-# 3. OAuth state: valid roundtrip; tampering and expiry rejected
+# 3. OAuth state: valid roundtrip carries user_id AND domain; tamper/expiry rejected
 def test_oauth_state_sign_verify():
-    state = google_client.sign_state(OWNER)
-    assert google_client.verify_state(state) == OWNER
+    state = google_client.sign_state(OWNER, "travelon")
+    assert google_client.verify_state(state) == (OWNER, Domain.TRAVELON)
     assert google_client.verify_state(state[:-4] + "beef") is None
-    expired = google_client.sign_state(OWNER, ttl=-10)
+    expired = google_client.sign_state(OWNER, "travelon", ttl=-10)
     assert google_client.verify_state(expired) is None
     assert google_client.verify_state("garbage") is None
 
@@ -65,15 +66,22 @@ def test_ritual_due_once_per_day():
     assert ritual_due(None, after, "broken") is False
 
 
-# 5. Brief without Google still contains tasks and the connect hint
+# 5. Brief without Google still builds and shows this domain's tasks
 async def test_brief_without_google(db):
-    await orch().handle_note(db, user_id=OWNER,
-                             text="нагадай завтра о 10 подзвонити в банк",
-                             dedupe_key="r2b1")
-    today = await orch().today(db, user_id=OWNER)
-    text = await briefs.morning_brief(db, OWNER, today)
-    assert "Бриф" in text
-    assert "connect_google" in text
+    from datetime import datetime, timezone
+
+    from app.core.domains import label
+    from app.models import Task
+
+    # a task due today lands in the personal-domain morning-brief section
+    db.add(Task(user_id=OWNER, domain="personal", title="Подзвонити в банк",
+                due_at=datetime.now(timezone.utc)))
+    await db.commit()
+    today = await orch().today(db, user_id=OWNER, domain="personal")
+    text = await briefs.morning_brief(db, OWNER, "personal", today)
+    assert text is not None                    # brief builds without Google connected
+    assert label("personal") in text           # per-domain section header
+    assert "Подзвонити в банк" in text          # and it shows the task
 
 
 # 6. Chat replies are logged into the short conversation window

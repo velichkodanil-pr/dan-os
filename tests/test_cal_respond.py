@@ -72,14 +72,15 @@ async def _patch_google(monkeypatch, matches, db=None):
     from app.models import GoogleCredential
     if db is not None:  # real row so confirm_cal_action can db.get() it
         cred = GoogleCredential(user_id=OWNER, account_email="me@gmail.com",
-                                label="me", refresh_token_enc="enc")
+                                label="me", domain="personal",
+                                refresh_token_enc="enc")
         db.add(cred)
         await db.commit()
     else:
         cred = SimpleNamespace(id=uuid.uuid4(), account_email="me@gmail.com",
-                               label="me")
+                               label="me", domain="personal")
 
-    async def fake_accounts(_db, _uid):
+    async def fake_accounts(_db, _uid, _domain=None):
         return [cred]
 
     async def fake_access(_db, _c):

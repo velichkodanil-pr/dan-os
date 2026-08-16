@@ -56,13 +56,14 @@ def test_initdata_foreign_user_id_comes_back_verbatim():
 
 @pytest.mark.asyncio
 async def test_goal_lifecycle(db):
-    goal = await coach.create_goal(db, user_id=111, title="Запустити зимовий сезон")
-    active = await coach.list_goals(db, 111)
+    goal = await coach.create_goal(db, user_id=111, domain="personal",
+                                   title="Запустити зимовий сезон")
+    active = await coach.list_goals(db, 111, "personal")
     assert [g.id for g in active] == [goal.id]
 
     assert await coach.set_goal_status(db, user_id=111, goal_id=goal.id,
                                        status="done") == "done"
-    assert await coach.list_goals(db, 111) == []
+    assert await coach.list_goals(db, 111, "personal") == []
     # idempotent: second click returns the settled status, does not flip anything
     assert await coach.set_goal_status(db, user_id=111, goal_id=goal.id,
                                        status="dropped") == "done"
@@ -70,7 +71,7 @@ async def test_goal_lifecycle(db):
 
 @pytest.mark.asyncio
 async def test_goal_foreign_user_not_found(db):
-    goal = await coach.create_goal(db, user_id=111, title="X")
+    goal = await coach.create_goal(db, user_id=111, domain="personal", title="X")
     assert await coach.set_goal_status(db, user_id=222, goal_id=goal.id,
                                        status="done") == "not_found"
 
@@ -79,23 +80,24 @@ async def test_goal_foreign_user_not_found(db):
 
 @pytest.mark.asyncio
 async def test_habit_toggle_and_week_count(db):
-    habit = await coach.create_habit(db, user_id=111, title="Зарядка")
+    habit = await coach.create_habit(db, user_id=111, domain="personal",
+                                     title="Зарядка")
     days = coach.week_dates()
 
     assert await coach.toggle_habit(db, user_id=111, habit_id=habit.id) == "done"
-    over = await coach.habits_overview(db, 111)
+    over = await coach.habits_overview(db, 111, "personal")
     assert over[0]["done_today"] is True and over[0]["week_count"] == 1
 
     # mark an earlier weekday too (if the week has one)
     if len(days) > 1:
         assert await coach.toggle_habit(db, user_id=111, habit_id=habit.id,
                                         day=days[0]) == "done"
-        over = await coach.habits_overview(db, 111)
+        over = await coach.habits_overview(db, 111, "personal")
         assert over[0]["week_count"] == 2
 
     # toggle today off -> reversible
     assert await coach.toggle_habit(db, user_id=111, habit_id=habit.id) == "undone"
-    over = await coach.habits_overview(db, 111)
+    over = await coach.habits_overview(db, 111, "personal")
     assert over[0]["done_today"] is False
 
 

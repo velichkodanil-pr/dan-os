@@ -3,7 +3,9 @@ import subprocess
 import sys
 
 # Environment MUST be set before importing app modules (settings is import-time).
-TEST_DB = "postgresql://postgres:postgres@localhost:5432/danos_test"
+# DANOS_TEST_DB lets parallel test runs use isolated databases (CI / local fan-out).
+TEST_DB = os.environ.get(
+    "DANOS_TEST_DB", "postgresql://postgres:postgres@localhost:5432/danos_test")
 os.environ.update({
     "DATABASE_URL": TEST_DB,
     "EXTRACTOR": "mock",

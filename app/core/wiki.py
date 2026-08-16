@@ -116,13 +116,22 @@ def _active():
     return WikiPage.status != "quarantined"
 
 
-async def find_page(db: AsyncSession, user_id: int, name: str) -> WikiPage | None:
-    """Exact-ish lookup by slug or any alias (spelling-insensitive)."""
+def _scope(user_id: int, domain: str):
+    """Every wiki read/write is scoped to one user AND one domain (R6.1B).
+    A travelon alias can never resolve a personal page."""
+    from app.core.domains import parse_domain
+    return (WikiPage.user_id == user_id,
+            WikiPage.domain == parse_domain(domain).value)
+
+
+async def find_page(db: AsyncSession, user_id: int, domain: str,
+                    name: str) -> WikiPage | None:
+    """Exact-ish lookup by slug or any alias, within the active domain."""
     wanted = alias_variants(name)
     if not wanted:
         return None
     rows = (await db.execute(
-        select(WikiPage).where(WikiPage.user_id == user_id,
+        select(WikiPage).where(*_scope(user_id, domain),
                                _active()))).scalars().all()
     best = None
     for page in rows:
@@ -142,7 +151,7 @@ async def find_page(db: AsyncSession, user_id: int, name: str) -> WikiPage | Non
     return best
 
 
-async def search_pages(db: AsyncSession, user_id: int, query: str,
+async def search_pages(db: AsyncSession, user_id: int, domain: str, query: str,
                        limit: int = 5) -> list[WikiPage]:
     """Alias/title/summary search (deterministic) — cheap and precise."""
     q = (query or "").strip()
@@ -161,7 +170,7 @@ async def search_pages(db: AsyncSession, user_id: int, query: str,
             conds.append(aliases_text.ilike(f"%{lat}%"))
             conds.append(aliases_text.ilike(f"%{lat.replace('k', 'c')}%"))
     rows = (await db.execute(
-        select(WikiPage).where(WikiPage.user_id == user_id, _active(), or_(*conds))
+        select(WikiPage).where(*_scope(user_id, domain), _active(), or_(*conds))
         .order_by(WikiPage.updated_at.desc()).limit(limit * 3))).scalars().all()
     # rank: alias/title hit first, then recency
     def score(p: WikiPage) -> int:
@@ -170,10 +179,11 @@ async def search_pages(db: AsyncSession, user_id: int, query: str,
     return sorted(rows, key=lambda p: (-score(p), p.kind == "archive"))[:limit]
 
 
-async def render_index(db: AsyncSession, user_id: int, limit: int = 60) -> str:
+async def render_index(db: AsyncSession, user_id: int, domain: str,
+                       limit: int = 60) -> str:
     """Compact map of the knowledge base — the agent reads this FIRST."""
     rows = (await db.execute(
-        select(WikiPage).where(WikiPage.user_id == user_id, _active())
+        select(WikiPage).where(*_scope(user_id, domain), _active())
         .order_by(WikiPage.kind, WikiPage.title).limit(limit * 3))).scalars().all()
     if not rows:
         return "Вікі порожня — сторінки з'являться після /wiki_build або нових джерел."
@@ -217,10 +227,10 @@ def page_text(page: WikiPage) -> str:
 
 # ---------- write ----------
 
-async def upsert_page(db: AsyncSession, *, user_id: int, kind: str, title: str,
-                      summary: str, content: str, aliases: list[str],
+async def upsert_page(db: AsyncSession, *, user_id: int, domain: str, kind: str,
+                      title: str, summary: str, content: str, aliases: list[str],
                       tags: list[str], source: dict | None = None,
-                      contradictions: str = "", domain: str = "personal",
+                      contradictions: str = "",
                       slug: str | None = None) -> tuple[WikiPage, str]:
     """Create or replace a page. Returns (page, "created"|"updated").
 
@@ -228,14 +238,19 @@ async def upsert_page(db: AsyncSession, *, user_id: int, kind: str, title: str,
     write a secret into a page writes it as a quarantined page instead, so
     no reader path can ever pick it up.
     """
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value
     _check("wiki.write")
     slug = slug or slugify(title)
     scan = security.scan_parts(title, summary, content, contradictions)
+    # slug uniqueness is DOMAIN-scoped: the same slug may exist per domain
     page = (await db.execute(select(WikiPage).where(
-        WikiPage.user_id == user_id, WikiPage.slug == slug))).scalar_one_or_none()
+        WikiPage.user_id == user_id, WikiPage.domain == domain,
+        WikiPage.slug == slug))).scalar_one_or_none()
     status = "updated" if page else "created"
     if page is None:
-        page = WikiPage(user_id=user_id, slug=slug, kind=kind if kind in KINDS else "entity")
+        page = WikiPage(user_id=user_id, domain=domain, slug=slug,
+                        kind=kind if kind in KINDS else "entity")
         db.add(page)
     page.title = title[:300]
     if scan.blocked:
@@ -354,8 +369,8 @@ def facts_to_markdown(facts: list[str]) -> str:
     return "\n".join(f"- {str(f).strip()}" for f in facts if str(f).strip())
 
 
-async def compile_source(db: AsyncSession, *, user_id: int, title: str, text: str,
-                         source_ref: str = "", domain: str = "personal",
+async def compile_source(db: AsyncSession, *, user_id: int, domain: str,
+                         title: str, text: str, source_ref: str = "",
                          source_date: str = "") -> CompileOutcome:
     """One source -> created/updated pages, with an honest status.
 
@@ -426,10 +441,10 @@ async def compile_source(db: AsyncSession, *, user_id: int, title: str, text: st
         kind = spec.get("kind") if spec.get("kind") in ("entity", "concept") else "entity"
         summary = str(spec.get("summary") or "")[:600]
 
-        existing = await find_page(db, user_id, page_title)
+        existing = await find_page(db, user_id, domain, page_title)
         for a in aliases:
             if existing is None:
-                existing = await find_page(db, user_id, a)
+                existing = await find_page(db, user_id, domain, a)
         if existing is not None and existing.kind != "archive":
             merged = _parse_json(await haiku_text(_MERGE_PROMPT.format(
                 title=existing.title, content=(existing.content or "")[:8000],
@@ -437,34 +452,35 @@ async def compile_source(db: AsyncSession, *, user_id: int, title: str, text: st
                 max_tokens=2500))
             if merged:
                 page, status = await upsert_page(
-                    db, user_id=user_id, kind=existing.kind, title=existing.title,
+                    db, user_id=user_id, domain=domain, kind=existing.kind,
+                    title=existing.title,
                     summary=str(merged.get("summary") or existing.summary),
                     content=str(merged.get("content") or existing.content),
                     contradictions=str(merged.get("contradictions") or "")
                     or existing.contradictions,
                     aliases=aliases, tags=tags or [str(t) for t in (existing.tags or [])],
-                    source=source, domain=existing.domain, slug=existing.slug)
+                    source=source, slug=existing.slug)
             else:  # merge call failed -> append facts, never lose data
                 page, status = await upsert_page(
-                    db, user_id=user_id, kind=existing.kind, title=existing.title,
-                    summary=existing.summary,
+                    db, user_id=user_id, domain=domain, kind=existing.kind,
+                    title=existing.title, summary=existing.summary,
                     content=(existing.content or "") + "\n\n## З джерела «"
                     + title[:80] + "»\n" + facts_to_markdown(facts),
                     contradictions=existing.contradictions, aliases=aliases,
                     tags=[str(t) for t in (existing.tags or [])], source=source,
-                    domain=existing.domain, slug=existing.slug)
+                    slug=existing.slug)
         else:
             page, status = await upsert_page(
-                db, user_id=user_id, kind=kind, title=page_title, summary=summary,
-                content=facts_to_markdown(facts), aliases=aliases, tags=tags,
-                source=source, domain=domain)
+                db, user_id=user_id, domain=domain, kind=kind, title=page_title,
+                summary=summary, content=facts_to_markdown(facts), aliases=aliases,
+                tags=tags, source=source)
         out.append((page.slug, status))
     if out:
         await db.commit()
     return _done(out)
 
 
-async def save_archive(db: AsyncSession, *, user_id: int, title: str,
+async def save_archive(db: AsyncSession, *, user_id: int, domain: str, title: str,
                        summary: str, body: str, used: list[str] | None = None
                        ) -> WikiPage:
     """Archive a synthesized answer as a permanent page.
@@ -477,11 +493,10 @@ async def save_archive(db: AsyncSession, *, user_id: int, title: str,
     """
     _check("wiki.archive")
     page, _status = await upsert_page(
-        db, user_id=user_id, kind="archive", title=title[:200], summary=summary,
-        content=body, aliases=[], tags=["archive"],
+        db, user_id=user_id, domain=domain, kind="archive", title=title[:200],
+        summary=summary, content=body, aliases=[], tags=["archive"],
         source={"title": "Відповідь DAN.OS", "ref": "chat",
-                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
-        domain="personal")
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")})
     if used and page.status != "quarantined":
         page.content = (page.content or "") + "\n\n## Використані сторінки\n" + \
             "\n".join(f"- {u}" for u in used[:10])
@@ -491,14 +506,16 @@ async def save_archive(db: AsyncSession, *, user_id: int, title: str,
 
 # ---------- lint (integrity report) ----------
 
-async def lint(db: AsyncSession, user_id: int) -> dict:
+async def lint(db: AsyncSession, user_id: int, domain: str) -> dict:
     """Health of the compiled layer: thin pages, no-source pages, stale, dupes."""
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value
     pages = (await db.execute(
-        select(WikiPage).where(WikiPage.user_id == user_id,
+        select(WikiPage).where(*_scope(user_id, domain),
                                _active()))).scalars().all()
     quarantined = (await db.execute(
         select(func.count()).select_from(WikiPage).where(
-            WikiPage.user_id == user_id,
+            WikiPage.user_id == user_id, WikiPage.domain == domain,
             WikiPage.status == "quarantined"))).scalar_one()
     thin = [p.title for p in pages if len((p.content or "")) < 40]
     no_source = [p.title for p in pages if not p.sources and p.kind != "archive"]
@@ -560,7 +577,8 @@ def compile_state(document) -> dict:
     return state
 
 
-async def pending_documents(db: AsyncSession, user_id: int, limit: int = 40):
+async def pending_documents(db: AsyncSession, user_id: int, domain: str,
+                            limit: int = 40):
     """Documents still worth compiling.
 
     Quarantined documents are excluded (they are contained, not queued).
@@ -569,9 +587,12 @@ async def pending_documents(db: AsyncSession, user_id: int, limit: int = 40):
     knowledge base forever. Never-attempted documents go first so a single
     stubborn file cannot starve the rest.
     """
+    from app.core.domains import parse_domain
     from app.models import Document
+    domain = parse_domain(domain).value
     rows = (await db.execute(
         select(Document).where(Document.user_id == user_id,
+                               Document.domain == domain,
                                Document.status == "indexed")
         .order_by(Document.created_at.desc()).limit(limit * 6))).scalars().all()
     fresh, retry = [], []
@@ -591,9 +612,18 @@ async def mark_compiled(db: AsyncSession, document, outcome: CompileOutcome) -> 
     await db.commit()
 
 
-async def compile_document(db: AsyncSession, *, user_id: int, document
-                           ) -> CompileOutcome:
-    """Compile ONE already-indexed document into wiki pages."""
+async def compile_document(db: AsyncSession, *, user_id: int, document,
+                           domain: str | None = None) -> CompileOutcome:
+    """Compile ONE already-indexed document into its OWN domain's wiki.
+
+    domain is validated against the document: a caller cannot compile a
+    travelon document into the personal wiki (R6.1B §7.6)."""
+    if document.user_id != user_id:
+        return CompileOutcome(status="failed", error_code="wrong_owner")
+    if domain is not None:
+        from app.core.domains import parse_domain
+        if parse_domain(domain).value != document.domain:
+            return CompileOutcome(status="failed", error_code="domain_mismatch")
     if document.status == "quarantined":
         outcome = CompileOutcome(status="quarantined", error_code="quarantined_source")
         await mark_compiled(db, document, outcome)
@@ -606,8 +636,8 @@ async def compile_document(db: AsyncSession, *, user_id: int, document
         await mark_compiled(db, document, outcome)
         return outcome
     outcome = await compile_source(
-        db, user_id=user_id, title=document.title, text=text,
-        source_ref=str(document.id), domain=document.domain,
+        db, user_id=user_id, domain=document.domain, title=document.title,
+        text=text, source_ref=str(document.id),
         source_date=document.created_at.strftime("%Y-%m-%d"))
     if outcome.status == "quarantined":
         # the source itself is contained: stop retrieving it, keep the row

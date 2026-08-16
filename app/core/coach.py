@@ -56,13 +56,15 @@ def week_dates(today: str | None = None) -> list[str]:
 
 # ---------- goals ----------
 
-async def create_goal(db: AsyncSession, *, user_id: int, title: str,
-                      domain: str = "personal") -> Goal:
+async def create_goal(db: AsyncSession, *, user_id: int, domain: str,
+                      title: str) -> Goal:
     """Raises security.SecretBlocked if the title carries a blocked secret.
 
     The check is HERE, not in the Telegram handler: /goal and the Mini App's
     goal_add both land on this function, and a gate that only guards one of
     them guards neither."""
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value
     _check("goal.create")
     await _guard_text(db, user_id, title, "goal")
     goal = Goal(user_id=user_id, title=title.strip()[:300], domain=domain)
@@ -75,9 +77,13 @@ async def create_goal(db: AsyncSession, *, user_id: int, title: str,
     return goal
 
 
-async def list_goals(db: AsyncSession, user_id: int, status: str = "active") -> list[Goal]:
+async def list_goals(db: AsyncSession, user_id: int, domain: str,
+                     status: str = "active") -> list[Goal]:
+    from app.core.domains import parse_domain
     return (await db.execute(
-        select(Goal).where(Goal.user_id == user_id, Goal.status == status)
+        select(Goal).where(Goal.user_id == user_id,
+                           Goal.domain == parse_domain(domain).value,
+                           Goal.status == status)
         .order_by(Goal.created_at))).scalars().all()
 
 
@@ -99,11 +105,14 @@ async def set_goal_status(db: AsyncSession, *, user_id: int, goal_id: uuid.UUID,
 
 # ---------- habits ----------
 
-async def create_habit(db: AsyncSession, *, user_id: int, title: str) -> Habit:
+async def create_habit(db: AsyncSession, *, user_id: int, domain: str,
+                       title: str) -> Habit:
     """Raises security.SecretBlocked if the title carries a blocked secret."""
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value
     _check("habit.create")
     await _guard_text(db, user_id, title, "habit")
-    habit = Habit(user_id=user_id, title=title.strip()[:200])
+    habit = Habit(user_id=user_id, domain=domain, title=title.strip()[:200])
     db.add(habit)
     await db.flush()
     await audit(db, actor=f"user:{user_id}", action="habit.created",
@@ -113,9 +122,12 @@ async def create_habit(db: AsyncSession, *, user_id: int, title: str) -> Habit:
     return habit
 
 
-async def list_habits(db: AsyncSession, user_id: int) -> list[Habit]:
+async def list_habits(db: AsyncSession, user_id: int, domain: str) -> list[Habit]:
+    from app.core.domains import parse_domain
     return (await db.execute(
-        select(Habit).where(Habit.user_id == user_id, Habit.active.is_(True))
+        select(Habit).where(Habit.user_id == user_id,
+                            Habit.domain == parse_domain(domain).value,
+                            Habit.active.is_(True))
         .order_by(Habit.created_at))).scalars().all()
 
 
@@ -149,7 +161,8 @@ async def toggle_habit(db: AsyncSession, *, user_id: int, habit_id: uuid.UUID,
                     day=day)
         await db.commit()
         return "undone"
-    db.add(HabitLog(habit_id=habit_id, user_id=user_id, log_date=day))
+    db.add(HabitLog(habit_id=habit_id, user_id=user_id,
+                    domain=habit.domain, log_date=day))
     try:
         await db.flush()
     except IntegrityError:  # race on double-tap: already logged — fine
@@ -161,16 +174,19 @@ async def toggle_habit(db: AsyncSession, *, user_id: int, habit_id: uuid.UUID,
     return "done"
 
 
-async def habits_overview(db: AsyncSession, user_id: int) -> list[dict]:
+async def habits_overview(db: AsyncSession, user_id: int, domain: str) -> list[dict]:
     """Active habits with today-status and current-week count."""
-    habits = await list_habits(db, user_id)
+    from app.core.domains import parse_domain
+    habits = await list_habits(db, user_id, domain)
     if not habits:
         return []
     days = week_dates()
     today = days[-1]
     rows = (await db.execute(
         select(HabitLog.habit_id, HabitLog.log_date).where(
-            HabitLog.user_id == user_id, HabitLog.log_date.in_(days)))).all()
+            HabitLog.user_id == user_id,
+            HabitLog.domain == parse_domain(domain).value,
+            HabitLog.log_date.in_(days)))).all()
     by_habit: dict = {}
     for habit_id, log_date in rows:
         by_habit.setdefault(habit_id, set()).add(log_date)
@@ -183,10 +199,10 @@ async def habits_overview(db: AsyncSession, user_id: int) -> list[dict]:
     } for h in habits]
 
 
-async def weekly_block(db: AsyncSession, user_id: int) -> str | None:
+async def weekly_block(db: AsyncSession, user_id: int, domain: str) -> str | None:
     """Goals + habits progress lines for the Sunday report (HTML)."""
-    goals = await list_goals(db, user_id)
-    overview = await habits_overview(db, user_id)
+    goals = await list_goals(db, user_id, domain)
+    overview = await habits_overview(db, user_id, domain)
     if not goals and not overview:
         return None
     lines: list[str] = []

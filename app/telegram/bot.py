@@ -17,6 +17,9 @@ from aiogram.types import (
 from app import db as database
 from app.config import APP_RELEASE, settings
 from app.core import briefs, google_client
+from app.core.domains import (
+    ALLOWED_DOMAINS, DESCRIPTIONS, Domain, get_active_domain,
+    label as domain_label, parse_domain, set_active_domain)
 from app.core.orchestrator import Orchestrator
 from app.core.policy import PolicyDenied
 from app.core.transcription import TranscriptionError, get_transcriber
@@ -36,54 +39,89 @@ def _memory_kb(item_id) -> InlineKeyboardMarkup:
     ]])
 
 
-async def send_brief(user_id: int) -> None:
-    """Morning brief (used by /brief and the 07:30 ritual)."""
+async def _active_domain(user_id: int) -> Domain:
+    """The server-side active domain for a Telegram request (its own session)."""
     async with database.session() as db:
-        today_data = await orch.today(db, user_id=user_id)
-        text = await briefs.morning_brief(db, user_id, today_data)
-    await bot_instance.send_message(user_id, text)
+        return await get_active_domain(db, user_id)
+
+
+async def send_brief(user_id: int) -> None:
+    """Morning brief (/brief and the 07:30 ritual). A cross-domain ritual built
+    from SEPARATE per-domain sections with explicit headers (§14); empty
+    domains are skipped."""
+    sections = [briefs.brief_date_header()]
+    for dom in Domain:
+        async with database.session() as db:
+            today_data = await orch.today(db, user_id=user_id, domain=dom)
+            section = await briefs.morning_brief(db, user_id, dom, today_data)
+        if section:
+            sections.append(section)
+    if len(sections) == 1:
+        sections.append("\nСьогодні нічого термінового — усі домени спокійні ✅")
+    await bot_instance.send_message(user_id, "\n".join(sections))
 
 
 async def send_checkin(user_id: int) -> None:
-    """Evening check-in: summary + habits + memory-candidate review (21:30)."""
+    """Evening check-in: per-domain summary + habits + memory-candidate review."""
     from app.core import coach
-    async with database.session() as db:
-        summary = await briefs.evening_summary(db, user_id)
-        candidates = await briefs.pending_candidates(db, user_id)
-        habits = await coach.habits_overview(db, user_id)
-    await bot_instance.send_message(user_id, summary)
-    undone = [h for h in habits if not h["done_today"]]
-    if undone:
+    summaries, all_undone, all_candidates = [], [], []
+    for dom in Domain:
+        async with database.session() as db:
+            summary = await briefs.evening_summary(db, user_id, dom)
+            candidates = await briefs.pending_candidates(db, user_id, dom)
+            habits = await coach.habits_overview(db, user_id, dom)
+        if summary:
+            summaries.append(summary)
+        all_undone += [(dom, h) for h in habits if not h["done_today"]]
+        all_candidates += [(dom, c) for c in candidates]
+    head = "🌙 <b>Вечірній підсумок</b>"
+    await bot_instance.send_message(
+        user_id, head + ("\n" + "\n".join(summaries) if summaries
+                         else "\nСьогодні порожньо."))
+    if all_undone:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"☑️ {h['title'][:30]}",
-                                  callback_data=f"hb:{h['id']}")]
-            for h in undone[:8]])
+            [InlineKeyboardButton(
+                text=f"☑️ {domain_label(dom)}: {h['title'][:22]}",
+                callback_data=f"hb:{h['id']}")]
+            for dom, h in all_undone[:8]])
         await bot_instance.send_message(
             user_id, "🏃 <b>Звички сьогодні</b> — що з цього зроблено? "
             "Тисни, щоб позначити:", reply_markup=kb)
-    if candidates:
+    if all_candidates:
         await bot_instance.send_message(
-            user_id, f"🧠 Розберемо пам'ять — кандидатів: {len(candidates)}")
-        for item in candidates:
+            user_id, f"🧠 Розберемо пам'ять — кандидатів: {len(all_candidates)}")
+        for dom, item in all_candidates:
             await bot_instance.send_message(
-                user_id, f"🧠 {item.content}", reply_markup=_memory_kb(item.id))
+                user_id, f"🧠 [{domain_label(dom)}] {item.content}",
+                reply_markup=_memory_kb(item.id))
 
 
 async def send_digest(user_id: int) -> None:
-    """Mail digest ritual (skips silently when the inbox is quiet)."""
+    """Mail digest ritual — one labeled block per domain (§14), silent when
+    every inbox is quiet."""
     from app.core.digest import build_digest
-    async with database.session() as db:
-        text = await build_digest(db, user_id)
-    if text:
-        await bot_instance.send_message(user_id, text)
+    blocks = []
+    for dom in Domain:
+        async with database.session() as db:
+            text = await build_digest(db, user_id, dom)
+        if text:
+            blocks.append(text)
+    if blocks:
+        await bot_instance.send_message(user_id, "\n\n".join(blocks))
 
 
 async def send_weekly(user_id: int) -> None:
-    """Sunday coverage report."""
+    """Sunday coverage report — one labeled section per domain (§14)."""
     from app.core.reports import weekly_coverage_report
-    async with database.session() as db:
-        text = await weekly_coverage_report(db, user_id)
-    await bot_instance.send_message(user_id, text)
+    sections = ["📊 <b>Тижневий звіт DAN.OS</b>"]
+    for dom in Domain:
+        async with database.session() as db:
+            section = await weekly_coverage_report(db, user_id, dom)
+        if section:
+            sections.append(section)
+    if len(sections) == 1:
+        sections.append("\nЦього тижня активності по доменах не було.")
+    await bot_instance.send_message(user_id, "\n".join(sections))
 
 
 async def send_debt_alert(user_id: int) -> None:
@@ -151,6 +189,9 @@ async def cmd_start(message: Message) -> None:
         "/kb_security_scan · що ізольовано: /kb_quarantine\n"
         "🎙 Ключі й токени не диктуй голосом: аудіо йде на розпізнавання "
         "ДО того, як я можу його перевірити.\n\n"
+        "🧭 <b>Домени</b> — три ізольовані простори (🏠 особисте / 🧳 TravelON / "
+        "🛠 tech). Знання, задачі, пошта й пам'ять одного не видно в іншому. "
+        "Перемкнути: /domain · перевірити цілісність: /domain_audit\n\n"
         "• текст/голосове «нагадай…» → задача з нагадуванням\n"
         "• «запам'ятай: …» → факт у пам'ять\n"
         "• «скасуй мою участь у зустрічі…» → відхилю подію в календарі (з підтвердженням)\n"
@@ -176,8 +217,95 @@ async def cmd_today(message: Message) -> None:
     if not _is_owner(message):
         return
     async with database.session() as db:
-        data = await orch.today(db, user_id=message.from_user.id)
-    await message.answer(today_card(data))
+        domain = await get_active_domain(db, message.from_user.id)
+        data = await orch.today(db, user_id=message.from_user.id, domain=domain)
+    await message.answer(f"{domain_label(domain)}\n" + today_card(data))
+
+
+def _domain_kb(active: Domain) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=("● " if d == active else "○ ") + domain_label(d),
+            callback_data=f"dom:{d.value}")]
+        for d in Domain])
+
+
+@router.message(Command("domain"))
+async def cmd_domain(message: Message) -> None:
+    """Show or switch the ACTIVE domain — the isolation boundary for everything
+    that follows. `/domain` alone shows the current one with buttons; `/domain
+    personal|travelon|tech` switches directly. TravelON is entered ONLY here (or
+    the button) — /travelon stays the business pulse, not a switch."""
+    if not _is_owner(message):
+        return
+    user_id = message.from_user.id
+    parts = (message.text or "").split()
+    if len(parts) >= 2:
+        try:
+            target = parse_domain(parts[1])
+        except Exception:
+            await message.answer(
+                "Домен має бути один із: " + ", ".join(ALLOWED_DOMAINS)
+                + ". Приклад: <code>/domain travelon</code>")
+            return
+        await _switch_domain(message, user_id, target)
+        return
+    async with database.session() as db:
+        active = await get_active_domain(db, user_id)
+    desc = "\n".join(f"{'●' if d == active else '○'} {domain_label(d)} — "
+                     f"{DESCRIPTIONS[d]}" for d in Domain)
+    await message.answer(
+        f"Активний домен: <b>{domain_label(active)}</b>\n\n{desc}\n\n"
+        "Це ізольовані простори: знання, задачі, пошта й пам'ять одного "
+        "домену не видно в іншому. Перемкнути — кнопкою нижче:",
+        reply_markup=_domain_kb(active))
+
+
+async def _switch_domain(message_or_cb, user_id: int, target: Domain) -> None:
+    """Switch active domain, audited; clears any pending edit state (§3)."""
+    from app.core.audit import audit
+    async with database.session() as db:
+        old = await get_active_domain(db, user_id)
+        await set_active_domain(db, user_id, target)
+        await audit(db, actor=f"user:{user_id}", action="domain.switched",
+                    resource_type="user_state", resource_id=str(user_id),
+                    policy_level="L1", old_domain=old.value, new_domain=target.value)
+        await db.commit()
+    text = (f"✅ Активний домен: <b>{domain_label(target)}</b>\n"
+            f"{DESCRIPTIONS[target]}.\nДані інших доменів зараз недоступні.")
+    answer = getattr(message_or_cb, "answer", None)
+    if hasattr(message_or_cb, "message"):        # CallbackQuery
+        await message_or_cb.message.answer(text)
+        await message_or_cb.answer("Перемкнено ✅")
+    else:
+        await answer(text)
+
+
+@router.message(Command("personal"))
+async def cmd_personal(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    await _switch_domain(message, message.from_user.id, Domain.PERSONAL)
+
+
+@router.message(Command("tech"))
+async def cmd_tech(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    await _switch_domain(message, message.from_user.id, Domain.TECH)
+
+
+@router.message(Command("domain_audit"))
+async def cmd_domain_audit(message: Message) -> None:
+    """Owner-only integrity report: COUNTS ONLY per domain — never any content
+    (§15). Resources per domain, unassigned Google accounts, parent/child
+    domain mismatches, open security findings per domain."""
+    if not _is_owner(message):
+        return
+    from app.core.domain_audit import domain_audit_report
+    async with database.session() as db:
+        text = await domain_audit_report(db, message.from_user.id)
+    await message.answer(text)
 
 
 @router.message(Command("brief"))
@@ -203,10 +331,13 @@ async def cmd_connect_google(message: Message) -> None:
             "Google ще не сконфігуровано на сервері — чекаю Client ID/Secret "
             "(файл danos-google-client.txt)")
         return
-    url = google_client.auth_url(message.from_user.id)
+    domain = await _active_domain(message.from_user.id)
+    url = google_client.auth_url(message.from_user.id, domain)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔐 Підключити Google", url=url)]])
     await message.answer(
+        f"Новий акаунт буде прив'язаний до домену <b>{domain_label(domain)}</b> "
+        "і використовуватиметься лише в ньому (змінити — у /accounts).\n\n"
         "Тисни кнопку й обери акаунт (можна додати кілька — кожен прохід "
         "додає ще один). На екрані дозволів постав УСІ галочки: перегляд "
         "календаря, події календаря (для відповідей на запрошення), "
@@ -254,11 +385,12 @@ async def cmd_goal(message: Message) -> None:
             "Список: /goals")
         return
     async with database.session() as db:
+        domain = await get_active_domain(db, message.from_user.id)
         goal = await coach.create_goal(db, user_id=message.from_user.id,
-                                       title=parts[1])
+                                       domain=domain, title=parts[1])
     import html as _html
     await message.answer(
-        f"🎯 Ціль додано: <b>{_html.escape(goal.title)}</b>\n"
+        f"🎯 Ціль додано ({domain_label(domain)}): <b>{_html.escape(goal.title)}</b>\n"
         "Прогрес питатиму в неділю у тижневому звіті. Список: /goals")
 
 
@@ -268,9 +400,11 @@ async def cmd_goals(message: Message) -> None:
         return
     from app.core import coach
     async with database.session() as db:
-        goals = await coach.list_goals(db, message.from_user.id)
+        domain = await get_active_domain(db, message.from_user.id)
+        goals = await coach.list_goals(db, message.from_user.id, domain)
     if not goals:
-        await message.answer("Активних цілей немає. Додати: <code>/goal текст</code>")
+        await message.answer(f"Активних цілей у домені {domain_label(domain)} "
+                             "немає. Додати: <code>/goal текст</code>")
         return
     import html as _html
     for g in goals:
@@ -294,11 +428,12 @@ async def cmd_habit(message: Message) -> None:
             "Відмічати і дивитись тиждень: /habits (і ввечері нагадаю сам)")
         return
     async with database.session() as db:
+        domain = await get_active_domain(db, message.from_user.id)
         habit = await coach.create_habit(db, user_id=message.from_user.id,
-                                         title=parts[1])
+                                         domain=domain, title=parts[1])
     import html as _html
     await message.answer(
-        f"🏃 Звичка додана: <b>{_html.escape(habit.title)}</b>\n"
+        f"🏃 Звичка додана ({domain_label(domain)}): <b>{_html.escape(habit.title)}</b>\n"
         "Відмічай у /habits або ввечері в чек-іні.")
 
 
@@ -308,9 +443,11 @@ async def cmd_habits(message: Message) -> None:
         return
     from app.core import coach
     async with database.session() as db:
-        overview = await coach.habits_overview(db, message.from_user.id)
+        domain = await get_active_domain(db, message.from_user.id)
+        overview = await coach.habits_overview(db, message.from_user.id, domain)
     if not overview:
-        await message.answer("Звичок ще немає. Додати: <code>/habit назва</code>")
+        await message.answer(f"Звичок у домені {domain_label(domain)} ще немає. "
+                             "Додати: <code>/habit назва</code>")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -325,12 +462,16 @@ async def cmd_habits(message: Message) -> None:
 
 # ---------- wiki: compiled knowledge (R6) ----------
 
-async def _wiki_build_job(user_id: int, limit: int) -> None:
-    """Background: compile indexed documents into wiki pages, with progress."""
+async def _wiki_build_job(user_id: int, domain: Domain, limit: int) -> None:
+    """Background: compile indexed documents into wiki pages, with progress.
+
+    §7: the domain is an IMMUTABLE snapshot captured when the job was launched.
+    A /domain switch mid-compile does NOT change what this job compiles — it
+    only ever touches `domain`'s documents and pages."""
     from app.core import wiki
     try:
         async with database.session() as db:
-            docs = await wiki.pending_documents(db, user_id, limit=limit)
+            docs = await wiki.pending_documents(db, user_id, domain, limit=limit)
         if not docs:
             await bot_instance.send_message(
                 user_id, "📚 Нових документів для вікі немає — усе скомпільовано ✅")
@@ -345,7 +486,7 @@ async def _wiki_build_job(user_id: int, limit: int) -> None:
                 async with database.session() as db:
                     doc = await db.merge(doc)
                     outcome = await wiki.compile_document(
-                        db, user_id=user_id, document=doc)
+                        db, user_id=user_id, document=doc, domain=domain)
                 created += sum(1 for _s, st in outcome.pages if st == "created")
                 updated += sum(1 for _s, st in outcome.pages if st == "updated")
                 if outcome.status == "quarantined":
@@ -362,7 +503,7 @@ async def _wiki_build_job(user_id: int, limit: int) -> None:
                     user_id, f"📚 {i}/{len(docs)} · нових сторінок {created}, "
                     f"оновлено {updated}…")
         async with database.session() as db:
-            report = await wiki.lint(db, user_id)
+            report = await wiki.lint(db, user_id, domain)
         extra = ""
         if quarantined:
             extra += f"\n🔒 У карантині (є секрети, не компілюю): {quarantined}."
@@ -405,10 +546,12 @@ async def cmd_wiki_build(message: Message) -> None:
         limit = min(max(int(parts[1]), 1), 200) if len(parts) > 1 else 40
     except ValueError:
         limit = 40
+    domain = await _active_domain(message.from_user.id)
     await message.answer(
-        f"📚 Стартую компіляцію знань (до {limit} документів). Це кілька хвилин — "
-        "відпишу прогрес. Повторний запуск бере наступну порцію.")
-    _asyncio.create_task(_wiki_build_job(message.from_user.id, limit))
+        f"📚 Стартую компіляцію знань домену <b>{domain_label(domain)}</b> "
+        f"(до {limit} документів). Це кілька хвилин — відпишу прогрес. "
+        "Повторний запуск бере наступну порцію.")
+    _asyncio.create_task(_wiki_build_job(message.from_user.id, domain, limit))
 
 
 @router.message(Command("wiki_lint"))
@@ -417,8 +560,9 @@ async def cmd_wiki_lint(message: Message) -> None:
         return
     from app.core import wiki
     async with database.session() as db:
-        r = await wiki.lint(db, message.from_user.id)
-    lines = [f"🧹 <b>Стан вікі:</b> {r['total']} сторінок "
+        domain = await get_active_domain(db, message.from_user.id)
+        r = await wiki.lint(db, message.from_user.id, domain)
+    lines = [f"🧹 <b>Стан вікі ({domain_label(domain)}):</b> {r['total']} сторінок "
              f"(сутності {r['entities']} · концепції {r['concepts']} · "
              f"архів {r['archives']})"]
     if r["conflicts"]:
@@ -450,17 +594,20 @@ async def cmd_wiki(message: Message) -> None:
     from app.core import wiki
     parts = (message.text or "").split(maxsplit=1)
     async with database.session() as db:
+        domain = await get_active_domain(db, message.from_user.id)
         if len(parts) < 2:
-            index = await wiki.render_index(db, message.from_user.id, limit=40)
+            index = await wiki.render_index(db, message.from_user.id, domain, limit=40)
             await message.answer(
-                "📚 <b>Вікі знань</b>\n<pre>" + _html.escape(index[:3500]) + "</pre>\n"
+                f"📚 <b>Вікі знань ({domain_label(domain)})</b>\n<pre>"
+                + _html.escape(index[:3500]) + "</pre>\n"
                 "Сторінка: <code>/wiki ТОКО</code> · оновити: /wiki_build · "
                 "перевірка: /wiki_lint")
             return
         query = parts[1].strip()
-        page = await wiki.find_page(db, message.from_user.id, query)
+        page = await wiki.find_page(db, message.from_user.id, domain, query)
         if page is None:
-            found = await wiki.search_pages(db, message.from_user.id, query, limit=6)
+            found = await wiki.search_pages(db, message.from_user.id, domain,
+                                            query, limit=6)
             if not found:
                 await message.answer(
                     f"Сторінки «{_html.escape(query)}» немає. Спробуй /wiki_build "
@@ -529,10 +676,10 @@ async def _set_drive_account(user_id: int, cred_id: str) -> None:
         await db.commit()
 
 
-async def _drive_account(db, user_id: int):
-    """Selected (or only) Google account for Drive operations."""
+async def _drive_account(db, user_id: int, domain):
+    """Selected (or only) Google account for Drive operations, in this domain."""
     from app.models import AppState
-    accounts = await google_client.get_accounts(db, user_id)
+    accounts = await google_client.get_accounts(db, user_id, domain)
     if not accounts:
         return None
     state = await db.get(AppState, f"drive_acc_{user_id}")
@@ -545,9 +692,12 @@ async def _drive_account(db, user_id: int):
 
 async def _show_drive_folders(message: Message, user_id: int) -> None:
     async with database.session() as db:
-        cred = await _drive_account(db, user_id)
+        domain = await get_active_domain(db, user_id)
+        cred = await _drive_account(db, user_id, domain)
         if cred is None:
-            await message.answer("Спершу підключи Google: /connect_google")
+            await message.answer(
+                f"Для домену {domain_label(domain)} немає Google-акаунтів — "
+                "признач у /accounts або підключи: /connect_google")
             return
         access = await google_client.access_for(db, cred)
     if not access:
@@ -576,9 +726,12 @@ async def cmd_drive(message: Message) -> None:
     if not _is_owner(message):
         return
     async with database.session() as db:
-        accounts = await google_client.get_accounts(db, message.from_user.id)
+        domain = await get_active_domain(db, message.from_user.id)
+        accounts = await google_client.get_accounts(db, message.from_user.id, domain)
     if not accounts:
-        await message.answer("Спершу підключи Google: /connect_google")
+        await message.answer(
+            f"Для домену {domain_label(domain)} немає Google-акаунтів — "
+            "признач у /accounts або підключи: /connect_google")
         return
     if len(accounts) == 1:
         await _set_drive_account(message.from_user.id, str(accounts[0].id))
@@ -622,16 +775,19 @@ async def _set_flag(key: str, value: str | None) -> None:
         await db.commit()
 
 
-async def _index_all_drive(user_id: int) -> None:
-    """Background job: index every indexable file across ALL Google accounts.
-    Hash-dedupe makes re-runs cheap; progress lands in the owner chat.
+async def _index_all_drive(user_id: int, domain: Domain) -> None:
+    """Background job: index every indexable file across this DOMAIN's Google
+    accounts. Hash-dedupe makes re-runs cheap; progress lands in the owner chat.
     A running-flag survives restarts: if a deploy kills the job, the fresh
-    container tells the owner to re-run instead of silent 'застиг'."""
+    container tells the owner to re-run instead of silent 'застиг'.
+
+    §11/§13: `domain` is an immutable snapshot — the job only ever reaches this
+    domain's accounts, and every ingested doc is stamped with it."""
     from app.core.ingest import IngestError, extract_text, ingest_document
     await _set_flag("drive_all_running", str(user_id))
     try:
         async with database.session() as db:
-            accounts = await google_client.get_accounts(db, user_id)
+            accounts = await google_client.get_accounts(db, user_id, domain)
         grand = {"added": 0, "dups": 0, "failed": 0, "blocked": 0}
         for cred in accounts:
             async with database.session() as db:
@@ -696,19 +852,21 @@ async def _index_all_drive(user_id: int) -> None:
                     async with database.session() as db:
                         if name.lower().endswith(".xlsx"):
                             results = await ingest_xlsx_by_sheets(
-                                db, user_id=user_id, filename=name, data=data,
-                                source_type="drive", source_ref=f["id"], meta=meta)
+                                db, user_id=user_id, domain=domain, filename=name,
+                                data=data, source_type="drive",
+                                source_ref=f["id"], meta=meta)
                         else:
                             text = extract_text(name, data)
                             results = await ingest_document_parts(
-                                db, user_id=user_id, title=name, text=text,
-                                source_type="drive", source_ref=f["id"], meta=meta)
+                                db, user_id=user_id, domain=domain, title=name,
+                                text=text, source_type="drive",
+                                source_ref=f["id"], meta=meta)
                         keep = {r.document.id for r in results
                                 if r.document is not None}
                         if keep:  # drop truncated/first-tab/stale leftovers
                             await delete_stale_versions(
-                                db, user_id=user_id, source_ref=f["id"],
-                                keep_doc_ids=keep)
+                                db, user_id=user_id, domain=domain,
+                                source_ref=f["id"], keep_doc_ids=keep)
                     statuses = [r.status for r in results]
                     if "indexed" in statuses:
                         added += 1
@@ -768,45 +926,56 @@ async def cmd_drive_all(message: Message) -> None:
         return
     import asyncio as _asyncio
     async with database.session() as db:
-        accounts = await google_client.get_accounts(db, message.from_user.id)
+        domain = await get_active_domain(db, message.from_user.id)
+        accounts = await google_client.get_accounts(db, message.from_user.id, domain)
     if not accounts:
-        await message.answer("Спершу підключи Google: /connect_google")
+        await message.answer(
+            f"Для домену {domain_label(domain)} немає Google-акаунтів — "
+            "признач у /accounts або підключи: /connect_google")
         return
     await message.answer(
-        f"🗂 Стартую повну індексацію Drive для {len(accounts)} акаунт(ів): "
-        "Google Docs, Google Sheets (УСІ вкладки), pdf/docx/xlsx/txt/md/csv, "
+        f"🗂 Стартую повну індексацію Drive домену <b>{domain_label(domain)}</b> "
+        f"для {len(accounts)} акаунт(ів): Google Docs, Google Sheets (УСІ "
+        "вкладки), pdf/docx/xlsx/txt/md/csv, "
         f"до {settings.drive_index_max} файлів на акаунт (найновіші перші). "
         "Це кілька хвилин — відпишу прогрес. Повторний запуск безпечний: "
         "дублікати пропускаються.")
-    _asyncio.create_task(_index_all_drive(message.from_user.id))
+    _asyncio.create_task(_index_all_drive(message.from_user.id, domain))
 
 
 @router.message(Command("accounts"))
 async def cmd_accounts(message: Message) -> None:
     if not _is_owner(message):
         return
+    # account MANAGEMENT surface — ALL accounts, including unassigned (§11)
     async with database.session() as db:
-        accounts = await google_client.get_accounts(db, message.from_user.id)
+        accounts = await google_client.get_all_accounts(db, message.from_user.id)
     if not accounts:
         await message.answer("Підключених Google-акаунтів немає. Додати: /connect_google")
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"❌ Відключити {c.account_email}",
-                              callback_data=f"ga:{c.id}")]
-        for c in accounts])
     any_missing = False
-    rows = []
+    rows_text, kb_rows = [], []
     for c in accounts:
         status_line, missing = _scope_status(c.scopes)
         any_missing = any_missing or missing
-        rows.append(f" • <b>{c.account_email}</b>\n{status_line}")
-    listing = "\n".join(rows)
+        dom_txt = domain_label(c.domain) if c.domain else "⚪️ не призначено"
+        rows_text.append(f" • <b>{c.account_email}</b> — {dom_txt}\n{status_line}")
+        kb_rows.append([InlineKeyboardButton(
+            text=("● " if c.domain == d.value else "○ ") + d.value,
+            callback_data=f"gm:{c.id}:{d.value}") for d in Domain])
+        kb_rows.append([InlineKeyboardButton(
+            text=f"❌ Відключити {c.account_email[:24]}",
+            callback_data=f"ga:{c.id}")])
+    listing = "\n".join(rows_text)
     hint = ("\n\n⚠️ Де ❌ — дозволу немає, ця функція для акаунта не працює. "
             "Виправити: /connect_google, обери ЦЕЙ акаунт і постав УСІ галочки."
             if any_missing else "")
     await message.answer(
-        f"📧 <b>Google-акаунти ({len(accounts)}):</b>\n{listing}{hint}\n\n"
-        "➕ Додати ще один: /connect_google", reply_markup=kb)
+        f"📧 <b>Google-акаунти ({len(accounts)}):</b>\n{listing}\n\n"
+        "Кнопки: признач домен акаунту (● активний) або відключи. Акаунт без "
+        "домену не використовує жоден інструмент, доки не призначиш."
+        f"{hint}\n\n➕ Додати ще один: /connect_google",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
 
 
 @router.message(Command("reply"))
@@ -946,7 +1115,7 @@ _QUARANTINE_MSG = (
     "тримай його там, де він виданий.")
 
 
-async def _compile_one(message: Message, document) -> None:
+async def _compile_one(message: Message, document, domain) -> None:
     """Compile a freshly ingested document into wiki pages (best effort).
 
     Three conditions, all required (R6.1A §9): the feature flag is on, the
@@ -969,7 +1138,7 @@ async def _compile_one(message: Message, document) -> None:
             if document.status == "quarantined":
                 return
             outcome = await wiki.compile_document(
-                db, user_id=message.from_user.id, document=document)
+                db, user_id=message.from_user.id, document=document, domain=domain)
     except Exception:
         logger.exception("auto wiki compile failed")
         return
@@ -1034,6 +1203,7 @@ async def on_document(message: Message) -> None:
     if doc.file_size and doc.file_size > 15 * 1024 * 1024:
         await message.answer("Файл завеликий (ліміт 15 МБ)")
         return
+    domain = await _active_domain(message.from_user.id)   # request-start snapshot
     try:
         file = await message.bot.get_file(doc.file_id)
         url = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file.file_path}"
@@ -1043,8 +1213,8 @@ async def on_document(message: Message) -> None:
             from app.core.ingest import ingest_xlsx_by_sheets
             async with database.session() as db:
                 results = await ingest_xlsx_by_sheets(
-                    db, user_id=message.from_user.id, filename=name, data=data,
-                    source_type="telegram_file", source_ref=name)
+                    db, user_id=message.from_user.id, domain=domain, filename=name,
+                    data=data, source_type="telegram_file", source_ref=name)
             indexed = sum(1 for r in results if r.status == "indexed")
             dups = sum(1 for r in results if r.status == "duplicate")
             blocked = sum(1 for r in results if r.status == "quarantined")
@@ -1062,8 +1232,8 @@ async def on_document(message: Message) -> None:
             return
         async with database.session() as db:
             result = await ingest_document(
-                db, user_id=message.from_user.id, title=name, text=text,
-                source_type="telegram_file", source_ref=name)
+                db, user_id=message.from_user.id, domain=domain, title=name,
+                text=text, source_type="telegram_file", source_ref=name)
     except IngestError as e:
         await message.answer(f"📄 {e}")
         return
@@ -1077,9 +1247,10 @@ async def on_document(message: Message) -> None:
         await message.answer(f"📚 «{name}» вже є в базі знань ✅")
     else:
         await message.answer(
-            f"📚 Додав у базу знань: <b>{name}</b> ({result.chunks} фрагментів).\n"
+            f"📚 Додав у базу знань ({domain_label(domain)}): <b>{name}</b> "
+            f"({result.chunks} фрагментів).\n"
             "Тепер можеш просто спитати мене про його зміст.")
-        await _compile_one(message, result.document)
+        await _compile_one(message, result.document, domain)
 
 
 def _forward_title(message: Message) -> str:
@@ -1109,10 +1280,11 @@ async def on_forward(message: Message) -> None:
         await message.answer("У пересилці замало тексту, щоб її зберегти.")
         return
     title = _forward_title(message)
+    domain = await _active_domain(message.from_user.id)   # request-start snapshot
     try:
         async with database.session() as db:
             result = await ingest_document(
-                db, user_id=message.from_user.id,
+                db, user_id=message.from_user.id, domain=domain,
                 title=f"{title} ({message.date.strftime('%d.%m.%Y')})",
                 text=content, source_type="telegram_forward",
                 source_ref=str(message.message_id))
@@ -1343,6 +1515,8 @@ async def on_media_caption(message: Message) -> None:
 _UNKNOWN_CMD_RE = re.compile(r"^/([A-Za-z0-9_]+)")
 
 _COMMAND_HELP = (
+    "<b>Домени:</b> /domain (перемкнути особисте / travelon / tech) · "
+    "/domain_audit\n"
     "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
     "/habit · /habits\n"
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
@@ -1400,9 +1574,10 @@ async def _index_drive_folder(cb: CallbackQuery, user_id: int, folder_id: str) -
         await cb.answer("Невідома папка")
         return
     await cb.answer("Індексую папку…")
+    domain = await _active_domain(user_id)   # request-start snapshot
     try:
         async with database.session() as db:
-            cred = await _drive_account(db, user_id)
+            cred = await _drive_account(db, user_id, domain)
             access = await google_client.access_for(db, cred) if cred else None
         if not access:
             await cb.message.answer("Спершу /connect_google")
@@ -1422,7 +1597,7 @@ async def _index_drive_folder(cb: CallbackQuery, user_id: int, folder_id: str) -
             text = extract_text(name, data)
             async with database.session() as db:
                 result = await ingest_document(
-                    db, user_id=user_id, title=name, text=text,
+                    db, user_id=user_id, domain=domain, title=name, text=text,
                     source_type="drive", source_ref=f["id"])
             if result.status == "indexed":
                 added += 1
@@ -1451,6 +1626,16 @@ async def on_callback(cb: CallbackQuery) -> None:
     if action == "dr":  # Drive folder id is not a UUID
         await _index_drive_folder(cb, user_id, parts[1] if len(parts) > 1 else "")
         return
+    if action == "dom":  # domain-switch button — value is not a UUID
+        try:
+            target = parse_domain(parts[1]) if len(parts) > 1 else None
+        except Exception:
+            target = None
+        if target is None:
+            await cb.answer("Невідомий домен")
+            return
+        await _switch_domain(cb, user_id, target)
+        return
     try:
         ref = uuid.UUID(parts[1])
     except (IndexError, ValueError):
@@ -1475,6 +1660,38 @@ async def on_callback(cb: CallbackQuery) -> None:
                 await db.commit()
                 await cb.answer("Відключено")
                 await cb.message.edit_text(f"❌ {cred.account_email} відключено")
+            else:
+                await cb.answer("Не знайдено")
+        return
+    if action == "gm":  # assign a Google account to a domain (owner-only, §11)
+        try:
+            target = parse_domain(parts[2]) if len(parts) > 2 else None
+        except Exception:
+            target = None
+        if target is None:
+            await cb.answer("Невідомий домен")
+            return
+        from app.models import GoogleCredential
+        async with database.session() as db:
+            cred = await db.get(GoogleCredential, ref)
+            if cred and cred.user_id == user_id:
+                old = cred.domain
+                cred.domain = target.value
+                from app.core.audit import audit
+                await audit(db, actor=f"user:{user_id}",
+                            action="google.domain_assigned",
+                            resource_type="connector", resource_id=cred.id,
+                            policy_level="L2", email=cred.account_email,
+                            old_domain=old or "", new_domain=target.value)
+                await db.commit()
+                await cb.answer(f"{cred.account_email} → {target.value} ✅",
+                                show_alert=True)
+                try:
+                    await cb.message.edit_text(
+                        f"✅ {cred.account_email} → домен {domain_label(target)}.\n"
+                        "Керувати рештою: /accounts")
+                except Exception:
+                    pass
             else:
                 await cb.answer("Не знайдено")
         return
@@ -1548,6 +1765,9 @@ async def on_callback(cb: CallbackQuery) -> None:
                     await cb.answer("Чернетка в Gmail ✅ (нічого не надіслано)", show_alert=True)
                 elif status == "no_google":
                     await cb.answer("Онови доступ: /connect_google", show_alert=True)
+                elif status == "wrong_domain":
+                    await cb.answer("Ця чернетка в іншому домені. Перемкни "
+                                    "/domain і підтверди там.", show_alert=True)
                 else:
                     await cb.answer(str(status))
             elif action == "de":  # compose-new draft: pick account, then create
@@ -1563,6 +1783,9 @@ async def on_callback(cb: CallbackQuery) -> None:
                                     show_alert=True)
                 elif status == "no_google":
                     await cb.answer("Онови доступ: /connect_google", show_alert=True)
+                elif status == "wrong_domain":
+                    await cb.answer("Ця чернетка в іншому домені. Перемкни "
+                                    "/domain і підтверди там.", show_alert=True)
                 else:
                     await cb.answer(str(status))
             elif action == "dx":
@@ -1607,6 +1830,10 @@ async def on_callback(cb: CallbackQuery) -> None:
                     await cb.answer("Бракує прав на події календаря — перепідключи: "
                                     "/connect_google (постав усі галочки)",
                                     show_alert=True)
+                elif status == "wrong_domain":
+                    await cb.answer("Ця подія в іншому домені. Перемкни активний "
+                                    "домен (/domain) і підтверди там.",
+                                    show_alert=True)
                 else:
                     await cb.answer(str(status))
             elif action == "cx":
@@ -1630,6 +1857,10 @@ async def on_callback(cb: CallbackQuery) -> None:
                 elif status in ("no_google", "no_scope"):
                     await cb.answer("Бракує прав на події — /connect_google "
                                     "(постав усі галочки)", show_alert=True)
+                elif status == "wrong_domain":
+                    await cb.answer(f"Ця подія в домені «{email}». Перемкни: "
+                                    f"/domain {email} — і підтверди там.",
+                                    show_alert=True)
                 else:
                     await cb.answer(str(status))
             elif action == "cq":
@@ -1638,9 +1869,12 @@ async def on_callback(cb: CallbackQuery) -> None:
                 await cb.answer("Добре, не створюю")
             elif action == "hb":
                 from app.core import coach
+                from app.models import Habit
                 status = await coach.toggle_habit(db, user_id=user_id, habit_id=ref)
                 if status in ("done", "undone"):
-                    overview = await coach.habits_overview(db, user_id)
+                    hb = await db.get(Habit, ref)
+                    hdomain = parse_domain(hb.domain) if hb else Domain.PERSONAL
+                    overview = await coach.habits_overview(db, user_id, hdomain)
                     kb = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(
                             text=f"{'✅' if h['done_today'] else '⬜️'} {h['title'][:28]} · "

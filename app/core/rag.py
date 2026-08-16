@@ -25,6 +25,7 @@ class RetrievedChunk:
     title: str
     created_at: datetime
     distance: float
+    domain: str = "personal"
 
 
 def looks_like_question(text: str) -> bool:
@@ -93,7 +94,7 @@ def _token_variants(token: str) -> set[str]:
     return variants
 
 
-async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
+async def _keyword_hits(db: AsyncSession, user_id: int, domain: str, query: str,
                         limit: int = 4) -> list[RetrievedChunk]:
     """Exact-substring fallback for lookup questions: semantic search can lose
     a credentials ROW to thematically-similar prose; ILIKE on the distinctive
@@ -111,7 +112,9 @@ async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
     rows = (await db.execute(
         select(KnowledgeChunk.text, Document.title, Document.created_at)
         .join(Document, Document.id == KnowledgeChunk.document_id)
-        .where(KnowledgeChunk.user_id == user_id, cond, _not_quarantined())
+        .where(KnowledgeChunk.user_id == user_id,
+               KnowledgeChunk.domain == domain, Document.domain == domain,
+               cond, _not_quarantined())
         .order_by(Document.created_at.desc())
         .limit(16)
     )).all()
@@ -122,12 +125,14 @@ async def _keyword_hits(db: AsyncSession, user_id: int, query: str,
                    if any(v.lower() in low for v in vs))
     ranked = sorted(rows, key=lambda r: -score(r.text))[:limit]
     return [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
-                           distance=0.0)
+                           distance=0.0, domain=domain)
             for r in ranked]
 
 
-async def retrieve(db: AsyncSession, *, user_id: int, query: str,
+async def retrieve(db: AsyncSession, *, user_id: int, domain: str, query: str,
                    k: int = TOP_K) -> list[RetrievedChunk]:
+    from app.core.domains import parse_domain
+    domain = parse_domain(domain).value          # fail-closed -> zero embeds
     if len(query.strip()) < 6:
         return []
     # R6.1A.1: the QUERY is provider input too — an embedding call ships it to
@@ -148,17 +153,19 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
         select(KnowledgeChunk.text, Document.title, Document.created_at,
                dist.label("dist"))
         .join(Document, Document.id == KnowledgeChunk.document_id)
-        .where(KnowledgeChunk.user_id == user_id, _not_quarantined())
+        .where(KnowledgeChunk.user_id == user_id,
+               KnowledgeChunk.domain == domain, Document.domain == domain,
+               _not_quarantined())
         .order_by(dist)
         .limit(k + 3 if lookup else k)
     )).all()
     out = [RetrievedChunk(text=r.text, title=r.title, created_at=r.created_at,
-                          distance=float(r.dist))
+                          distance=float(r.dist), domain=domain)
            for r in rows if float(r.dist) <= MAX_DISTANCE]
     if lookup:  # requisites/identifier question -> add exact-substring hits
         try:
             seen = {c.text for c in out}
-            for hit in await _keyword_hits(db, user_id, query):
+            for hit in await _keyword_hits(db, user_id, domain, query):
                 if hit.text not in seen:
                     out.insert(0, hit)  # exact matches first — they ARE the answer
         except Exception:
@@ -166,8 +173,9 @@ async def retrieve(db: AsyncSession, *, user_id: int, query: str,
     return _safe_chunks(out[:k + 3])
 
 
-async def log_gap(db: AsyncSession, *, user_id: int, question: str) -> None:
-    db.add(KnowledgeGap(user_id=user_id, question=question[:500]))
+async def log_gap(db: AsyncSession, *, user_id: int, domain: str,
+                  question: str) -> None:
+    db.add(KnowledgeGap(user_id=user_id, domain=domain, question=question[:500]))
 
 
 def knowledge_block(chunks: list[RetrievedChunk]) -> str:

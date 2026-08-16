@@ -80,7 +80,7 @@ async def test_non_owner_isolated(db):
     with pytest.raises(NotOwner):
         await orch().handle_note(db, user_id=STRANGER, text="hi", dedupe_key="s1")
     with pytest.raises(NotOwner):
-        await orch().today(db, user_id=STRANGER)
+        await orch().today(db, user_id=STRANGER, domain="personal")
     assert await _count(db, RawEvent) == 0
 
 

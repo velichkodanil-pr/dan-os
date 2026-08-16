@@ -78,14 +78,26 @@ def thinking_params(model: str) -> dict:
     return out
 
 
-def _system_prompt(profile: list[str], knowledge: str) -> str:
+def _domain_declaration(domain: str) -> str:
+    from app.core.domains import Domain, DESCRIPTIONS, label
+    d = Domain(domain)
+    return (f"\nАКТИВНИЙ ДОМЕН: {label(d)} ({DESCRIPTIONS[d]}).\n"
+            "- Ти працюєш ЛИШЕ в цьому домені. Дані інших доменів "
+            "(інші сфери життя/роботи Данила) тобі зараз недоступні й не "
+            "згадуються.\n- Ти НЕ можеш змінити домен. Якщо Данилу потрібен "
+            "інший — хай напише /domain.\n- Не вигадуй, що бачиш щось з іншого "
+            "домену; якщо чогось немає тут — так і скажи.\n")
+
+
+def _system_prompt(profile: list[str], knowledge: str, domain: str) -> str:
     now = datetime.now(ZoneInfo(settings.tz_name)).strftime("%A, %d.%m.%Y %H:%M")
     profile_block = ""
     if profile:
         profile_block = ("Підтверджена пам'ять про Данила:\n"
                          + "\n".join(f"- {f}" for f in profile[:15]) + "\n")
-    return _SYSTEM.format(now=now, profile_block=profile_block,
-                          knowledge_block=knowledge or "")
+    return (_SYSTEM.format(now=now, profile_block=profile_block,
+                           knowledge_block=knowledge or "")
+            + _domain_declaration(domain))
 
 
 async def _call_api(payload: dict) -> dict | None:
@@ -107,8 +119,8 @@ async def _call_api(payload: dict) -> dict | None:
         return None
 
 
-async def chat_reply(text: str, *, db, user_id: int, profile: list[str],
-                     history: list[tuple[str, str]],
+async def chat_reply(text: str, *, db, user_id: int, domain: str,
+                     profile: list[str], history: list[tuple[str, str]],
                      knowledge: str = "") -> str | None:
     """Agentic reply loop. Returns the reply, or None to let the caller fall back."""
     if settings.chat_model in ("", "mock") or not settings.anthropic_api_key:
@@ -119,12 +131,14 @@ async def chat_reply(text: str, *, db, user_id: int, profile: list[str],
                          "content": msg[:1500]})
     messages.append({"role": "user", "content": text[:6000]})
 
-    tools = chat_tools.TOOL_DEFS + [
+    # TravelON tools are not even OFFERED to the model outside the travelon
+    # domain (the executor re-checks too — this is defence in depth, §10)
+    tools = chat_tools.tools_for_domain(domain) + [
         {"type": "web_search_20250305", "name": "web_search",
          "max_uses": settings.web_search_max_uses}]
     base: dict = {"model": settings.chat_model, "max_tokens": 3000,
-                  "system": _system_prompt(profile, knowledge), "tools": tools,
-                  **thinking_params(settings.chat_model)}
+                  "system": _system_prompt(profile, knowledge, domain),
+                  "tools": tools, **thinking_params(settings.chat_model)}
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = await _call_api({**base, "messages": messages})
@@ -141,7 +155,8 @@ async def chat_reply(text: str, *, db, user_id: int, profile: list[str],
             for b in blocks:
                 if b.get("type") == "tool_use":
                     result = await chat_tools.run_tool(
-                        db, user_id, b.get("name", ""), b.get("input") or {})
+                        db, user_id, domain, b.get("name", ""),
+                        b.get("input") or {})
                     results.append({"type": "tool_result",
                                     "tool_use_id": b.get("id", ""),
                                     "content": result})
