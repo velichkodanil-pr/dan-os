@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r6.1c"
-APP_RELEASE = "R6.1C — order context: insurance & documents"
+APP_VERSION = "r6.1d"
+APP_RELEASE = "R6.1D — order aggregates from our own data"
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     tts_max_chars: int = 600  # longer replies stay text-only
 
     # TravelON owner pack: daily debt alert (empty string disables)
+    travelon_sync_time: str = "04:30"  # nightly order-cache warm-up
     debt_alert_time: str = "10:00"
 
     # Cowork knowledge channel: enables POST /admin/ingest when set

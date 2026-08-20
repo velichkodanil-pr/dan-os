@@ -1,27 +1,27 @@
 # NEXT — the one authorized round
 
-## Round 6.1C — Order context: insurance & documents (CURRENT, code complete)
+## Round 6.1D — Order aggregates (CURRENT, code complete)
 
 Code is complete locally and NOT deployed. Steps, in order:
 
-1. Review the commit `feat(r6.1c): read order insurance and documents`.
-2. Deploy it (no migration this round).
-3. **Set `CHAT_MODEL=claude-opus-5` in Railway variables** — the env var
-   overrides the code default, and production is currently on
-   `claude-opus-4-5`. Without this step the model does not change.
-4. Verify live in the travelon domain: forward the insurance letter again —
-   the bot must NOT answer «заявку 3490138 не знайшов», must open order 64772,
-   read the policy, and answer the coverage questions citing its terms.
-5. Spot-check that plain «заявка 59266» still returns the order card.
+1. Review the commit `feat(r6.1d): aggregate our own orders`.
+2. Deploy it. The migration `b8c2d3e4f5a6` adds ONE empty table — no backfill.
+3. Optionally run `/travelon_sync` to pre-warm; not required — the bot fills
+   any window it needs on demand the first time it is asked.
+4. Ask in Telegram: «скільки туристів у Туреччину з приймаючою Gepard за
+   серпень» — expect 627 заявок / 1 610 туристів, basis «дата заїзду». The
+   first such question takes ~40 s while it fetches; the next is instant.
+5. Try «а за датою створення» and «на яку суму» — both are supported.
+6. From then on the cache also refreshes itself nightly at 04:30.
 
 ### Deferred out of this round (deliberately — do NOT start)
 
-- Supplier-cabinet integration (Proxymo / SAMO / OBS) and underpayment
-  registries — covered by the `travelon-supplier-cabinets` skill, and a round
-  of its own.
-- Insurer general terms (Генеральний договір 14/25) in the knowledge base, so
-  the bot can answer insurance questions with no order at hand.
-- Reading documents of orders the owner has not named (bulk document indexing).
+- **Supplier cabinets.** Owner decision: we ask only our own system. Logging
+  into Kalanit / TOCO / E.Line to cross-check volumes is NOT in scope.
+- Margin / profitability reporting. Turnover per currency IS included; margin
+  needs net-vs-gross semantics reviewed before it can be trusted.
+- Nightly PRE-warm beyond ‑30 days; deep history is reachable on demand but is
+  archive.
 
 ## Round 6.2 — Wiki revisions & durable compile queue (later, separate round)
 

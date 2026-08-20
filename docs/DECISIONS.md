@@ -2,6 +2,38 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-20 — R6.1D: aggregates come from our own mirrored data
+
+«Скільки туристів з приймаючою Kalanit» had no tool, so the model answered
+from QA chat logs — a sample presented next to an honest caveat, but still not
+the number asked for.
+
+- **Ask only our own system.** Owner decision: supplier cabinets are not
+  queried to answer "how many did WE book". Our booking system is the source of
+  truth for our own volumes; a cabinet answers a different question (what the
+  supplier thinks we owe) and belongs to a separate round.
+- **Mirror, because the source is too slow.** The period report times out on a
+  six-week window, so an aggregate cannot be computed live. Orders are cached
+  locally and warmed nightly; the cache is a derived index, never a second
+  source of truth.
+- **Coverage is data, not an assumption.** A day with zero orders and a day
+  never fetched must be distinguishable, or a partial window gets reported as a
+  confident total. This failed for real during the round: an August figure was
+  quoted from a cache that held only the first 19 days. Hence a per-day,
+  per-basis coverage table.
+- **Gaps are filled, not merely reported.** A question about an uncovered
+  period fetches it once (bounded to a quarter) and remembers it — flexibility
+  the owner should not have to prepare for. A window beyond the bound is
+  refused with a reason rather than silently truncated.
+- **A cache must confess its coverage.** Every aggregate returns what it
+  counted (дата заїзду), the filters applied, and the span the cache actually
+  holds. An empty cache asks for a sync; a period outside the span is flagged.
+  A confident number over partial data is the failure mode being designed out.
+- **Store-minimum survives the cache.** It holds a tourist COUNT, never names,
+  passports or document links. Aggregates need arithmetic, not passengers.
+- **Default window is forward.** «Скільки заброньовано» is operational — who is
+  still coming — not a historical total. Past dates are available on request.
+
 ## 2026-08-20 — R6.1C: deterministic shortcuts must not answer questions
 
 A forwarded insurance letter was answered with «заявку №3490138 не знайшов».

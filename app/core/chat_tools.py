@@ -80,6 +80,30 @@ TOOL_DEFS = [
                     "travelon_document.",
      "input_schema": {"type": "object", "properties": {
          "order_no": {"type": "string"}}, "required": ["order_no"]}},
+    {"name": "travelon_stats",
+     "description": "ЗВЕДЕНІ ЦИФРИ по НАШИХ заявках TravelON: скільки заявок, "
+                    "ТУРИСТІВ і на яку суму за період, з фільтром по приймаючій "
+                    "стороні (provider, напр. 'Gepard', 'Kalanit'), країні або "
+                    "готелю, з групуванням. Використовуй на будь-яке «скільки», "
+                    "«який обсяг», «топ приймаючих», «на яку суму», «частка». "
+                    "Дані ДОБИРАЮТЬСЯ АВТОМАТИЧНО, якщо періоду ще немає в "
+                    "кеші — можна питати про минулі місяці, не готуючи нічого "
+                    "заздалегідь. Період за замовчуванням — від сьогодні "
+                    "вперед. basis='check_in' рахує за датою заїзду (хто їде), "
+                    "basis='created' — за датою створення заявки (коли "
+                    "продали). Це наша система; кабінети постачальників не "
+                    "опитуються.",
+     "input_schema": {"type": "object", "properties": {
+         "provider": {"type": "string", "description": "приймаюча сторона, частина назви"},
+         "country": {"type": "string"},
+         "hotel": {"type": "string"},
+         "group_by": {"type": "string",
+                      "enum": ["provider", "country", "hotel", "month", "status"]},
+         "basis": {"type": "string", "enum": ["check_in", "created"]},
+         "date_from": {"type": "string", "description": "ДД.ММ.РРРР"},
+         "date_to": {"type": "string", "description": "ДД.ММ.РРРР"},
+         "include_cancelled": {"type": "boolean"}},
+         "required": []}},
     {"name": "travelon_document",
      "description": "Текст документа заявки TravelON: 'insurance' — страховий "
                     "поліс з умовами покриття й порядком дій, 'voucher', "
@@ -97,13 +121,15 @@ _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
            "get_recent_mail": "gmail.read", "search_mail": "gmail.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
            "travelon_order": "travelon.read",
-           "travelon_document": "travelon.read"}
+           "travelon_document": "travelon.read",
+           "travelon_stats": "travelon.read"}
 
 # §10: TravelON tools are a domain-scoped capability, not a general one. They
 # are hidden from the model outside the travelon domain (tools_for_domain) AND
 # refused at dispatch (run_tool) — two independent layers, so a stale or
 # hallucinated tool_use cannot reach the TravelON network from personal/tech.
-_TRAVELON_TOOLS = {"travelon_pulse", "travelon_order", "travelon_document"}
+_TRAVELON_TOOLS = {"travelon_pulse", "travelon_order", "travelon_document",
+                   "travelon_stats"}
 
 _TRAVELON_WRONG_DOMAIN = {
     "error": "wrong_domain",
@@ -280,6 +306,63 @@ async def _t_travelon_order(db, user_id, domain, args):
     return out
 
 
+def _parse_day(raw: str):
+    from datetime import datetime as _dt
+    raw = (raw or "").strip()
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y"):
+        try:
+            return _dt.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+async def _t_travelon_stats(db, user_id, domain, args):
+    from datetime import date as _date, timedelta as _td
+    from app.core.domains import Domain
+    if domain != Domain.TRAVELON:
+        return dict(_TRAVELON_WRONG_DOMAIN)
+    # NOTE: no configured() gate here — stats reads the LOCAL cache and needs
+    # no token. Only topping the window up needs the network, and that failing
+    # degrades the answer honestly instead of refusing it.
+    from app.core import travelon
+    today = _date.today()
+    basis = str(args.get("basis", "") or "check_in")
+    # Default window: from TODAY forward — «скільки заброньовано» is about who
+    # is still coming. An explicit period overrides it, past or future.
+    d_from = _parse_day(str(args.get("date_from", ""))) or today
+    d_to = _parse_day(str(args.get("date_to", ""))) or (
+        today + _td(days=travelon.SYNC_AHEAD_DAYS))
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    # Fill whatever the window is missing, so an arbitrary question about an
+    # arbitrary month just works instead of returning a caveat.
+    filled = await travelon.ensure_window(db, user_id=user_id, date_from=d_from,
+                                          date_to=d_to, basis=basis)
+    if filled.get("truncated"):
+        return {"found": False, "reason": "window_too_large",
+                "note": filled.get("hint", "")}
+    out = await travelon.stats(
+        db, user_id=user_id, date_from=d_from, date_to=d_to, basis=basis,
+        provider=str(args.get("provider", "")), country=str(args.get("country", "")),
+        hotel=str(args.get("hotel", "")),
+        group_by=str(args.get("group_by", "") or "provider"),
+        include_cancelled=bool(args.get("include_cancelled")))
+    # Say plainly whether the window is fully covered. An aggregate that does
+    # not state its coverage invites a confident number over partial data.
+    out["coverage"] = ("повне" if not filled.get("cannot_fetch")
+                       else f"неповне: {filled['gaps']} днів не завантажено")
+    if filled.get("fetched"):
+        out["just_fetched_days"] = filled["fetched"]
+    if filled.get("days_failed"):
+        out["warning"] = (f"{filled['days_failed']} днів не вдалося прочитати — "
+                          "цифри за ті дати можуть бути неповні.")
+    if filled.get("cannot_fetch"):
+        out["warning"] = (f"{filled['gaps']} днів періоду ще не завантажені, а "
+                          "TravelON зараз недоступний — цифри неповні.")
+    return out
+
+
 async def _t_travelon_document(db, user_id, domain, args):
     from app.core.domains import Domain
     if domain != Domain.TRAVELON:
@@ -304,7 +387,8 @@ _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
               "get_tasks": _t_get_tasks,
               "travelon_pulse": _t_travelon_pulse,
               "travelon_order": _t_travelon_order,
-              "travelon_document": _t_travelon_document}
+              "travelon_document": _t_travelon_document,
+              "travelon_stats": _t_travelon_stats}
 
 
 _REFUSED_ARGS = {"refused": True, "reason": "secret_in_arguments",

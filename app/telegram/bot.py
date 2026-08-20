@@ -124,6 +124,41 @@ async def send_weekly(user_id: int) -> None:
     await bot_instance.send_message(user_id, "\n".join(sections))
 
 
+async def _sync_travelon_cache(user_id: int, ahead: int | None = None) -> dict:
+    """Refresh the local order cache (R6.1D). Business data, so it is written
+    with domain='travelon' and only ever read back in that domain."""
+    from datetime import date, timedelta
+    from app.core import travelon
+    if not travelon.configured():
+        return {"status": "not_configured"}
+    today = date.today()
+    async with database.session() as db:
+        return await travelon.sync_orders(
+            db, user_id=user_id,
+            date_from=today - timedelta(days=travelon.SYNC_BACK_DAYS),
+            date_to=today + timedelta(days=ahead or travelon.SYNC_AHEAD_DAYS))
+
+
+async def run_travelon_sync(user_id: int) -> None:
+    """Nightly ritual: warm the cache. Stays silent unless it actually fails —
+    a healthy background job should not send a message every night."""
+    try:
+        r = await _sync_travelon_cache(user_id)
+        if r.get("days_failed"):
+            await bot_instance.send_message(
+                user_id, f"🗃 Синхронізація заявок: {r['orders']} шт, але "
+                f"{r['days_failed']} днів не вдалося прочитати — цифри за ті "
+                "дати можуть бути неповні.")
+    except Exception:
+        logger.exception("travelon cache sync failed")
+        try:
+            await bot_instance.send_message(
+                user_id, "🗃 Нічна синхронізація заявок TravelON впала. "
+                "Цифри у зведеннях застаріють — запусти /travelon_sync.")
+        except Exception:
+            pass
+
+
 async def send_debt_alert(user_id: int) -> None:
     """Daily TravelON alert: tomorrow's check-ins with unpaid balance.
     Stays silent when there is nothing to flag."""
@@ -623,6 +658,34 @@ async def cmd_wiki(message: Message) -> None:
         text = wiki.page_text(page)
     for i in range(0, len(text), 3800):
         await message.answer("📄 <pre>" + _html.escape(text[i:i + 3800]) + "</pre>")
+
+
+@router.message(Command("travelon_sync"))
+async def cmd_travelon_sync(message: Message) -> None:
+    """Manual warm-up of the local order cache (R6.1D)."""
+    if not _is_owner(message):
+        return
+    from app.core import travelon
+    if not travelon.configured():
+        await message.answer("🧳 TravelON не підключено.")
+        return
+    await message.answer("🗃 Оновлюю локальний кеш заявок — це до хвилини…")
+    try:
+        r = await _sync_travelon_cache(message.from_user.id)
+        async with database.session() as db:
+            span = await travelon.cache_span(db, user_id=message.from_user.id)
+    except Exception:
+        logger.exception("manual travelon sync failed")
+        await message.answer("🗃 Не вдалося оновити кеш — спробуй ще раз.")
+        return
+    cover = (f"{span['from']:%d.%m.%Y}–{span['to']:%d.%m.%Y}"
+             if span["from"] and span["to"] else "—")
+    await message.answer(
+        f"🗃 Готово: {r['orders']} заявок за вікно (нових {r['added']}).\n"
+        f"У кеші всього: {span['orders']} · заїзди {cover}"
+        + (f"\n⚠️ Днів не прочитано: {r['days_failed']}" if r.get("days_failed") else "")
+        + "\n\nТепер можу рахувати обсяги: «скільки туристів у Туреччину "
+          "з приймаючою Kalanit».")
 
 
 @router.message(Command("order"))
@@ -1522,7 +1585,7 @@ _COMMAND_HELP = (
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
     "/drive_all · /kb_security_scan · /kb_quarantine\n"
     "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
-    "<b>Бізнес:</b> /travelon · /order\n"
+    "<b>Бізнес:</b> /travelon · /order · /travelon_sync\n"
     "<b>Інше:</b> /app · /voice · /start"
 )
 # Names people reach for that are HTTP endpoints of the service, not commands

@@ -7,11 +7,11 @@ Invariants (see CLAUDE.md):
 - memory items carry provenance (source event, domain, status).
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey,
+    BigInteger, Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey,
     Index, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -386,3 +386,65 @@ class SecurityFinding(Base):
     scanner_version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(16), default="open")  # open|resolved
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TravelonOrderCache(Base):
+    """Local mirror of TravelON orders, for AGGREGATE questions (R6.1D).
+
+    «Скільки туристів їде в Туреччину з приймаючою X» cannot be answered from
+    the per-order endpoint: the period report is slow (a 6-week window times
+    out), so the answer has to come from a warmed local table refreshed
+    nightly.
+
+    STORE-MINIMUM, deliberately: the operational facts an aggregate needs and
+    nothing else. No tourist names, no passports, no document links — only a
+    COUNT of tourists. Names stay on the live per-order path
+    (`fetch_order_detail`), where the owner asked for one specific order.
+
+    This is TravelON business data, so every row is domain='travelon' and the
+    read path is domain-scoped like everything else (R6.1B).
+    """
+    __tablename__ = "travelon_orders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "order_no", name="uq_tvorder_user_no"),
+        _domain_check("ck_travelon_orders_domain"),
+        Index("ix_tvorder_scope", "user_id", "domain", "check_in"),
+        Index("ix_tvorder_provider", "user_id", "domain", "provider"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="travelon")
+    order_no: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), default="")
+    provider: Mapped[str] = mapped_column(String(120), default="")   # receiving DMC
+    hotel: Mapped[str] = mapped_column(Text, default="")
+    country: Mapped[str] = mapped_column(String(80), default="")
+    check_in: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created: Mapped[date | None] = mapped_column(Date, nullable=True)
+    nights: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tourists: Mapped[int] = mapped_column(Integer, default=0)   # COUNT only
+    gross_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="")
+    debt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TravelonSyncDay(Base):
+    """Which days of the TravelON report have actually been fetched (R6.1D).
+
+    Without this, a day with zero orders is indistinguishable from a day that
+    was never fetched — and the bot would answer "0 туристів" for a period it
+    simply never looked at. Coverage is tracked per BASIS, because the report
+    filters either by create-date (default) or by check-in (`?by_entry_date`),
+    and the two windows cover different sets of orders.
+    """
+    __tablename__ = "travelon_sync_days"
+    __table_args__ = (
+        UniqueConstraint("user_id", "basis", "day", name="uq_tvsync_day"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    basis: Mapped[str] = mapped_column(String(16), default="check_in")  # check_in|created
+    day: Mapped[date] = mapped_column(Date)
+    orders: Mapped[int] = mapped_column(Integer, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

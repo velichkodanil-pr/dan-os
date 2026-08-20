@@ -1,8 +1,66 @@
 # STATUS
 
-_Last verified: 2026-08-20. R6.1B is DEPLOYED and verified live. R6.1C is CODE COMPLETE locally and NOT deployed._
+_Last verified: 2026-08-20. R6.1C is DEPLOYED and verified live. R6.1D is CODE COMPLETE locally and NOT deployed._
 
-## R6.1C — Order context: insurance & documents: CODE COMPLETE, NOT DEPLOYED
+## R6.1D — Order aggregates from our own data: CODE COMPLETE, NOT DEPLOYED
+
+«Скільки туристів заброньовано в Туреччину з приймаючою Kalanit» had no tool
+at all. `travelon_order` answers ONE order, `travelon_pulse` a fixed metric
+set — so the model fell back to the knowledge base and honestly reported that
+it only had QA chat logs, which is a sample, not a total.
+
+Owner decision: **we ask only OUR system.** Supplier cabinets (Proxymo / SAMO /
+OBS, the `travelon-supplier-cabinets` skill) are explicitly out of scope.
+
+- **Local order cache** (`travelon_orders`): the period report is too slow to
+  answer live — a six-week window times out. Orders are mirrored into a table
+  keyed by (user_id, order_no) and refreshed nightly at `TRAVELON_SYNC_TIME`
+  (04:30), covering ‑30 … +210 days by check-in date.
+- **Coverage map** (`travelon_sync_days`): which report days were actually
+  fetched, tracked PER BASIS. Without it a day with zero orders and a day never
+  looked at are the same thing — which is exactly how a partial window gets
+  reported as a confident total (it happened during this round: an August
+  figure was quoted from a cache holding only 01–19.08).
+- **On-demand windows**: a question about a period the cache does not hold
+  fetches that period once (bounded to a quarter), answers, and remembers it.
+  Asking about an arbitrary past month needs no preparation. A window far
+  larger than the bound is refused with a reason, never silently truncated.
+- **Two bases**: `check_in` (who travels then, default) and `created` (when it
+  was sold). The report filters differently for each, so coverage is tracked
+  separately and never mixed.
+- **Money per currency**: totals and per-group sums are kept in separate
+  currency buckets — orders come in EUR/USD/UAH and adding them would be a lie.
+- **Degrades honestly**: reading the cache needs no token, so losing the
+  connector still answers from what is stored, marked `coverage: неповне`.
+- **Store-minimum, again on purpose:** the cache holds the operational facts an
+  aggregate needs (provider, hotel, country, check-in, nights, tourist COUNT,
+  cost, debt, status) and *no tourist names, passports or document links*.
+  Names stay on the live per-order path, where the owner named one order.
+- **`travelon.stats()`**: filters by provider / country / hotel
+  (case-insensitive substring, so «kalanit» finds «Kalanit Tour Turkey»),
+  groups by provider / country / hotel / month / status, excludes cancelled
+  orders unless asked. Answers state their basis (дата заїзду), their filters
+  and what the cache covers. Money is reported per currency.
+- **`travelon_stats` agent tool**, travelon-domain only, hidden outside it and
+  refused at dispatch. Default window is **today forward** — «скільки
+  заброньовано» is a question about who is still coming — and any explicit
+  period, past or future, is accepted and filled on demand. Every answer
+  carries `coverage`.
+- **`/travelon_sync`** for a manual warm-up; the nightly ritual stays silent
+  unless days actually failed.
+- **Verified against live data, from an EMPTY database:** «Gepard, Туреччина,
+  серпень» fetched 31 days on demand in 42 s and answered 627 orders / 1 610
+  tourists / 1 348 042 EUR; the same question again answered in 0.0 s from the
+  warmed cache; `basis="created"` correctly returned a different number
+  (418 / 1 050) because it is a different question.
+- **Tests:** **368 passed** (27 new in `tests/test_r61d.py`). Migration
+  `b8c2d3e4f5a6` verified fresh, from the current prod revision, and on replay.
+
+Not deployed.
+
+---
+
+## R6.1C — Order context: insurance & documents: DEPLOYED ✅ (2026-08-20)
 
 A forwarded insurance letter exposed three defects at once. The letter quoted
 «поліс № 3490138» and «заявкою № 64772»; the bot took the FIRST №-number (the
@@ -38,8 +96,11 @@ the three real questions about coverage never reached the model.
   the real letter). No migration this round. Security and domain-isolation
   suites re-run clean.
 
-Not deployed. `CHAT_MODEL` on Railway must be set to `claude-opus-5` at deploy
-time — the env var overrides the code default.
+Deployed as `c642ea1` (Railway `acacb047` SUCCESS), with `CHAT_MODEL=claude-opus-5`
+set on Railway. Verified live: the insurance letter now resolves order 64772,
+reads the policy PDF and answers the coverage questions from its terms. Opus 5
+also removed an Opus-4.5 failure seen in rehearsal — inventing a
+plausible-sounding quotation that was not in the document.
 
 ---
 

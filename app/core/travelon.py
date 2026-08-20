@@ -12,7 +12,7 @@ totals) and keep nothing else. Read-only: this module never writes to Travelon.
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
@@ -49,6 +49,7 @@ class TravelonOrder:
     debt: float | None  # debt-agency-in-currency: debt in the ORDER currency
     debt_local: float | None = None  # amount-of-debt: same debt in UAH/local
     local_currency: str = ""  # e.g. UAH
+    provider: str = ""  # receiving DMC (hotel/provider), e.g. "Kalanit Tour Turkey"
 
 MIN_DEBT = 1.0  # order-currency units; below this it's rounding dust
 
@@ -116,6 +117,7 @@ def parse_orders(xml_text: str) -> list[TravelonOrder]:
             status=_text(o, "status"),
             created=_date(_text(o, "create-date")),
             hotel=_text(hotel_el, "hotel-name") if hotel_el is not None else "",
+            provider=_text(hotel_el, "provider") if hotel_el is not None else "",
             country=country,
             check_in=check_in,
             nights=int(n) if hotel_el is not None
@@ -603,3 +605,251 @@ def insurance_card(d: OrderDetail) -> str:
         who = ", ".join(t.name for t in d.tourists[:8])
         lines.append(f"Застраховані ({len(d.tourists)}): {who}")
     return "\n".join(lines)
+
+
+# ---------- local order cache + aggregates (R6.1D) ----------
+# The period report is too slow to answer «скільки туристів їде з приймаючою X»
+# live: a six-week window times out. So orders are mirrored into a local table,
+# warmed nightly, and aggregates are answered from Postgres in milliseconds.
+# We only ever ask OUR system — no supplier cabinets (owner decision).
+
+SYNC_PARALLEL = 8
+SYNC_AHEAD_DAYS = 210     # nightly warm-up window: today .. +7 months
+SYNC_BACK_DAYS = 30       # keep a short tail so «цього місяця» stays answerable
+
+
+BASES = ("check_in", "created")
+MAX_ONDEMAND_DAYS = 92   # a quarter: fetched live if a question needs it
+
+
+async def _fetch_day_xml(client: "httpx.AsyncClient", day: date,
+                         basis: str = "check_in") -> str | None:
+    s = day.isoformat()
+    # The report filters by CREATE date by default; ?by_entry_date switches it
+    # to check-in. The two cover different order sets, so coverage is tracked
+    # per basis and never mixed.
+    suffix = "?by_entry_date" if basis == "check_in" else ""
+    for _ in range(2):
+        try:
+            r = await client.get(f"{BASE}/{settings.travelon_token}/{s}/{s}"
+                                 f"{suffix}")
+            if r.status_code == 200:
+                return r.text
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    logger.warning("travelon sync: day %s failed", s)
+    return None
+
+
+async def sync_orders(db, *, user_id: int, date_from: date,
+                      date_to: date, basis: str = "check_in") -> dict:
+    """Mirror orders whose CHECK-IN falls in the window into the local cache.
+
+    Day-sized windows fetched concurrently — the same shape the pulse uses,
+    because a multi-week window on this endpoint simply times out. Upsert by
+    (user_id, order_no), so a re-run is cheap and safe."""
+    from sqlalchemy import select as _select
+    from app.models import TravelonOrderCache
+    if not configured():
+        return {"status": "not_configured", "days": 0, "orders": 0}
+    days = [date_from + timedelta(d) for d in range((date_to - date_from).days + 1)]
+    sem = asyncio.Semaphore(SYNC_PARALLEL)
+
+    async def one(client, d):
+        async with sem:
+            return d, await _fetch_day_xml(client, d, basis)
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_UA) as client:
+        pages = await asyncio.gather(*[one(client, d) for d in days])
+
+    seen: dict[str, TravelonOrder] = {}
+    failed = 0
+    per_day: dict[date, int] = {}
+    for day, xml in pages:
+        if xml is None:
+            failed += 1
+            continue
+        try:
+            got = [o for o in parse_orders(xml) if o.order_no]
+        except ElementTree.ParseError:
+            failed += 1
+            continue
+        per_day[day] = len(got)
+        for o in got:
+            seen[o.order_no] = o
+
+    existing = {
+        r.order_no: r for r in (await db.execute(
+            _select(TravelonOrderCache).where(
+                TravelonOrderCache.user_id == user_id,
+                TravelonOrderCache.order_no.in_(list(seen) or [""])))).scalars()}
+    added = updated = 0
+    now = datetime.now(timezone.utc)
+    for no, o in seen.items():
+        row = existing.get(no)
+        if row is None:
+            row = TravelonOrderCache(user_id=user_id, domain="travelon",
+                                     order_no=no)
+            db.add(row)
+            added += 1
+        else:
+            updated += 1
+        row.status, row.provider, row.hotel = o.status, o.provider, o.hotel
+        row.country, row.check_in, row.created = o.country, o.check_in, o.created
+        row.nights, row.tourists = o.nights, o.tourists
+        row.gross_cost, row.currency, row.debt = o.gross_cost, o.currency, o.debt
+        row.synced_at = now
+    await _mark_days_synced(db, user_id, basis, per_day, now)
+    await db.commit()
+    logger.info("travelon sync %s..%s: %d orders (%d new), %d days failed",
+                date_from, date_to, len(seen), added, failed)
+    return {"status": "ok", "days": len(days), "days_failed": failed,
+            "orders": len(seen), "added": added, "updated": updated,
+            "basis": basis}
+
+
+async def _mark_days_synced(db, user_id: int, basis: str,
+                            per_day: dict, now) -> None:
+    from sqlalchemy import select as _select
+    from app.models import TravelonSyncDay
+    if not per_day:
+        return
+    have = {r.day: r for r in (await db.execute(_select(TravelonSyncDay).where(
+        TravelonSyncDay.user_id == user_id, TravelonSyncDay.basis == basis,
+        TravelonSyncDay.day.in_(list(per_day))))).scalars()}
+    for day, cnt in per_day.items():
+        row = have.get(day)
+        if row is None:
+            db.add(TravelonSyncDay(user_id=user_id, basis=basis, day=day,
+                                   orders=cnt, synced_at=now))
+        else:
+            row.orders, row.synced_at = cnt, now
+
+
+async def missing_days(db, *, user_id: int, date_from: date, date_to: date,
+                       basis: str = "check_in") -> list:
+    """Days in the window that were never fetched. A day with zero orders is
+    NOT missing — that is exactly what the coverage table is for."""
+    from sqlalchemy import select as _select
+    from app.models import TravelonSyncDay
+    want = {date_from + timedelta(d) for d in range((date_to - date_from).days + 1)}
+    have = set((await db.execute(_select(TravelonSyncDay.day).where(
+        TravelonSyncDay.user_id == user_id, TravelonSyncDay.basis == basis,
+        TravelonSyncDay.day >= date_from,
+        TravelonSyncDay.day <= date_to))).scalars())
+    return sorted(want - have)
+
+
+async def ensure_window(db, *, user_id: int, date_from: date, date_to: date,
+                        basis: str = "check_in",
+                        max_days: int = MAX_ONDEMAND_DAYS) -> dict:
+    """Fill any gap in the window on demand, then report what happened.
+
+    This is what makes an arbitrary question answerable: ask about May and the
+    bot fetches May once, remembers it, and answers instantly next time.
+    Bounded — a request far larger than a quarter is reported, not silently
+    truncated, so the answer never looks complete when it is not."""
+    gaps = await missing_days(db, user_id=user_id, date_from=date_from,
+                              date_to=date_to, basis=basis)
+    if not gaps:
+        return {"fetched": 0, "gaps": 0, "truncated": False}
+    if not configured():
+        # No token: still answer from whatever IS cached, but say so.
+        return {"fetched": 0, "gaps": len(gaps), "truncated": False,
+                "cannot_fetch": True}
+    if len(gaps) > max_days:
+        return {"fetched": 0, "gaps": len(gaps), "truncated": True,
+                "hint": f"Період потребує {len(gaps)} нових днів — це більше "
+                        f"за ліміт {max_days}. Звузь період або запусти "
+                        "/travelon_sync."}
+    res = await sync_orders(db, user_id=user_id, date_from=gaps[0],
+                            date_to=gaps[-1], basis=basis)
+    return {"fetched": res.get("days", 0), "gaps": len(gaps),
+            "truncated": False, "days_failed": res.get("days_failed", 0)}
+
+
+_CANCELLED = ("cancel", "anul", "отмен", "скасов")
+
+
+def _is_cancelled(status: str) -> bool:
+    low = (status or "").lower()
+    return any(m in low for m in _CANCELLED)
+
+
+async def stats(db, *, user_id: int, date_from: date, date_to: date,
+                provider: str = "", country: str = "", hotel: str = "",
+                group_by: str = "provider", basis: str = "check_in",
+                include_cancelled: bool = False, limit: int = 20) -> dict:
+    """Aggregate over the LOCAL cache: orders, tourists, money.
+
+    basis: check_in (who travels then — the default) | created (booked then).
+    group_by: provider | country | hotel | month | status.
+    Filters are case-insensitive substrings, so «kalanit» finds
+    «Kalanit Tour Turkey». Money is summed PER CURRENCY — orders come in EUR,
+    USD and UAH, and adding those together would be a lie."""
+    from sqlalchemy import select as _select
+    from app.models import TravelonOrderCache as C
+    basis = basis if basis in BASES else "check_in"
+    col = C.check_in if basis == "check_in" else C.created
+    conds = [C.user_id == user_id, C.domain == "travelon",
+             col.is_not(None), col >= date_from, col <= date_to]
+    for c, val in ((C.provider, provider), (C.country, country), (C.hotel, hotel)):
+        if val.strip():
+            conds.append(c.ilike(f"%{val.strip()}%"))
+    rows = (await db.execute(_select(C).where(*conds))).scalars().all()
+    if not include_cancelled:
+        rows = [r for r in rows if not _is_cancelled(r.status)]
+
+    keyfn = {
+        "provider": lambda r: r.provider or "(не вказано)",
+        "country": lambda r: r.country or "(не вказано)",
+        "hotel": lambda r: r.hotel or "(не вказано)",
+        "status": lambda r: r.status or "(не вказано)",
+        "month": lambda r: (r.check_in if basis == "check_in" else r.created)
+        .strftime("%m.%Y"),
+    }.get(group_by, lambda r: r.provider or "(не вказано)")
+
+    def _money(acc: dict, r) -> None:
+        if r.gross_cost:
+            cur = (r.currency or "?").upper()
+            acc[cur] = round(acc.get(cur, 0.0) + r.gross_cost, 2)
+
+    buckets: dict[str, dict] = {}
+    total_money: dict[str, float] = {}
+    for r in rows:
+        b = buckets.setdefault(keyfn(r), {"orders": 0, "tourists": 0, "money": {}})
+        b["orders"] += 1
+        b["tourists"] += r.tourists or 0
+        _money(b["money"], r)
+        _money(total_money, r)
+    ordered = sorted(buckets.items(), key=lambda kv: -kv[1]["tourists"])[:limit]
+
+    fresh = max((r.synced_at for r in rows), default=None)
+    return {
+        "period": f"{date_from.strftime('%d.%m.%Y')}–{date_to.strftime('%d.%m.%Y')}",
+        "basis": "дата заїзду" if basis == "check_in" else "дата створення заявки",
+        "filters": {k: v for k, v in (("provider", provider), ("country", country),
+                                      ("hotel", hotel)) if v.strip()},
+        "total_orders": len(rows),
+        "total_tourists": sum(r.tourists or 0 for r in rows),
+        "total_money": total_money,
+        "group_by": group_by,
+        "groups": [{"key": k, **v} for k, v in ordered],
+        "groups_shown": len(ordered),
+        "groups_total": len(buckets),
+        "synced_at": fresh.strftime("%d.%m.%Y %H:%M") if fresh else None,
+        "note": ("Дані з нашої системи TravelON (локальний кеш заявок). "
+                 "Кабінети постачальників не опитуються."),
+    }
+
+
+async def cache_span(db, *, user_id: int) -> dict:
+    """What the cache actually covers — so an answer can be honest about it."""
+    from sqlalchemy import func as _f, select as _select
+    from app.models import TravelonOrderCache as C
+    row = (await db.execute(_select(
+        _f.count(), _f.min(C.check_in), _f.max(C.check_in), _f.max(C.synced_at)
+    ).where(C.user_id == user_id, C.domain == "travelon"))).one()
+    return {"orders": int(row[0] or 0), "from": row[1], "to": row[2],
+            "synced_at": row[3]}

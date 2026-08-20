@@ -69,7 +69,7 @@ async def _fire_due(send_message) -> None:
 
 
 async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
-                       run_debts=None) -> None:
+                       run_debts=None, run_tv_sync=None) -> None:
     owner = settings.owner_telegram_id
     if not owner:
         return
@@ -81,6 +81,12 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
         rituals.append((f"digest_{t}", t, run_digest, None))
     if run_debts is not None and settings.debt_alert_time.strip():
         rituals.append(("debts", settings.debt_alert_time.strip(), run_debts, None))
+    # R6.1D: warm the local order cache overnight so aggregate questions are
+    # answered from Postgres in milliseconds instead of timing out on the
+    # period report. Silent by design — it reports nothing unless it breaks.
+    if run_tv_sync is not None and settings.travelon_sync_time.strip():
+        rituals.append(("tv_sync", settings.travelon_sync_time.strip(),
+                        run_tv_sync, None))
     for key, time_str, fn, weekday in rituals:
         if weekday is not None and now_local.weekday() != weekday:
             continue
@@ -102,23 +108,23 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
 
 
 async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-                run_debts=None) -> None:
+                run_debts=None, run_tv_sync=None) -> None:
     while True:
         try:
             await _fire_due(send_message)
             await _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
-                               run_debts)
+                               run_debts, run_tv_sync)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
 def start(send_message, run_brief, run_checkin, run_digest, run_weekly,
-          run_debts=None) -> None:
+          run_debts=None, run_tv_sync=None) -> None:
     global _task
     _task = asyncio.create_task(
         _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-              run_debts))
+              run_debts, run_tv_sync))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 
