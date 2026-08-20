@@ -73,23 +73,37 @@ TOOL_DEFS = [
      "description": "Бізнес-пульс TravelON: нові заявки, заїзди на 7 днів, борги.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "travelon_order",
-     "description": "Картка заявки TravelON за номером (статус, готель, дати, "
-                    "сума, борг).",
+     "description": "Заявка TravelON за номером: статус, готель, дати, сума, "
+                    "борг, СТРАХУВАННЯ (страховик, номер поліса, програма, "
+                    "страхова сума, територія), поіменний склад туристів і "
+                    "перелік документів заявки, які можна прочитати через "
+                    "travelon_document.",
      "input_schema": {"type": "object", "properties": {
          "order_no": {"type": "string"}}, "required": ["order_no"]}},
+    {"name": "travelon_document",
+     "description": "Текст документа заявки TravelON: 'insurance' — страховий "
+                    "поліс з умовами покриття й порядком дій, 'voucher', "
+                    "'confirmation', 'passenger', 'invoice', або назва "
+                    "прикріпленого файлу. Використовуй, коли питання про УМОВИ "
+                    "(що покриває страховка, як діяти при страховому випадку, "
+                    "які документи зберегти) — не вигадуй умови з голови.",
+     "input_schema": {"type": "object", "properties": {
+         "order_no": {"type": "string"},
+         "kind": {"type": "string"}}, "required": ["order_no", "kind"]}},
 ]
 
 _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
            "search_knowledge": "note.read", "get_calendar": "calendar.read",
            "get_recent_mail": "gmail.read", "search_mail": "gmail.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
-           "travelon_order": "travelon.read"}
+           "travelon_order": "travelon.read",
+           "travelon_document": "travelon.read"}
 
 # §10: TravelON tools are a domain-scoped capability, not a general one. They
 # are hidden from the model outside the travelon domain (tools_for_domain) AND
 # refused at dispatch (run_tool) — two independent layers, so a stale or
 # hallucinated tool_use cannot reach the TravelON network from personal/tech.
-_TRAVELON_TOOLS = {"travelon_pulse", "travelon_order"}
+_TRAVELON_TOOLS = {"travelon_pulse", "travelon_order", "travelon_document"}
 
 _TRAVELON_WRONG_DOMAIN = {
     "error": "wrong_domain",
@@ -250,8 +264,36 @@ async def _t_travelon_order(db, user_id, domain, args):
     from app.core import travelon
     if not travelon.configured():
         return {"error": "TravelON не підключено"}
-    order = await travelon.fetch_order(str(args.get("order_no", "")).strip())
-    return {"card": travelon.order_card(order)} if order else {"found": False}
+    detail = await travelon.fetch_order_detail(str(args.get("order_no", "")).strip())
+    if detail is None:
+        return {"found": False}
+    out = {"found": True, "card": travelon.order_card(detail.order)}
+    if detail.insurance is not None:
+        out["insurance"] = travelon.insurance_card(detail)
+    if detail.tourists:
+        out["tourists"] = [t.name for t in detail.tourists]
+    # names of readable documents only — the URLs carry the full-access token
+    # and must never reach the model (R6.1C).
+    if detail.documents:
+        out["documents"] = sorted({d.kind for d in detail.documents})
+        out["attached"] = [d.title for d in detail.documents if d.kind == "attached"]
+    return out
+
+
+async def _t_travelon_document(db, user_id, domain, args):
+    from app.core.domains import Domain
+    if domain != Domain.TRAVELON:
+        return dict(_TRAVELON_WRONG_DOMAIN)
+    from app.core import travelon
+    if not travelon.configured():
+        return {"error": "TravelON не підключено"}
+    status, text = await travelon.fetch_document_text(
+        str(args.get("order_no", "")).strip(), str(args.get("kind", "")).strip())
+    if status != "ok":
+        return {"found": False, "reason": status}
+    # The text itself goes through run_tool's output scan like every other tool
+    # result, so a document carrying a technical secret is withheld wholesale.
+    return {"found": True, "chars": len(text), "text": text}
 
 
 _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
@@ -261,7 +303,8 @@ _EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
               "search_mail": _t_search_mail,
               "get_tasks": _t_get_tasks,
               "travelon_pulse": _t_travelon_pulse,
-              "travelon_order": _t_travelon_order}
+              "travelon_order": _t_travelon_order,
+              "travelon_document": _t_travelon_document}
 
 
 _REFUSED_ARGS = {"refused": True, "reason": "secret_in_arguments",
@@ -274,6 +317,33 @@ _WITHHELD = {"withheld": True, "reason": "secret_detected",
                      "передає такі значення. Скажи Данилу, ЩО саме знайшлось "
                      "(сервіс, документ) і що доступ треба взяти в менеджері "
                      "паролів; значення не називай — ти його не бачив."}
+
+
+# Tool output budget. Slicing the SERIALISED json (the old `[:8000]`) produced
+# INVALID json for any oversized result — the model then got an unterminated
+# string instead of data. Truncate the longest string FIELD instead, and keep
+# the envelope a valid object no matter what. A policy document legitimately
+# needs a bigger budget than a task list, hence the per-tool override.
+_PAYLOAD_DEFAULT = 8000
+_PAYLOAD_LIMITS = {"travelon_document": 24000}
+
+
+def _payload(result, limit: int) -> str:
+    dumped = json.dumps(result, ensure_ascii=False, default=str)
+    if len(dumped) <= limit:
+        return dumped
+    if isinstance(result, dict):
+        keys = [k for k, v in result.items() if isinstance(v, str)]
+        if keys:
+            big = max(keys, key=lambda k: len(result[k]))
+            room = len(result[big]) - (len(dumped) - limit) - 64
+            trimmed = {**result, big: result[big][:max(0, room)] + " […]",
+                       "truncated": True}
+            dumped = json.dumps(trimmed, ensure_ascii=False, default=str)
+            if len(dumped) <= limit:
+                return dumped
+    return json.dumps({"error": "result_too_large", "truncated": True},
+                      ensure_ascii=False)
 
 
 async def run_tool(db: AsyncSession, user_id: int, domain, name: str,
@@ -332,7 +402,7 @@ async def run_tool(db: AsyncSession, user_id: int, domain, name: str,
     except Exception:
         logger.exception("tool %s failed", name)
         result = {"error": "інструмент тимчасово не спрацював"}
-    payload = json.dumps(result, ensure_ascii=False, default=str)[:8000]
+    payload = _payload(result, _PAYLOAD_LIMITS.get(name, _PAYLOAD_DEFAULT))
     scan = security.scan(payload)
     if scan.blocked:
         logger.info("tool %s: output withheld by secret scan (categories=%s)",

@@ -1,42 +1,27 @@
 # NEXT — the one authorized round
 
-## Round 6.1B — Domain isolation (CURRENT, code complete, NOT deployed)
+## Round 6.1C — Order context: insurance & documents (CURRENT, code complete)
 
-The authorized round right now. Code is complete locally and NOT deployed; the
-migration has run only against local databases. **"Code complete" is not "live".**
-Do not call production done, and do NOT start the next round, until every step
-below has happened and been verified in production:
+Code is complete locally and NOT deployed. Steps, in order:
 
-1. Review the single commit `feat(r6.1b): enforce domain isolation end to end`.
-2. Deploy it, then run the Alembic migration on production
-   (`a7b1c2d3e4f5`, down_revision `f6a1b2c3d4e7`). It is idempotent and does no
-   provider calls, no embeddings, no content reads — pure schema + parent-based
-   backfill.
-3. **Assign Google accounts to domains** in `/accounts`. After the migration
-   every existing account is UNASSIGNED (domain = NULL) and therefore used by no
-   domain-scoped tool. Until the owner assigns each account, Gmail / Calendar /
-   Drive will honestly report "no account for this domain". This is deliberate —
-   domain is never guessed from the email.
-4. Verify live: `/domain` switches and persists; a personal note never surfaces
-   in a travelon answer and vice-versa; TravelON tools work only in the travelon
-   domain; `/domain_audit` looks sane; the R6.1A.1 secret behaviour is intact
-   (a password question still returns «не зберігаю»; a hard token is still
-   blocked).
-5. Understand that any legacy resource that landed in the wrong domain is NOT
-   moved automatically. Mis-classified material must be consciously re-uploaded
-   in the correct domain (see the runbook note in README).
-
-Only after all of that is the next round authorized.
+1. Review the commit `feat(r6.1c): read order insurance and documents`.
+2. Deploy it (no migration this round).
+3. **Set `CHAT_MODEL=claude-opus-5` in Railway variables** — the env var
+   overrides the code default, and production is currently on
+   `claude-opus-4-5`. Without this step the model does not change.
+4. Verify live in the travelon domain: forward the insurance letter again —
+   the bot must NOT answer «заявку 3490138 не знайшов», must open order 64772,
+   read the policy, and answer the coverage questions citing its terms.
+5. Spot-check that plain «заявка 59266» still returns the order card.
 
 ### Deferred out of this round (deliberately — do NOT start)
 
-- **R6.2** wiki revisions / durable compile queue (below).
-- **R6.3** confirmed save-answer flow (below).
-- **Local STT.** Voice audio still reaches the external transcription provider
-  before any scan can run — unchanged by R6.1B.
-- Any semantic/LLM re-classification of legacy rows into domains. The migration
-  is deterministic and parent-based on purpose; guessing domains from content is
-  explicitly out of scope, now and later.
+- Supplier-cabinet integration (Proxymo / SAMO / OBS) and underpayment
+  registries — covered by the `travelon-supplier-cabinets` skill, and a round
+  of its own.
+- Insurer general terms (Генеральний договір 14/25) in the knowledge base, so
+  the bot can answer insurance questions with no order at hand.
+- Reading documents of orders the owner has not named (bulk document indexing).
 
 ## Round 6.2 — Wiki revisions & durable compile queue (later, separate round)
 

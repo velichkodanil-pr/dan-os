@@ -6,7 +6,7 @@ import pytest
 
 from app.config import settings
 from app.core import travelon
-from app.core.orchestrator import _ORDER_RE, Orchestrator
+from app.core.orchestrator import _order_lookup_no, Orchestrator
 
 OWNER = 111
 
@@ -22,12 +22,12 @@ def _order(no="59266", status="Confirmed", debt=None, cost=85000.0, cur="UAH",
 # ---------- order regex ----------
 
 def test_order_regex():
-    assert _ORDER_RE.search("заявка 59266").group(1) == "59266"
-    assert _ORDER_RE.search("Що там по заявці №66422?").group(1) == "66422"
-    assert _ORDER_RE.search("покажи №66784").group(2) == "66784"
-    assert _ORDER_RE.search("order 12345").group(1) == "12345"
-    assert _ORDER_RE.search("нагадай завтра о 10 подзвонити") is None
-    assert _ORDER_RE.search("додай 5 задач") is None  # short numbers ignored
+    assert _order_lookup_no("заявка 59266") == "59266"
+    assert _order_lookup_no("Що там по заявці №66422?") == "66422"
+    assert _order_lookup_no("покажи №66784") == "66784"
+    assert _order_lookup_no("order 12345") == "12345"
+    assert _order_lookup_no("нагадай завтра о 10 подзвонити") is None
+    assert _order_lookup_no("додай 5 задач") is None  # short numbers ignored
 
 
 # ---------- order card ----------
@@ -61,9 +61,14 @@ async def test_order_lookup_in_chat(db, monkeypatch):
     out = await orch.handle_note(db, user_id=OWNER, text="що по заявці 59266?",
                                  dedupe_key="ord-1")
     assert out.kind == "chat" and "Заявка №59266" in out.reply
+    # R6.1C: a MISS is no longer a dead end. The shortcut guessed a number and
+    # guessed wrong, so the message falls through to the normal chat path
+    # (which has travelon_order/_document) instead of answering «не знайшов»
+    # and burying whatever the owner actually asked.
     out2 = await orch.handle_note(db, user_id=OWNER, text="заявка 11111",
                                   dedupe_key="ord-2")
-    assert "не знайшов" in out2.reply
+    assert out2.kind == "chat"
+    assert "Заявка №11111" not in (out2.reply or "")
 
 
 @pytest.mark.asyncio

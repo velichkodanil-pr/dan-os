@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r6.1b"
-APP_RELEASE = "R6.1B — domain isolation (personal / travelon / tech)"
+APP_VERSION = "r6.1c"
+APP_RELEASE = "R6.1C — order context: insurance & documents"
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     weekly_time: str = "19:00"  # Sunday coverage report
 
     # Full chat engine (agentic: model reaches for data via tools)
-    chat_model: str = "claude-sonnet-5"  # set "mock" or empty to disable
+    chat_model: str = "claude-opus-5"  # set "mock" or empty to disable
     chat_effort: str = "high"  # adaptive-thinking effort (sonnet 5+)
     chat_thinking_budget: int = 1500  # budget-style thinking (opus 4.x)
     chat_history_window: int = 24

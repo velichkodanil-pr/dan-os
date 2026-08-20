@@ -1,8 +1,57 @@
 # STATUS
 
-_Last verified: 2026-08-16 (R6.1B is CODE COMPLETE locally and NOT deployed; base HEAD = 7057434 / r6.1a.1). "Code complete" is not "deployed": no R6.1B code, migration or `/domain` behaviour has run in production. Production is unchanged by this round._
+_Last verified: 2026-08-20. R6.1B is DEPLOYED and verified live. R6.1C is CODE COMPLETE locally and NOT deployed._
 
-## R6.1B — End-to-end domain isolation: CODE COMPLETE, NOT DEPLOYED
+## R6.1C — Order context: insurance & documents: CODE COMPLETE, NOT DEPLOYED
+
+A forwarded insurance letter exposed three defects at once. The letter quoted
+«поліс № 3490138» and «заявкою № 64772»; the bot took the FIRST №-number (the
+policy), looked it up as an order, missed, and replied «заявку не знайшов» —
+the three real questions about coverage never reached the model.
+
+- **Order shortcut no longer guesses.** `_order_lookup_no()` replaces the old
+  first-match regex: a labelled «заявка №N» beats a bare «№N», two bare
+  candidates never shortcut, and a message longer than 120 chars is never
+  shortcut at all — a letter needs reading, not an order card.
+- **A miss is no longer a dead end.** A failed lookup falls through to the
+  agent (which has the tools to look properly) instead of answering
+  «не знайшов» and burying the question.
+- **Order detail is parsed** (`fetch_order_detail`): insurance block (provider,
+  policy nr, programme, sum, territory, dates), tourists by name, and the list
+  of order documents. The bulk/pulse path stays store-minimum on purpose.
+- **Documents are readable** (`fetch_document_text`): the policy PDF, voucher,
+  confirmation, invoices and attached files are fetched and extracted to text.
+  Document URLs carry the full-access TravelON token — they never reach the
+  model, the UI or the log; only extracted text does, through the same secret
+  scan as every other tool result.
+- **New agent tools**: `travelon_document`, and `travelon_order` now returns
+  insurance + tourists + document kinds. Both are travelon-domain only, hidden
+  outside it and refused at dispatch (R6.1B invariant intact).
+- **Latent bug fixed:** tool output was truncated by slicing the SERIALISED
+  json (`[:8000]`), so any oversized result reached the model as an
+  unterminated string. Truncation now happens on a field and the envelope
+  always parses; documents get a larger budget than a task list.
+- **Model:** `chat_model` default is now `claude-opus-5` (was a stale
+  `claude-sonnet-5` default while production ran `claude-opus-4-5`). Opus 5
+  resolves to 5-gen adaptive thinking + effort, not the Opus-4 budget style.
+- **Tests:** **341 passed** locally (21 new in `tests/test_r61c.py`, driven by
+  the real letter). No migration this round. Security and domain-isolation
+  suites re-run clean.
+
+Not deployed. `CHAT_MODEL` on Railway must be set to `claude-opus-5` at deploy
+time — the env var overrides the code default.
+
+---
+
+## R6.1B — End-to-end domain isolation: DEPLOYED ✅ (2026-08-18)
+
+Deployed as `0d1b7ba`; Railway deployment `bdd9cd3a` SUCCESS. The migration ran
+on production at startup: `f6a1b2c3d4e7 -> a7b1c2d3e4f5, r6.1b: end-to-end
+domain isolation`, no retries. Verified live: `/health/live` reports `r6.1b`,
+`/health/ready` reports `db: true` and `security_scan_complete: true` (the
+scanner-v2 marker survived, so wiki auto-compilation stayed unblocked).
+
+### What R6.1B shipped
 
 `personal` / `travelon` / `tech` are now real security/context boundaries, not
 just columns. The active domain is decided server-side at request start, travels
@@ -53,19 +102,21 @@ arguments or client JSON. See DECISIONS.md for the reasoning.
   adversarial isolation matrix + 6 ordered-pair cross-domain checks). The
   R6.1A.1 secret gates were re-run and do NOT regress.
 
-Not deployed. Next steps are in NEXT.md (review → deploy → migrate → assign
-Google accounts → verify live). Production is unchanged.
+Post-deploy action still outstanding for the owner: every Google account came
+out of the migration UNASSIGNED (domain = NULL) by design. Until each is given
+a domain in `/accounts`, Gmail / Calendar / Drive honestly report "no account
+for this domain".
 
 ---
 
 
-## R6.1A.1 — Secret boundary hardening: CODE COMPLETE, NOT DEPLOYED
+## R6.1A.1 — Secret boundary hardening: DEPLOYED ✅ (2026-08-15)
 
-Independent audit of R6.1A found the gate real but its perimeter incomplete.
-Fixed here; see DECISIONS.md for the reasoning. **Status discipline: "code
-complete" is not "scan complete".** Scanner v2 has run only against the local
-test database. The production scanner-v2 pass has NOT happened, so no claim is
-made about the current state of the live knowledge base.
+Deployed as `6ff57fc`. The scanner-v2 pass HAS since run in production
+(`/kb_security_scan`): 8 documents held in quarantine, 17 open findings,
+categories `oauth_token` / `api_key`; passwords released as searchable per the
+owner decision. Independent audit of R6.1A found the gate real but its
+perimeter incomplete; that is what this round fixed.
 
 - Scanner v2 (`SCANNER_VERSION = 2`): Cyrillic/Russian password values, PINs
   and repeated-digit values, `$ % {`-prefixed values, comma/semicolon/tab/pipe

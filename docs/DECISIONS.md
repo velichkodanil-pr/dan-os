@@ -2,6 +2,36 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-20 — R6.1C: deterministic shortcuts must not answer questions
+
+A forwarded insurance letter was answered with «заявку №3490138 не знайшов».
+The number was a POLICY number; the real order number sat later in the same
+text; and the three questions the letter actually asked never reached the model.
+
+- **A deterministic shortcut is a convenience, not a parser.** The order-card
+  shortcut now fires only for a SHORT message that is essentially just a
+  lookup. Any longer text goes to the agent — answering a letter with an order
+  card is a wrong answer even when the number is right.
+- **Labelled beats bare, ambiguity never guesses.** «заявка №N» wins over a
+  bare «№N» (policies, invoices and contracts are written with № too). Two
+  bare candidates produce no shortcut at all.
+- **A failed lookup is not an answer.** A miss falls through to the agent
+  instead of terminating the turn, so a wrong guess can no longer bury the
+  question.
+- **Document URLs are secrets.** Order documents carry the full-access
+  TravelON token in the URL. The token stays inside `travelon.py`: tools
+  return document KINDS and extracted TEXT, never a URL, and the text passes
+  the same output scan as every other tool result.
+- **Detail is parsed only for an order the owner named.** The bulk/period path
+  stays store-minimum (no names, no documents) — a period fetch covers
+  hundreds of orders and has no business touching passports.
+- **Never truncate serialised JSON.** Slicing `json.dumps(...)[:N]` produced an
+  unterminated string for any oversized tool result. Truncate a field, mark
+  `truncated`, and keep the envelope parseable.
+- **Opus 5 for conversation.** The code default had drifted to
+  `claude-sonnet-5` while production ran `claude-opus-4-5`; both now say
+  `claude-opus-5`. Owner decision: quality over token cost for the chat path.
+
 ## 2026-08-16 — R6.1B: domains as real isolation boundaries
 
 `domain` existed on most tables since earlier rounds but was inert: retrieval,

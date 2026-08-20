@@ -415,3 +415,191 @@ async def brief_line() -> str | None:
     if not parts:
         return "\n🧳 TravelON: тихо — без нових заявок і заїздів"
     return "\n🧳 <b>TravelON:</b> " + " · ".join(parts) + " (деталі: /travelon)"
+
+
+# ---------- single-order DETAIL (R6.1C) ----------
+# The bulk path above stays store-minimum on purpose: a period fetch parses
+# hundreds of orders and must not touch names or documents. The detail path
+# below is for ONE order the owner explicitly asked about — it parses the
+# blocks an answer actually needs (insurance, tourists, documents) and still
+# persists NOTHING. Document URLs carry the full-access token: they stay inside
+# this module and are never returned to the model, the UI or the log.
+
+MAX_DOC_CHARS = 20000   # a policy PDF is ~68k chars; the model needs the terms,
+                        # not the whole booklet, and prompts must stay sane
+
+
+@dataclass
+class Insurance:
+    included: bool
+    provider: str          # e.g. "ЄТС"
+    policy_nr: str         # e.g. "KM 3490138"
+    category: str          # programme/class, e.g. "А"
+    sum_insured: float | None
+    territory: str
+    from_date: date | None
+    to_date: date | None
+
+
+@dataclass
+class Tourist:
+    name: str              # "MUTSAK MYKHAILO"
+    dob: date | None
+
+
+@dataclass
+class OrderDoc:
+    kind: str              # insurance | voucher | confirmation | passenger | invoice | attached
+    title: str
+    url: str               # SECRET (carries the token) — never expose
+
+
+@dataclass
+class OrderDetail:
+    order: TravelonOrder
+    insurance: Insurance | None
+    tourists: list[Tourist]
+    documents: list[OrderDoc]
+
+    def doc(self, kind: str) -> OrderDoc | None:
+        kind = (kind or "").strip().lower()
+        for d in self.documents:
+            if d.kind == kind:
+                return d
+        for d in self.documents:   # allow matching an attached file by title
+            if kind and kind in d.title.lower():
+                return d
+        return None
+
+
+def _bool(raw: str) -> bool:
+    return (raw or "").strip().lower() == "true"
+
+
+def parse_order_detail(xml_text: str) -> OrderDetail | None:
+    """Rich parse of a SINGLE order. Returns None for an empty <orders/>."""
+    base = parse_orders(xml_text)
+    if not base:
+        return None
+    root = ElementTree.fromstring(xml_text)
+    o = root.find("order")
+
+    ins_el = o.find("insurance")
+    insurance = None
+    if ins_el is not None and _text(ins_el, "policy-nr"):
+        insurance = Insurance(
+            included=_bool(_text(ins_el, "included")),
+            provider=_text(ins_el, "provider"),
+            policy_nr=_text(ins_el, "policy-nr"),
+            category=_text(ins_el, "category"),
+            sum_insured=_num(_text(ins_el, "insurance-sum")),
+            territory=_text(ins_el, "territory"),
+            from_date=_date(_text(ins_el, "from-date")),
+            to_date=_date(_text(ins_el, "to-date")),
+        )
+
+    tourists = []
+    for c in o.findall("customers/customer"):
+        full = " ".join(x for x in (_text(c, "surname"), _text(c, "name")) if x)
+        if full:
+            tourists.append(Tourist(name=full, dob=_date(_text(c, "dob"))))
+
+    docs: list[OrderDoc] = []
+    d_el = o.find("documents")
+    if d_el is not None:
+        for kind in ("insurance", "confirmation", "voucher", "passenger"):
+            url = _text(d_el, kind)
+            if url:
+                docs.append(OrderDoc(kind=kind, title=kind, url=url))
+        for inv in d_el.findall("invoices/invoice"):
+            u = _text(inv, "url")
+            if u:
+                docs.append(OrderDoc(kind="invoice",
+                                     title=_text(inv, "title") or "invoice", url=u))
+        for af in d_el.findall("attached-files/attached-file"):
+            u = _text(af, "url")
+            if u:
+                docs.append(OrderDoc(kind="attached",
+                                     title=_text(af, "title") or "file", url=u))
+    return OrderDetail(order=base[0], insurance=insurance,
+                       tourists=tourists, documents=docs)
+
+
+async def fetch_order_detail(order_id: str) -> OrderDetail | None:
+    """Single order with insurance, tourists and document list."""
+    if not configured() or not str(order_id).strip().isdigit():
+        return None
+    url = f"{BASE}/{settings.travelon_token}/{str(order_id).strip()}"
+    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_UA) as client:
+        resp = await client.get(url)
+    if resp.status_code != 200:
+        logger.error("travelon order detail returned %s", resp.status_code)
+        return None
+    try:
+        return parse_order_detail(resp.text)
+    except ElementTree.ParseError:
+        logger.exception("travelon order detail: malformed XML")
+        return None
+
+
+def _pdf_text(data: bytes) -> str:
+    from io import BytesIO
+    from pypdf import PdfReader
+    reader = PdfReader(BytesIO(data))
+    return "\n".join((p.extract_text() or "") for p in reader.pages)
+
+
+async def fetch_document_text(order_id: str, kind: str) -> tuple[str, str]:
+    """Text of ONE document of an order. Returns (status, text).
+
+    status: ok | no_order | no_document | unsupported | error.
+    The document URL is never part of the return value — it carries the
+    TravelON token, and the caller's output goes to a model."""
+    detail = await fetch_order_detail(order_id)
+    if detail is None:
+        return "no_order", ""
+    doc = detail.doc(kind)
+    if doc is None:
+        return "no_document", ""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_UA,
+                                     follow_redirects=True) as client:
+            resp = await client.get(doc.url)
+        if resp.status_code != 200:
+            logger.error("travelon document %s -> %s", kind, resp.status_code)
+            return "error", ""
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if "pdf" in ctype or resp.content[:5] == b"%PDF-":
+            text = _pdf_text(resp.content)
+        elif "text" in ctype or "html" in ctype:
+            import re as _r
+            text = _r.sub(r"<[^>]+>", " ", resp.text)
+        else:
+            return "unsupported", ""
+    except Exception:
+        logger.exception("travelon document fetch failed (%s)", kind)
+        return "error", ""
+    text = " ".join(text.split())
+    return ("ok", text[:MAX_DOC_CHARS]) if text.strip() else ("unsupported", "")
+
+
+def insurance_card(d: OrderDetail) -> str:
+    """Plain-text insurance summary (the chat layer escapes HTML)."""
+    i = d.insurance
+    if i is None:
+        return f"Заявка №{d.order.order_no}: страхування у заявці не вказане."
+    when = " – ".join(x.strftime("%d.%m.%Y") for x in (i.from_date, i.to_date) if x)
+    lines = [f"🛡 Страхування заявки №{d.order.order_no}",
+             f"Страховик: {i.provider or '—'} · поліс {i.policy_nr or '—'}"]
+    if i.category:
+        lines.append(f"Програма/клас: {i.category}")
+    if i.sum_insured:
+        lines.append(f"Страхова сума: {i.sum_insured:,.0f}".replace(",", " "))
+    if i.territory:
+        lines.append(f"Територія: {i.territory}")
+    if when:
+        lines.append(f"Період: {when}")
+    if d.tourists:
+        who = ", ".join(t.name for t in d.tourists[:8])
+        lines.append(f"Застраховані ({len(d.tourists)}): {who}")
+    return "\n".join(lines)

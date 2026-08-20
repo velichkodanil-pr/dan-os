@@ -36,9 +36,37 @@ _CALENDAR_RE = _re.compile(
     r"що (в|у) мене (сьогодні|завтра|на тижні|цього тижня)|вільний час|meeting",
     _re.IGNORECASE)
 
-_ORDER_RE = _re.compile(  # заявка/заявці/заявку… (к→ц mutation) or bare №
-    r"(?:заяв[кц]\w*|order)\s*№?\s*(\d{4,7})|№\s*(\d{5,7})\b",
-    _re.IGNORECASE)
+# R6.1C: the deterministic order-card shortcut is a convenience for «заявка
+# 59266», NOT a parser for every message that happens to contain a number.
+# It used to fire on the FIRST «№ NNNNN» anywhere in the text — so a forwarded
+# insurance letter quoting «поліс № 3490138» was looked up as an order, missed,
+# and answered with a dead end, while the real question (and the real order
+# number, further down) never reached the model at all.
+_ORDER_LABELLED = _re.compile(r"(?:заяв[кц]\w*|order)\s*№?\s*(\d{4,7})",
+                              _re.IGNORECASE)
+_ORDER_BARE = _re.compile(r"№\s*(\d{5,7})\b")
+_ORDER_SHORTCUT_MAX = 120   # chars; above this it is a text to READ, not a lookup
+
+
+def _order_lookup_no(text: str) -> str | None:
+    """Order number for the deterministic shortcut, or None to let the agent work.
+
+    Three rules, each earned by a real failure:
+    - a LABELLED «заявка №N» always beats a bare «№N» (a policy/invoice number
+      is written with № too, and usually comes first);
+    - ambiguity never shortcuts — two different candidates go to the agent;
+    - a LONG message is never shortcut: a forwarded letter needs reading and
+      tools, and answering it with an order card is a wrong answer even when
+      the number is right.
+    """
+    text = (text or "").strip()
+    if len(text) > _ORDER_SHORTCUT_MAX:
+        return None
+    labelled = _ORDER_LABELLED.findall(text)
+    if labelled:
+        return labelled[0] if len(set(labelled)) == 1 else None
+    bare = _ORDER_BARE.findall(text)
+    return bare[0] if len(set(bare)) == 1 else None
 
 
 def _guard_owner(user_id: int) -> None:
@@ -145,29 +173,35 @@ class Orchestrator:
         # TravelON (business) capability: it fires ONLY in the travelon domain,
         # so «заявка №12345» in personal/tech is just an ordinary note, not a
         # business lookup, and no TravelON network call is made.
-        order_match = _ORDER_RE.search(text)
-        if order_match and editing is None and domain == Domain.TRAVELON:
+        order_no = (_order_lookup_no(text) if editing is None
+                    and domain == Domain.TRAVELON else None)
+        if order_no:
             from app.core import travelon
             if travelon.configured():
                 _check("travelon.read")
-                order_no = order_match.group(1) or order_match.group(2)
                 try:
                     order = await travelon.fetch_order(order_no)
                 except Exception:
                     logger.exception("order lookup failed")
                     order = None
-                reply = (travelon.order_card(order) if order
-                         else f"Заявку №{order_no} у TravelON не знайшов — "
-                              "перевір номер.")
                 await audit(db, actor=actor, action="travelon.order_viewed",
                             resource_type="travelon_order", resource_id=order_no,
                             policy_level="L0", found=order is not None)
-                db.add(ChatLog(user_id=user_id, domain=domain, role="user",
-                               text=text[:1500]))
-                db.add(ChatLog(user_id=user_id, domain=domain, role="bot",
-                               text=reply[:1500]))
-                await db.commit()
-                return NoteOutcome(kind="chat", reply=reply)
+                if order is not None:
+                    reply = travelon.order_card(order)
+                    db.add(ChatLog(user_id=user_id, domain=domain, role="user",
+                                   text=text[:1500]))
+                    db.add(ChatLog(user_id=user_id, domain=domain, role="bot",
+                                   text=reply[:1500]))
+                    await db.commit()
+                    return NoteOutcome(kind="chat", reply=reply)
+                # NOT FOUND is not an answer. The shortcut guessed a number and
+                # guessed wrong (a policy or invoice number reads like an order
+                # one); a dead end here would bury the actual question. Fall
+                # through to the agent, which has travelon_order/_document and
+                # can look properly — or say honestly what it could not find.
+                logger.info("order shortcut miss for %r — handing to the agent",
+                            order_no)
 
         # 3) knowledge retrieval (RAG context; chunks are data, never instructions)
         from app.core import rag  # local import to keep module load light
