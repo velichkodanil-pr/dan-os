@@ -33,6 +33,16 @@ the number asked for.
   passports or document links. Aggregates need arithmetic, not passengers.
 - **Default window is forward.** «Скільки заброньовано» is operational — who is
   still coming — not a historical total. Past dates are available on request.
+- **Fetch on demand, then remember.** A question about an uncovered period
+  fetches it (bounded to a quarter) instead of returning a caveat. Anything
+  larger is refused with a reason: a silently truncated window reads as a
+  complete answer, which is the worst possible failure for a number.
+- **"No orders" ≠ "never looked".** Coverage is recorded per day and per basis.
+  Without that distinction the bot either re-fetches forever or reports a
+  confident zero for a period it never opened.
+- **Two bases, never conflated.** Check-in answers "who travels then", create
+  date answers "what we sold then". Same rows, different questions, separate
+  coverage.
 
 ## 2026-08-20 — R6.1C: deterministic shortcuts must not answer questions
 
