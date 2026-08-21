@@ -448,3 +448,91 @@ class TravelonSyncDay(Base):
     day: Mapped[date] = mapped_column(Date)
     orders: Mapped[int] = mapped_column(Integer, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EnglishProfile(Base):
+    """Learner state for the English coach (R7). One row per user.
+
+    Personal-development data: domain is always 'personal', and the coach is
+    reachable only in that domain (symmetric with TravelON tools being
+    travelon-only). Learning progress never mixes into a business answer.
+    """
+    __tablename__ = "english_profile"
+    __table_args__ = (_domain_check("ck_english_profile_domain"),)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    level: Mapped[str] = mapped_column(String(8), default="B1")
+    minutes_per_day: Mapped[int] = mapped_column(Integer, default=12)
+    goals: Mapped[dict] = mapped_column(JSONB, default=list)   # list[str]
+    week: Mapped[int] = mapped_column(Integer, default=1)      # curriculum week
+    day_in_week: Mapped[int] = mapped_column(Integer, default=1)
+    streak: Mapped[int] = mapped_column(Integer, default=0)
+    best_streak: Mapped[int] = mapped_column(Integer, default=0)
+    sessions_done: Mapped[int] = mapped_column(Integer, default=0)
+    last_session_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # a live conversation: while set, plain messages go to the coach
+    talk_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    talk_turns: Mapped[int] = mapped_column(Integer, default=0)
+    talk_topic: Mapped[str] = mapped_column(Text, default="")
+    # last turns of the live conversation. Deliberately NOT ChatLog: English
+    # practice must not become context for a business answer.
+    talk_log: Mapped[dict] = mapped_column(JSONB, default=list)  # [[role, text]]
+    # fixes collected during the live conversation, flushed into an
+    # EnglishSession row when it ends
+    talk_mistakes: Mapped[dict] = mapped_column(JSONB, default=list)
+    # the session in progress: {"q": [...cards...], "pos": n, "ok": n,
+    # "shown": bool, "started": iso}. Server-side, so a session survives a
+    # restart and cannot be replayed from a stale button.
+    drill: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                 default=utcnow, onupdate=utcnow)
+
+
+class EnglishItem(Base):
+    """One thing to remember: a phrase, collocation or a corrected mistake.
+
+    Scheduled by a small SM-2 variant — the point of a daily 12-minute habit is
+    that the system decides WHAT to show, so the learner never has to.
+    """
+    __tablename__ = "english_items"
+    __table_args__ = (
+        UniqueConstraint("user_id", "term", name="uq_english_item"),
+        Index("ix_english_due", "user_id", "due_on"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    term: Mapped[str] = mapped_column(Text)              # the English phrase
+    meaning: Mapped[str] = mapped_column(Text, default="")   # Ukrainian
+    example: Mapped[str] = mapped_column(Text, default="")   # a sentence HE would say
+    note: Mapped[str] = mapped_column(Text, default="")      # trap / memory hook
+    scenario: Mapped[str] = mapped_column(String(40), default="")  # negotiation|email|it|travel
+    source: Mapped[str] = mapped_column(String(16), default="plan")  # plan|mistake
+    ease: Mapped[float] = mapped_column(Float, default=2.5)
+    interval_days: Mapped[int] = mapped_column(Integer, default=0)
+    reps: Mapped[int] = mapped_column(Integer, default=0)
+    lapses: Mapped[int] = mapped_column(Integer, default=0)
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EnglishSession(Base):
+    """A finished session — what was practised and what went wrong.
+
+    The mistake log is what makes next week different from this week: the
+    coach rebuilds around what actually broke, not around the plan on paper.
+    """
+    __tablename__ = "english_sessions"
+    __table_args__ = (Index("ix_english_sess", "user_id", "created_at"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    domain: Mapped[str] = mapped_column(String(32), default="personal")
+    kind: Mapped[str] = mapped_column(String(16), default="drill")  # drill|talk|grammar
+    week: Mapped[int] = mapped_column(Integer, default=1)
+    reviewed: Mapped[int] = mapped_column(Integer, default=0)
+    correct: Mapped[int] = mapped_column(Integer, default=0)
+    turns: Mapped[int] = mapped_column(Integer, default=0)
+    mistakes: Mapped[dict] = mapped_column(JSONB, default=list)  # list[{wrong,right,why}]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

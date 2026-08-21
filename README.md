@@ -67,6 +67,26 @@ chosen server-side and the model cannot change it.
   also requires that scan to have completed successfully.
 - Real tokens live only in Railway variables or a local gitignored `.env`.
 
+## English coach (R7)
+
+`/english` — a daily ~12-minute session with memory. Not a prompt: a 12-week
+curriculum (96 working phrases), SM-2 spaced repetition, and a mistake log that
+rebuilds what tomorrow shows.
+
+- ▶️ **Сесія** — reviews that are due, then this week's new phrases, then the
+  week's speaking task. The system chooses; you only answer «не згадав /
+  важко / знаю».
+- 💬 **Розмова** — a speaking partner that stays in English and plays the other
+  side of the scenario. Corrections arrive in a batch every third turn, never
+  inside the sentence, and become review cards. Voice in → voice out.
+- 📈 **Прогрес** / 📚 **План** — streak (counted in days, not taps), accuracy,
+  the phrases that keep breaking, and all 12 weeks.
+- **Personal domain only.** Practice never lands in `ChatLog`, so it can never
+  become context for a business answer — the mirror of TravelON tools being
+  travelon-only. The coach itself gets no tools at all.
+- `ENGLISH_TIME` (default `20:00`) — evening nudge; silent when the day is
+  already done. Empty disables it.
+
 ## Layout
 
 ```

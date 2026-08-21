@@ -1,8 +1,74 @@
 # STATUS
 
-_Last verified: 2026-08-20. R6.1C is DEPLOYED and verified live. R6.1D is CODE COMPLETE locally and NOT deployed._
+_Last verified: 2026-08-21. R6.1C is DEPLOYED and verified live. R6.1D is
+PUSHED to `main` (`d944524`) — confirm the Railway build with `/health`.
+R7 is CODE COMPLETE and NOT deployed._
 
-## R6.1D — Order aggregates from our own data: CODE COMPLETE, NOT DEPLOYED
+## R7 — English coach: CODE COMPLETE, NOT DEPLOYED
+
+«Додай кнопку, навчаємось англійської. Веди прогрес, щоб продовжували кожен
+раз. План навчання розроби.» Confirmed parameters: **B1**, **10–15 хв щодня**,
+goals — partner negotiations, business email, IT/technical, everyday/travel.
+
+The recommended approach was seven prompt templates. A prompt produces a good
+lesson and forgets it; what moves a B1 speaker is the opposite — a small daily
+session built around the phrases HE keeps losing. So this is a system with
+state, not a prompt pack: a plan position, spaced repetition, and a mistake log
+that changes what tomorrow looks like.
+
+- **12-week curriculum** (`app/core/english.py`, 96 phrases): partners first
+  (weeks 1–4: small talk, prices, bargaining, complaints), then written work
+  (5–7: requests, bad news, contracts), calls (8), IT (9–10: bugs, API docs),
+  travel (11), full negotiation (12). Each week = one theme, one grammar focus,
+  eight phrases he would really say, one speaking task.
+- **Spaced repetition** (`english_items`): a three-grade SM-2 variant — «не
+  згадав / важко / знаю», because on a phone anything more is noise. The
+  system decides what comes back and when, so he never chooses what to study.
+- **A session fits the minute budget**: ~one card per minute, reviews first
+  (they are the debt), then new material. Day one has nothing due, so the
+  session fills itself with new phrases instead of ending after 40 seconds.
+- **New phrases become memory items when SHOWN, not when queued** — an
+  abandoned session leaves no phantom backlog.
+- **Conversation practice** (`💬 Розмова`): a separate, TOOL-LESS model call.
+  The coach cannot reach the knowledge base, mail or TravelON; speaking
+  practice has no business touching business data. It replies in English only,
+  plays the other side of the scenario, and asks exactly one question back.
+- **Corrections come in batches, every 3rd turn** — constant repair kills
+  fluency. Fixes are parsed out of a `###FIX` block, rendered by us, and saved
+  as review cards. A malformed block costs the corrections, never the reply.
+- **The loop**: a phrase he learned from the plan and then broke in real speech
+  jumps back to tomorrow instead of waiting three weeks. That is what makes
+  next week different from this week.
+- **Progress is honest**: the streak counts calendar days, not button presses;
+  two sessions today are not two days, and the plan does not run ahead of the
+  person following it. The record survives a broken streak.
+- **Personal-domain only** — the mirror image of TravelON tools being
+  travelon-only. Practice text is never written to `ChatLog`, so an English
+  drill can never become context for a business answer; every button re-checks
+  the domain, so a tap after `/domain travelon` reaches nothing.
+- **Defence in depth**: the coach is its own model-egress point and re-scans
+  for secrets even though the orchestrator already gated the text.
+- **Degrades honestly**: if the coach cannot answer, the practice CLOSES and
+  the message falls through to ordinary chat — he never gets a Ukrainian
+  assistant reply mid-English and wonders why.
+- **Evening nudge** at `ENGLISH_TIME` (20:00), silent when the day is already
+  done and silent when there is no profile — a reminder for a habit he never
+  started is an advertisement.
+- **Voice practice works end to end**: a voice message goes to the coach and
+  comes back as voice. Two fixes made that real — `tts.speakable()` strips
+  markup and entities before synthesis (previously the voice read `<b>` out
+  loud, for every reply, not just English), and `NoteOutcome.speech` lets the
+  card show the Ukrainian corrections while the voice says only the English.
+- **Card buttons carry their queue position.** An old card keeps its buttons
+  forever in a chat; a tap on it used to grade whatever card was current —
+  scoring a phrase he never saw and skipping one he did. Same guard makes an
+  impatient double-tap grade once.
+- `/english` · `/english_stop` · migration `c9d3e4f5a6b7` (3 empty tables, no
+  backfill). Tests: `tests/test_r7.py` — 39 cases; suite 407 green.
+  Migration verified four ways: fresh, from the prod revision, downgrade +
+  replay, and a partial apply with one table missing.
+
+## R6.1D — Order aggregates from our own data: PUSHED (`d944524`)
 
 «Скільки туристів заброньовано в Туреччину з приймаючою Kalanit» had no tool
 at all. `travelon_order` answers ONE order, `travelon_pulse` a fixed metric

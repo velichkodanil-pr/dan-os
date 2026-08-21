@@ -16,13 +16,14 @@ from aiogram.types import (
 
 from app import db as database
 from app.config import APP_RELEASE, settings
-from app.core import briefs, google_client
+from app.core import briefs, english, google_client
 from app.core.domains import (
     ALLOWED_DOMAINS, DESCRIPTIONS, Domain, get_active_domain,
     label as domain_label, parse_domain, set_active_domain)
 from app.core.orchestrator import Orchestrator
 from app.core.policy import PolicyDenied
 from app.core.transcription import TranscriptionError, get_transcriber
+from app.models import EnglishProfile
 from app.telegram.cards import proposal_card, task_created_card, today_card
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,30 @@ async def send_debt_alert(user_id: int) -> None:
         await bot_instance.send_message(user_id, text)
 
 
+async def send_english_nudge(user_id: int) -> None:
+    """Evening English nudge. Silent when the day is already done, and silent
+    when there is no profile yet — a reminder for a habit he never started is
+    an advertisement, not a reminder.
+
+    Deliberately domain-blind: the nudge only says «сьогодні ще не займався»
+    and opens /english, which enforces the personal-domain boundary itself.
+    Nothing about his learning data leaves this message."""
+    async with database.session() as db:
+        prof = await db.get(EnglishProfile, user_id)
+        if prof is None or prof.last_session_on == english.today_local():
+            return
+        st = await english.stats(db, user_id, english.today_local())
+        wk = english.week_for(prof.week)
+    streak = (f"🔥 серія {prof.streak} дн. — не рви" if prof.streak
+              else "Почни серію сьогодні")
+    await bot_instance.send_message(
+        user_id,
+        f"🇬🇧 <b>{english.DEFAULT_MINUTES} хвилин англійської?</b>\n"
+        f"{streak}. На сьогодні: {st['due']} повторень · тиждень {prof.week} — "
+        f"{wk.title}.\n\n/english",
+        )
+
+
 def _conflict_kb(new_id) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆕 Нове замінює старе", callback_data=f"cf:{new_id}:n")],
@@ -235,6 +260,7 @@ async def cmd_start(message: Message) -> None:
         "• 🎙 транскрипт зустрічі (vtt/srt із Zoom) → підсумок, рішення і задачі\n"
         "• /app — міні-застосунок: сьогодні, підтвердження, пам'ять 📱\n"
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
+        "• /english — англійська 🇬🇧: щоденна сесія ~12 хв, розмовна практика й план на 12 тижнів (домен 🏠 Особисте)\n"
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
@@ -1507,8 +1533,12 @@ async def _process_note(message: Message, text: str, prefix: str = "",
         await message.answer((prefix if i == 0 else "") + safe[i:i + 3900])
     if want_voice and outcome.kind == "chat":
         from app.core import tts
-        if tts.should_speak(outcome.reply or "", True):
-            audio = await tts.synthesize(outcome.reply)
+        # Speak the plain text, not the markup: `speech` when the answer said
+        # something different from what the card shows (the English coach),
+        # otherwise the reply with its tags and entities stripped.
+        spoken = tts.speakable(outcome.speech or outcome.reply or "")
+        if tts.should_speak(spoken, True):
+            audio = await tts.synthesize(spoken)
             if audio:
                 from aiogram.types import BufferedInputFile
                 try:
@@ -1556,6 +1586,221 @@ async def on_voice(message: Message) -> None:
                         want_voice=await _voice_enabled(message.from_user.id))
 
 
+# ---------- English coach (R7) ----------
+# A personal-domain capability, symmetric with TravelON being travelon-only:
+# learning data never becomes context for a business answer, and a business
+# question never lands in the middle of a speaking drill.
+
+def _en_hub_kb(talking: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="▶️ Сесія", callback_data="en:go"),
+             InlineKeyboardButton(
+                 text=("⏹ Завершити розмову" if talking else "💬 Розмова"),
+                 callback_data=("en:stop" if talking else "en:talk"))],
+            [InlineKeyboardButton(text="📈 Прогрес", callback_data="en:prog"),
+             InlineKeyboardButton(text="📚 План", callback_data="en:plan")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Every card button carries the queue position it was drawn for. A card that
+# scrolled up the chat keeps its buttons forever; without the position, a tap
+# on an old card would grade whatever happens to be current — mis-scoring a
+# phrase he never saw and skipping one he did. Same guard covers a double-tap.
+def _en_show_kb(pos: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="👀 Показати", callback_data=f"en:show:{pos}")]])
+
+
+def _en_grade_kb(pos: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Не згадав",
+                             callback_data=f"en:g:again:{pos}"),
+        InlineKeyboardButton(text="😐 Важко", callback_data=f"en:g:hard:{pos}"),
+        InlineKeyboardButton(text="✅ Знаю", callback_data=f"en:g:good:{pos}")]])
+
+
+def _en_next_kb(pos: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="Далі →", callback_data=f"en:g:good:{pos}")]])
+_EN_DONE_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="💬 Розмова", callback_data="en:talk"),
+    InlineKeyboardButton(text="🇬🇧 Меню", callback_data="en:hub")]])
+_EN_SWITCH_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="🏠 Перемкнути на Особисте",
+                         callback_data="dom:personal")]])
+_EN_WRONG_DOMAIN = (
+    "🇬🇧 Англійська живе в домені <b>🏠 Особисте</b> — там її дані й "
+    "прогрес, і туди не дістає ані TravelON, ані tech.")
+
+
+def _en_stale(prof, parts: list[str], idx: int) -> bool:
+    """True when the button belongs to a card the session has already passed."""
+    if len(parts) <= idx:
+        return False               # a button from before this guard existed
+    try:
+        return int(parts[idx]) != (prof.drill or {}).get("pos", -1)
+    except ValueError:
+        return True
+
+
+async def _en_ready(user_id: int) -> bool:
+    """True iff the active domain is personal. The coach is not offered
+    elsewhere — the same boundary TravelON tools have, in the other direction."""
+    return await _active_domain(user_id) == Domain.PERSONAL
+
+
+async def _en_send_card(target, prof, db) -> bool:
+    """Draw the card at the cursor. Returns False when the queue is empty."""
+    card = await english.current_card(db, prof)
+    if card is None:
+        return False
+    if card["kind"] == "gone":       # item deleted mid-session — skip it
+        await english.advance(db, prof, "good")
+        return await _en_send_card(target, prof, db)
+    pos = (prof.drill or {}).get("pos", 0)
+    kb = (_en_show_kb(pos) if card["kind"] == "ask"
+          else _en_next_kb(pos) if card["kind"] == "new" else _en_grade_kb(pos))
+    await target(card["text"], reply_markup=kb)
+    return True
+
+
+@router.message(Command("english"))
+async def cmd_english(message: Message) -> None:
+    """The English hub: where he is in the plan and what he can do right now."""
+    if not _is_owner(message):
+        return
+    user_id = message.from_user.id
+    if not await _en_ready(user_id):
+        await message.answer(_EN_WRONG_DOMAIN, reply_markup=_EN_SWITCH_KB)
+        return
+    async with database.session() as db:
+        prof = await english.get_profile(db, user_id)
+        st = await english.stats(db, user_id, english.today_local())
+        talking = prof.talk_started_at is not None and not english.talk_expired(prof)
+        text = english.hub_card(prof, st)
+        await db.commit()
+    await message.answer(text, reply_markup=_en_hub_kb(talking))
+
+
+@router.message(Command("english_stop"))
+async def cmd_english_stop(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    async with database.session() as db:
+        prof = await db.get(EnglishProfile, message.from_user.id)
+        if prof is None or prof.talk_started_at is None:
+            await message.answer("Активної розмови немає. Почати: /english")
+            return
+        text = await english.end_talk(db, prof)
+        await db.commit()
+    await message.answer(text, reply_markup=_EN_DONE_KB)
+
+
+async def _en_callback(cb: CallbackQuery, user_id: int, parts: list[str]) -> None:
+    """All English buttons. Every branch re-checks the domain: a button from an
+    old message must not reach personal data after a /domain switch."""
+    sub = parts[1] if len(parts) > 1 else ""
+    if not await _en_ready(user_id):
+        await cb.answer("Спершу 🏠 Особисте")
+        await cb.message.answer(_EN_WRONG_DOMAIN, reply_markup=_EN_SWITCH_KB)
+        return
+    async with database.session() as db:
+        prof = await english.get_profile(db, user_id)
+
+        if sub == "hub":
+            st = await english.stats(db, user_id, english.today_local())
+            talking = (prof.talk_started_at is not None
+                       and not english.talk_expired(prof))
+            text = english.hub_card(prof, st)
+            await db.commit()
+            await cb.answer()
+            await cb.message.answer(text, reply_markup=_en_hub_kb(talking))
+            return
+
+        if sub == "plan":
+            text = english.plan_card(prof)
+            await db.commit()
+            await cb.answer()
+            await cb.message.answer(text)
+            return
+
+        if sub == "prog":
+            text = await english.progress_card(db, prof)
+            await db.commit()
+            await cb.answer()
+            await cb.message.answer(text)
+            return
+
+        if sub == "talk":
+            text = await english.start_talk(db, prof)
+            await db.commit()
+            await cb.answer()
+            await cb.message.answer(text)
+            return
+
+        if sub == "stop":
+            text = await english.end_talk(db, prof)
+            await db.commit()
+            await cb.answer()
+            await cb.message.answer(text, reply_markup=_EN_DONE_KB)
+            return
+
+        if sub == "go":
+            drill = await english.start_session(db, prof)
+            if not drill.get("q"):
+                await db.commit()
+                await cb.answer()
+                await cb.message.answer(
+                    "Сьогодні повторювати нічого, і нові фрази теж вичерпані. "
+                    "Найкорисніше зараз — розмова.", reply_markup=_EN_DONE_KB)
+                return
+            ok = await _en_send_card(cb.message.answer, prof, db)
+            await db.commit()
+            await cb.answer()
+            if not ok:
+                await cb.message.answer("Черга порожня.", reply_markup=_EN_DONE_KB)
+            return
+
+        if sub == "show":
+            if _en_stale(prof, parts, 2):
+                await cb.answer("Ця картка вже пройдена")
+                return
+            await english.reveal(db, prof)
+            card = await english.current_card(db, prof)
+            pos = (prof.drill or {}).get("pos", 0)
+            await db.commit()
+            await cb.answer()
+            if card is None:
+                await cb.message.answer("Сесію вже завершено.",
+                                        reply_markup=_EN_DONE_KB)
+                return
+            await cb.message.edit_text(card["text"],
+                                       reply_markup=_en_grade_kb(pos))
+            return
+
+        if sub == "g":
+            if _en_stale(prof, parts, 3):
+                await cb.answer("Ця картка вже пройдена")
+                return
+            grade = parts[2] if len(parts) > 2 else "good"
+            more = await english.advance(db, prof, grade)
+            if more:
+                ok = await _en_send_card(cb.message.answer, prof, db)
+                await db.commit()
+                await cb.answer()
+                if not ok:
+                    await cb.message.answer("Черга порожня.",
+                                            reply_markup=_EN_DONE_KB)
+                return
+            res = await english.finish_session(db, prof)
+            text = english.session_summary(res)
+            await db.commit()
+            await cb.answer("Готово")
+            await cb.message.answer(text, reply_markup=_EN_DONE_KB)
+            return
+
+    await cb.answer("Невідома дія")
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message) -> None:
     if not _is_owner(message):
@@ -1582,6 +1827,7 @@ _COMMAND_HELP = (
     "/domain_audit\n"
     "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
     "/habit · /habits\n"
+    "<b>Англійська:</b> /english · /english_stop\n"
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
     "/drive_all · /kb_security_scan · /kb_quarantine\n"
     "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
@@ -1688,6 +1934,9 @@ async def on_callback(cb: CallbackQuery) -> None:
 
     if action == "dr":  # Drive folder id is not a UUID
         await _index_drive_folder(cb, user_id, parts[1] if len(parts) > 1 else "")
+        return
+    if action == "en":  # English coach buttons — values are not UUIDs
+        await _en_callback(cb, user_id, parts)
         return
     if action == "dom":  # domain-switch button — value is not a UUID
         try:

@@ -2,6 +2,36 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-08-21 — R7: the English coach is a system, not a prompt
+
+Seven prompt templates were on the table. They were not adopted as-is, with
+the owner's blessing («можеш її не притримуватись, якщо можна краще»).
+
+- **State beats prompting.** A one-shot «act as a language teacher» produces a
+  good lesson and forgets it. Progress, spaced repetition and a mistake log are
+  the whole difference between a lesson and a habit — so the plan position,
+  the memory items and the session log live in Postgres, not in a prompt.
+- **The system chooses, he answers.** The daily session is assembled from what
+  is due plus what the week owes. Choosing what to study is the friction that
+  ends daily habits.
+- **Twelve minutes is a hard constraint, not a suggestion.** The queue is
+  built to the minute budget; a thin day is filled with new material rather
+  than ending early, and a large backlog is capped rather than dumped.
+- **Correct in batches, never inside the sentence.** Fluency dies under
+  constant repair. Corrections arrive every third turn and immediately become
+  review cards — the fix he needed is the card he gets tomorrow.
+- **The coach gets no tools.** It is a separate model call with no access to
+  the knowledge base, mail or TravelON. Speaking practice has no reason to
+  touch business data, and a coach that could would be a new egress path.
+- **Personal domain only**, and practice is never written to `ChatLog`. This is
+  the exact mirror of TravelON tools being travelon-only: learning data must
+  not become context for a business answer, in either direction.
+- **The streak counts days, not taps.** Two sessions in one day are one day.
+  A progress number that can be farmed is worse than no progress number.
+- **A dead coach closes the practice.** If the model cannot answer, the session
+  ends and the message goes to ordinary chat — silently swallowing his English
+  into the assistant would be the confusing failure.
+
 ## 2026-08-20 — R6.1D: aggregates come from our own mirrored data
 
 «Скільки туристів з приймаючою Kalanit» had no tool, so the model answered

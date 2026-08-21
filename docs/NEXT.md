@@ -1,11 +1,40 @@
 # NEXT — the one authorized round
 
-## Round 6.1D — Order aggregates (CURRENT, code complete)
+## Round 7 — English coach (CURRENT, code complete)
 
-Code is complete locally and NOT deployed. Steps, in order:
+R6.1D is already on `main` (`d944524`); R7 sits directly on top of it.
 
-1. Review the commit `feat(r6.1d): aggregate our own orders`.
-2. Deploy it. The migration `b8c2d3e4f5a6` adds ONE empty table — no backfill.
+1. Review `feat(r7): english coach — daily session, conversation, progress`.
+2. Deploy. Migration `c9d3e4f5a6b7` adds THREE empty tables — no backfill.
+3. Optional env: `ENGLISH_TIME` (default `20:00`) — the evening nudge. Empty
+   disables it. Nothing else to configure; the coach uses `CHAT_MODEL`.
+4. In Telegram: `/domain personal`, then `/english`.
+5. Press ▶️ Сесія. First session is all new phrases (nothing is due yet) —
+   ~8 cards. Then 💬 Розмова: write English, the coach answers in English and
+   corrects in a batch every third turn. Voice works too and comes back as
+   voice. Close with /english_stop.
+6. Come back tomorrow: the queue now holds yesterday's phrases plus anything
+   the conversation corrected. That is the whole point of the round.
+7. 📈 Прогрес shows streak, accuracy and the phrases that keep breaking;
+   📚 План shows all 12 weeks.
+
+### Known limits (deliberate, not bugs)
+
+- The plan is 12 weeks; after week 12 the position stops advancing and sessions
+  become review + conversation. Extending the curriculum is a later round.
+- No listening-comprehension content beyond voice replies, and no pronunciation
+  scoring — the model hears a transcript, not audio.
+- Level is fixed at B1 and minutes at 12 until he asks otherwise; both are
+  columns, so changing them is an UPDATE, not a migration.
+
+## Round 6.1D — Order aggregates (PUSHED, verify live)
+
+Pushed as `d944524`. Migration `b8c2d3e4f5a6` adds the cache tables — no
+backfill. Remaining owner steps:
+
+1. Confirm the Railway build finished: `/health` should report `r6.1d` or
+   newer.
+2. (done — the commit is on `main`)
 3. Optionally run `/travelon_sync` to pre-warm; not required — the bot fills
    any window it needs on demand the first time it is asked.
 4. Ask in Telegram: «скільки туристів у Туреччину з приймаючою Gepard за

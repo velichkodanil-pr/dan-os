@@ -69,7 +69,8 @@ async def _fire_due(send_message) -> None:
 
 
 async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
-                       run_debts=None, run_tv_sync=None) -> None:
+                       run_debts=None, run_tv_sync=None,
+                       run_english=None) -> None:
     owner = settings.owner_telegram_id
     if not owner:
         return
@@ -87,6 +88,12 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
     if run_tv_sync is not None and settings.travelon_sync_time.strip():
         rituals.append(("tv_sync", settings.travelon_sync_time.strip(),
                         run_tv_sync, None))
+    # R7: the English nudge. It fires the ritual every evening; the handler
+    # itself stays silent when the session is already done, so the reminder
+    # never turns into noise the owner learns to ignore.
+    if run_english is not None and settings.english_time.strip():
+        rituals.append(("english", settings.english_time.strip(),
+                        run_english, None))
     for key, time_str, fn, weekday in rituals:
         if weekday is not None and now_local.weekday() != weekday:
             continue
@@ -108,23 +115,23 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
 
 
 async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-                run_debts=None, run_tv_sync=None) -> None:
+                run_debts=None, run_tv_sync=None, run_english=None) -> None:
     while True:
         try:
             await _fire_due(send_message)
             await _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
-                               run_debts, run_tv_sync)
+                               run_debts, run_tv_sync, run_english)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
 def start(send_message, run_brief, run_checkin, run_digest, run_weekly,
-          run_debts=None, run_tv_sync=None) -> None:
+          run_debts=None, run_tv_sync=None, run_english=None) -> None:
     global _task
     _task = asyncio.create_task(
         _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-              run_debts, run_tv_sync))
+              run_debts, run_tv_sync, run_english))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

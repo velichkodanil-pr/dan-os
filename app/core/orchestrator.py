@@ -94,6 +94,10 @@ class NoteOutcome:
     cal_create: object | None = None  # PendingCalCreate awaiting confirmation
     cal_accounts: list | None = None  # (index, email) choices for cal_create/draft
     draft: object | None = None  # PendingDraft (compose-new) awaiting confirmation
+    # what a voice reply should SAY when it differs from what the card SHOWS.
+    # The English coach uses it: the English answer is spoken, the Ukrainian
+    # correction block underneath is for reading, not for listening.
+    speech: str | None = None
 
 
 class Orchestrator:
@@ -168,6 +172,30 @@ class Orchestrator:
         if state and state.pending_edit_proposal:
             editing = await db.get(Proposal, state.pending_edit_proposal)
             state.pending_edit_proposal = None
+
+        # 2b) English coach (R7). While a speaking session is live, plain
+        # messages go to the coach, not to the assistant — including voice,
+        # which is the point: he speaks, it answers, and the bot's own TTS
+        # sends the answer back as audio. PERSONAL domain only, the mirror of
+        # TravelON tools being travelon-only: practice text is never written to
+        # ChatLog, so an English drill can never become context for a business
+        # answer. The secret gate above has already run on this text.
+        if editing is None and domain == Domain.PERSONAL:
+            from app.core import english
+            talking = await english.talk_active(db, user_id)
+            if talking is not None:
+                spoken = await english.talk_reply(db, talking, text)
+                if spoken is not None:
+                    reply, speech = spoken
+                    await audit(db, actor=actor, action="english.talk_turn",
+                                resource_type="english", policy_level="L1",
+                                turn=talking.talk_turns)
+                    await db.commit()
+                    return NoteOutcome(kind="chat", reply=reply, speech=speech)
+                # The coach could not answer. Close the practice instead of
+                # silently forwarding his English into ordinary chat — he would
+                # get a Ukrainian assistant reply and never know why.
+                await english.end_talk(db, talking)
 
         # 2a) TravelON order lookup — deterministic, answers directly. This is a
         # TravelON (business) capability: it fires ONLY in the travelon domain,

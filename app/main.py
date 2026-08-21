@@ -52,7 +52,8 @@ async def lifespan(_: FastAPI):
         database.init_engine()
         scheduler.start(_send_reminder, botmod.send_brief, botmod.send_checkin,
                         botmod.send_digest, botmod.send_weekly,
-                        botmod.send_debt_alert, botmod.run_travelon_sync)
+                        botmod.send_debt_alert, botmod.run_travelon_sync,
+                        botmod.send_english_nudge)
     else:
         logger.warning("DATABASE_URL is not set — running without persistence.")
     if settings.database_url and bot:

@@ -4,13 +4,26 @@ Text is ALWAYS sent first; the voice note is an addition, never a replacement.
 Long replies stay text-only (listening to a 2-minute robot is worse than
 reading). Toggle per user with /voice; default on.
 """
+import html as _html
 import logging
+import re
 
 import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+_TAG = re.compile(r"<[^>]+>")
+
+
+def speakable(reply: str) -> str:
+    """Telegram HTML -> something a voice can read.
+
+    Replies carry markup (<b>, <i>, <s>, <code>) and escaped entities. Fed to
+    TTS raw, the voice reads the tags out loud. Stripping them is not cosmetic:
+    it is the difference between an answer and gibberish."""
+    return _html.unescape(_TAG.sub("", reply or "")).strip()
 
 
 def should_speak(reply: str, enabled: bool) -> bool:
