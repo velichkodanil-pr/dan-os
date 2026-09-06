@@ -2,6 +2,10 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-09-06 — `httpx`/`httpcore` log at WARNING, never INFO
+
+Their INFO request lines printed the full TravelON report URL — token included — into the Railway log, so both loggers are pinned to WARNING in `app/main.py`.
+
 ## 2026-08-21 — R7: the English coach is a system, not a prompt
 
 Seven prompt templates were on the table. They were not adopted as-is, with

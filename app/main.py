@@ -19,6 +19,10 @@ from app.telegram.bot import router as telegram_router
 from app.webapp.routes import router as webapp_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO — those URLs carry the TravelON report
+# token and the Telegram bot token, so they must never reach the deploy log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("dan_os")
 
 WEBHOOK_PATH = "/telegram/webhook"
