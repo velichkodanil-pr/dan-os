@@ -2,6 +2,29 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-09-24 — Provider calls retry blips and alert the owner on outages
+
+Between 2026-09-12 and 2026-09-23 the OpenAI balance ran out. Voice, TTS and
+semantic search failed for days with nothing but a line in the Railway log;
+the owner found out from an audit. Owner asked for protection («зроби захист»).
+Out-of-round hotfix, like the 2026-09-06 log fix — no schema change.
+
+- **Every LLM/STT/TTS/embedding call goes through `provider_health.post`**
+  (`app/core/provider_health.py`). Nine call sites, no other behaviour change:
+  callers still get the raw response and keep their own error handling.
+- **Transient → retry.** 408/429/5xx/529 get up to two retries (1.5 s, 3 s, or
+  `Retry-After` capped at 20 s). The 2026-09-12 burst was a rate limit, not
+  money, and would have been absorbed.
+- **Fatal → alert, never retry.** OpenAI `insufficient_quota`, Anthropic «credit
+  balance is too low», 402 and 401 send ONE Telegram message to the owner per
+  provider/problem per 6 h, and one «знову відповідає» when the provider
+  recovers. Cooldown state is in-memory on purpose: a restart re-alerting once
+  is cheaper than a table, and the log-only failure mode is what we are fixing.
+- **Core stays adapter-free.** The Telegram sender is injected at startup
+  (`set_alert_sink`), like the scheduler's `send_message`. Alert text carries
+  the provider, the HTTP status and which env var to check — never response
+  bodies, keys or URLs.
+
 ## 2026-09-06 — `httpx`/`httpcore` log at WARNING, never INFO
 
 Their INFO request lines printed the full TravelON report URL — token included — into the Railway log, so both loggers are pinned to WARNING in `app/main.py`.

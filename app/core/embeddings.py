@@ -7,6 +7,7 @@ from typing import Protocol
 import httpx
 
 from app.config import settings
+from app.core import provider_health
 from app.models import EMBED_DIM
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,8 @@ class OpenAIEmbeddingProvider:
         async with httpx.AsyncClient(timeout=60) as client:
             for i in range(0, len(texts), 64):
                 batch = [t[:6000] for t in texts[i:i + 64]]
-                resp = await client.post(
-                    "https://api.openai.com/v1/embeddings",
+                resp = await provider_health.post(
+                    client, "openai", "https://api.openai.com/v1/embeddings",
                     headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                     json={"model": settings.embed_model, "input": batch},
                 )

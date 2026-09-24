@@ -5,6 +5,7 @@ import logging
 import httpx
 
 from app.config import settings
+from app.core import provider_health
 from app.core import google_client
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ async def _rank_with_haiku(emails: list[dict]) -> str | None:
         "Без вступу і підсумків — лише рядки.\n\n" + listing)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+            resp = await provider_health.post(
+                client, "anthropic", "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": settings.anthropic_api_key,
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},

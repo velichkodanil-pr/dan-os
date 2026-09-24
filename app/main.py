@@ -11,7 +11,7 @@ from sqlalchemy import text as sql_text
 
 from app import db as database
 from app.config import APP_RELEASE, APP_VERSION, SCANNER_BUILD, settings
-from app.core import google_client, scheduler
+from app.core import google_client, provider_health, scheduler
 from app.core.audit import audit
 from app.core.domains import ALLOWED_DOMAINS, label as domain_label
 from app.telegram import bot as botmod
@@ -50,8 +50,16 @@ async def _send_reminder(user_id: int, html: str, task_id: str = "") -> None:
     await bot.send_message(user_id, html, reply_markup=kb)
 
 
+async def _alert_owner(html: str) -> None:
+    """Provider outages (no credits, rejected key) → one message to the owner."""
+    if bot is None or not settings.owner_telegram_id:
+        return
+    await bot.send_message(int(settings.owner_telegram_id), html)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    provider_health.set_alert_sink(_alert_owner)
     if settings.database_url:
         database.init_engine()
         scheduler.start(_send_reminder, botmod.send_brief, botmod.send_checkin,

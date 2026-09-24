@@ -5,6 +5,7 @@ from typing import Protocol
 import httpx
 
 from app.config import settings
+from app.core import provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ class OpenAITranscriptionProvider:
         if len(audio) > MAX_VOICE_BYTES:
             raise TranscriptionError("Голосове завелике (ліміт 20 МБ)")
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
+            resp = await provider_health.post(
+                client, "openai", "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 data={"model": settings.stt_model},
                 files={"file": (filename, audio, "audio/ogg")},

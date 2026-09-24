@@ -11,6 +11,7 @@ import re
 import httpx
 
 from app.config import settings
+from app.core import provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,8 @@ async def synthesize(text: str) -> bytes | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/audio/speech",
+            resp = await provider_health.post(
+                client, "openai", "https://api.openai.com/v1/audio/speech",
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 json={"model": settings.tts_model, "voice": settings.tts_voice,
                       "input": text[:settings.tts_max_chars],

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core import provider_health
 from app.models import MemoryItem
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,8 @@ async def _haiku_conflict(new: str, existing: list[str]) -> int | None:
         f"Новий факт: {new[:300]}\n\nНаявні:\n{listing}")
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+            resp = await provider_health.post(
+                client, "anthropic", "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": settings.anthropic_api_key,
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},

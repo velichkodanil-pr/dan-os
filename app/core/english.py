@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core import provider_health
 from app.core import security
 from app.core.audit import audit
 from app.models import EnglishItem, EnglishProfile, EnglishSession
@@ -676,8 +677,8 @@ async def _call_model(system: str, messages: list[dict],
                **thinking_params(settings.chat_model)}
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+            resp = await provider_health.post(
+                client, "anthropic", "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": settings.anthropic_api_key,
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},

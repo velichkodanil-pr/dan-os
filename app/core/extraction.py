@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.config import settings
+from app.core import provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +136,8 @@ class HaikuExtractionProvider:
             profile_block=profile_block, history_block=history_block,
         )
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+            resp = await provider_health.post(
+                client, "anthropic", "https://api.anthropic.com/v1/messages",
                 headers={
                     "x-api-key": settings.anthropic_api_key,
                     "anthropic-version": "2023-06-01",
@@ -298,8 +299,8 @@ async def haiku_text(prompt: str, max_tokens: int = 600) -> str | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+            resp = await provider_health.post(
+                client, "anthropic", "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": settings.anthropic_api_key,
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
