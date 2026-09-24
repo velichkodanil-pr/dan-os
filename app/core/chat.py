@@ -77,6 +77,11 @@ _SYSTEM = """Ти — DAN.OS, персональна AI-операційна с�
   «напиши лист на adresa@… з текстом …», /reply, /goal, /habit)."""
 
 
+# Adaptive thinking counts against max_tokens (Opus 5.5 always thinks), so
+# every adaptive-thinking call gets this much headroom on top of the reply.
+THINKING_HEADROOM = 4000
+
+
 def thinking_params(model: str) -> dict:
     """Sonnet 5+ wants adaptive+effort; Opus 4.x wants enabled+budget."""
     if model.startswith(("claude-opus-4", "claude-haiku")):
@@ -146,7 +151,7 @@ async def chat_reply(text: str, *, db, user_id: int, domain: str,
     tools = chat_tools.tools_for_domain(domain) + [
         {"type": "web_search_20250305", "name": "web_search",
          "max_uses": settings.web_search_max_uses}]
-    base: dict = {"model": settings.chat_model, "max_tokens": 3000,
+    base: dict = {"model": settings.chat_model, "max_tokens": 3000 + THINKING_HEADROOM,
                   "system": _system_prompt(profile, knowledge, domain),
                   "tools": tools, **thinking_params(settings.chat_model)}
 

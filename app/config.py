@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     weekly_time: str = "19:00"  # Sunday coverage report
 
     # Full chat engine (agentic: model reaches for data via tools)
-    chat_model: str = "claude-opus-5"  # set "mock" or empty to disable
+    chat_model: str = "claude-opus-5-5"  # set "mock" or empty to disable
     chat_effort: str = "high"  # adaptive-thinking effort (sonnet 5+)
     chat_thinking_budget: int = 1500  # budget-style thinking (opus 4.x)
     chat_history_window: int = 24

@@ -671,8 +671,8 @@ async def _call_model(system: str, messages: list[dict],
                       max_tokens: int = 700) -> str | None:
     if settings.chat_model in ("", "mock") or not settings.anthropic_api_key:
         return None
-    from app.core.chat import thinking_params
-    payload = {"model": settings.chat_model, "max_tokens": max_tokens,
+    from app.core.chat import THINKING_HEADROOM, thinking_params
+    payload = {"model": settings.chat_model, "max_tokens": max_tokens + THINKING_HEADROOM,
                "system": system, "messages": messages,
                **thinking_params(settings.chat_model)}
     try:

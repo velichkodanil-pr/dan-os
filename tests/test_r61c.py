@@ -228,12 +228,12 @@ async def test_17_missing_document_is_honest(db, monkeypatch):
 # ───────── 4. model ─────────
 
 # 18
-def test_18_chat_model_is_opus_5_with_fifth_gen_thinking():
+def test_18_chat_model_is_opus_5_5_with_fifth_gen_thinking():
     """conftest forces CHAT_MODEL=mock, so assert the shipped DEFAULT."""
     from app.config import Settings, settings
     from app.core.chat import thinking_params
-    assert Settings.model_fields["chat_model"].default == "claude-opus-5"
-    p = thinking_params("claude-opus-5")
+    assert Settings.model_fields["chat_model"].default == "claude-opus-5-5"
+    p = thinking_params("claude-opus-5-5")
     assert p["thinking"]["type"] == "adaptive"      # 5-gen style, not budget
     assert p["output_config"]["effort"] == settings.chat_effort
 

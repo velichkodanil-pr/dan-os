@@ -2,6 +2,19 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-09-24 — Chat engine on Claude Opus 5.5
+
+Owner decision after the bot audit («D. так»): `CHAT_MODEL=claude-opus-5-5` in
+Railway and as the code default (was `claude-opus-5`). Opus 5.5 is cheaper
+($4/$20 vs $5/$25 per MTok) and newer.
+
+- **Opus 5.5 always thinks** (adaptive; `disabled` and budget-style both 400),
+  and thinking counts against `max_tokens`. Chat and the English coach now add
+  `THINKING_HEADROOM` (4000) on top of their reply budgets so a long think
+  cannot eat the visible answer. `thinking_params` is unchanged: 5-gen models
+  already got adaptive + `output_config.effort`.
+- Extraction/digest stay on Haiku 4.5 (`MODEL_EXTRACT`), untouched.
+
 ## 2026-09-24 — Provider calls retry blips and alert the owner on outages
 
 Between 2026-09-12 and 2026-09-23 the OpenAI balance ran out. Voice, TTS and
