@@ -265,7 +265,10 @@ async def test_travelon_pulse_aggregates(monkeypatch):
             check_in=check_in, nights=7, tourists=tourists, gross_cost=cost,
             currency=cur, debt=debt)
 
-    async def fake_period(d_from, d_to, by_entry_date=False):
+    async def fake_period(d_from, d_to, by_entry_date=False, *, status="",
+                          only_updated=False):
+        if only_updated:
+            return [order("X1", status="Canceled")]  # cancelled today
         if by_entry_date:
             if d_from == today:
                 return [order("A1", check_in=today, debt=500.0),
@@ -279,6 +282,7 @@ async def test_travelon_pulse_aggregates(monkeypatch):
 
     text = await travelon.pulse_text()
     assert "сьогодні 1 · вчора 1" in text  # cancelled excluded from created
+    assert "Анульовано сьогодні: 1" in text
     assert "сьогодні 1 · завтра 1 · за 7 днів 2" in text
     assert "Борг у найближчих заїздах:</b> 1" in text and "500 UAH" in text
     assert "2 000 UAH" in text  # created sum (2 active × 1000)

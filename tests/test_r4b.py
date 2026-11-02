@@ -14,7 +14,8 @@ async def test_pulse_data_uses_cache(db, monkeypatch):
     monkeypatch.setattr(settings, "travelon_token", "T")
     calls = {"n": 0}
 
-    async def fake_period(d_from, d_to, by_entry_date=False):
+    async def fake_period(d_from, d_to, by_entry_date=False, *, status="",
+                          only_updated=False):
         calls["n"] += 1
         return [travelon.TravelonOrder(
             order_no=f"O{calls['n']}", status="Confirmed", created=date.today(),
@@ -23,12 +24,13 @@ async def test_pulse_data_uses_cache(db, monkeypatch):
     monkeypatch.setattr(travelon, "fetch_period", fake_period)
 
     d1 = await travelon.pulse_data(db)
-    assert d1 is not None and calls["n"] == 9  # 2 created days + 7 arrival days
+    # 2 created days + today's cancellations + 7 arrival days
+    assert d1 is not None and calls["n"] == 10
     d2 = await travelon.pulse_data(db)
-    assert calls["n"] == 9  # served from app_state cache — no new fetches
+    assert calls["n"] == 10  # served from app_state cache — no new fetches
     assert d2 == d1
     d3 = await travelon.pulse_data(db, max_age=0)  # stale -> refetch
-    assert calls["n"] == 18 and d3 is not None
+    assert calls["n"] == 20 and d3 is not None
 
 
 @pytest.mark.asyncio

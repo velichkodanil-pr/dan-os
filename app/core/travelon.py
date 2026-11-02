@@ -1,8 +1,11 @@
 """TravelON read-only gateway (R4): business pulse from the XML report API.
 
-Endpoint: https://travelon.to/book/report/xml/{TOKEN}/{FROM}/{TO}[?by_entry_date]
+Endpoint: https://travelon.to/book/report/xml/{TOKEN}/{FROM}/{TO}[/{STATUS}[/1]][?by_entry_date=1]
 URL dates are YYYY-MM-DD; dates INSIDE the XML are DD.MM.YYYY.
 Empty <orders/> is a valid "zero orders" answer.
+A period WITHOUT a status segment returns CONFIRMED orders only (status ids
+2, 3). `/all` returns every status, `/cancelled` only cancelled; `/{STATUS}/1`
+filters by the order's last change instead of its creation date.
 
 Security (store-minimum): the token is a full-access secret — never logged,
 never stored in DB. Responses contain passports/tax IDs — we parse ONLY the
@@ -50,6 +53,7 @@ class TravelonOrder:
     debt_local: float | None = None  # amount-of-debt: same debt in UAH/local
     local_currency: str = ""  # e.g. UAH
     provider: str = ""  # receiving DMC (hotel/provider), e.g. "Kalanit Tour Turkey"
+    cancelled_on: date | None = None  # cancellation-date (update-date if empty)
 
 MIN_DEBT = 1.0  # order-currency units; below this it's rounding dust
 
@@ -128,18 +132,42 @@ def parse_orders(xml_text: str) -> list[TravelonOrder]:
             debt=debt_cur,
             debt_local=debt_local,
             local_currency=_text(o, "local-currency"),
+            cancelled_on=(_date(_text(o, "cancellation-date"))
+                          or (_date(_text(o, "update-date"))
+                              if _is_cancelled(_text(o, "status")) else None)),
         ))
     return orders
 
 
+_STATUSES = ("", "all", "cancelled")
+
+
+def _period_url(date_from: date, date_to: date, *, by_entry_date: bool = False,
+                status: str = "", only_updated: bool = False) -> str:
+    """status: "" = confirmed only (the report's default), "all", "cancelled".
+    only_updated: the window applies to the order's LAST change (needs a
+    status segment; the server ignores it together with by_entry_date)."""
+    if status not in _STATUSES:
+        # an unknown segment silently means "confirmed" on the server
+        raise ValueError(f"unsupported status segment: {status!r}")
+    url = f"{BASE}/{settings.travelon_token}/{date_from.isoformat()}/{date_to.isoformat()}"
+    if status:
+        url += f"/{status}"
+        if only_updated:
+            url += "/1"
+    if by_entry_date:
+        url += "?by_entry_date=1"
+    return url
+
+
 async def fetch_period(date_from: date, date_to: date,
-                       by_entry_date: bool = False) -> list[TravelonOrder]:
+                       by_entry_date: bool = False, *, status: str = "",
+                       only_updated: bool = False) -> list[TravelonOrder]:
     """One report request. FROM==TO is a valid single-day window."""
     if not configured():
         return []
-    url = f"{BASE}/{settings.travelon_token}/{date_from.isoformat()}/{date_to.isoformat()}"
-    if by_entry_date:
-        url += "?by_entry_date"
+    url = _period_url(date_from, date_to, by_entry_date=by_entry_date,
+                      status=status, only_updated=only_updated)
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_UA) as client:
         resp = await client.get(url)
     if resp.status_code != 200:
@@ -159,13 +187,15 @@ def _semaphore() -> asyncio.Semaphore:
     return _sem
 
 
-async def fetch_days(days: list[date],
-                     by_entry_date: bool = False) -> list[TravelonOrder]:
+async def fetch_days(days: list[date], by_entry_date: bool = False, *,
+                     status: str = "") -> list[TravelonOrder]:
     """Day-sized windows fetched concurrently (big-volume tokens: 100+/day),
     merged and de-duplicated by order number."""
     async def one(d: date) -> list[TravelonOrder]:
         async with _semaphore():
             try:
+                if status:
+                    return await fetch_period(d, d, by_entry_date, status=status)
                 return await fetch_period(d, d, by_entry_date)
             except Exception:
                 logger.exception("travelon day %s failed", d)
@@ -182,7 +212,12 @@ async def fetch_days(days: list[date],
 
 
 def _active(orders: list[TravelonOrder]) -> list[TravelonOrder]:
-    return [o for o in orders if "cancel" not in o.status.lower()]
+    return [o for o in orders if not _is_cancelled(o.status)]
+
+
+def _is_confirmed(status: str) -> bool:
+    """Confirmed / Confirmed Print — not «Not Confirmed»."""
+    return (status or "").strip().lower().startswith("confirmed")
 
 
 def _fmt_money(v: float | None, cur: str) -> str:
@@ -214,13 +249,25 @@ async def _pulse_compute() -> dict | None:
     today = datetime.now(tz).date()
     week = [today + timedelta(days=i) for i in range(7)]
     try:
+        # Created orders in EVERY status: the default period would show only
+        # the confirmed ones and undercount new orders (30.10.2026: 28 of 51).
         created_today, created_yest, arrivals = await asyncio.gather(
-            fetch_days([today]),
-            fetch_days([today - timedelta(days=1)]),
+            fetch_days([today], status="all"),
+            fetch_days([today - timedelta(days=1)], status="all"),
             fetch_days(week, by_entry_date=True))
     except Exception:
         logger.exception("travelon pulse failed")
         return None
+    try:
+        # cancelled orders whose last change is today; keep the ones that
+        # were actually cancelled today
+        changed = await fetch_period(today, today, status="cancelled",
+                                     only_updated=True)
+        cancelled_today = sum(1 for o in changed
+                              if o.cancelled_on in (None, today))
+    except Exception:
+        logger.exception("travelon pulse: cancellations failed")
+        cancelled_today = None
     ct, cy = _active(created_today), _active(created_yest)
     arr = _active(arrivals)
     arr_today = [o for o in arr if o.check_in == today]
@@ -230,6 +277,9 @@ async def _pulse_compute() -> dict | None:
     return {
         "date": today.strftime("%d.%m"),
         "created_today": len(ct), "created_yesterday": len(cy),
+        "confirmed_today": sum(1 for o in ct if _is_confirmed(o.status)),
+        "confirmed_yesterday": sum(1 for o in cy if _is_confirmed(o.status)),
+        "cancelled_today": cancelled_today,
         "sum_2d": _sum_by_currency((o.gross_cost, o.currency) for o in ct + cy),
         "arrivals_today": len(arr_today), "arrivals_tomorrow": len(arr_tomorrow),
         "arrivals_week": len(arr), "tourists": sum(o.tourists for o in arr),
@@ -285,11 +335,16 @@ async def pulse_text(db=None) -> str | None:
         return "🧳 TravelON: сервіс звітів зараз недоступний, спробуй пізніше."
     lines = [f"🧳 <b>TravelON пульс — {data['date']}</b>",
              f"\n📈 <b>Нові заявки:</b> сьогодні {data['created_today']} · "
-             f"вчора {data['created_yesterday']}",
-             f"💰 Сума за ці два дні: {data['sum_2d']}",
-             f"\n🛬 <b>Заїзди:</b> сьогодні {data['arrivals_today']} · завтра "
-             f"{data['arrivals_tomorrow']} · за 7 днів {data['arrivals_week']} "
-             f"({data['tourists']} тур.)"]
+             f"вчора {data['created_yesterday']}"
+             + (f" (підтверджено {data['confirmed_today']} · "
+                f"{data['confirmed_yesterday']})"
+                if data.get("confirmed_today") is not None else ""),
+             f"💰 Сума за ці два дні: {data['sum_2d']}"]
+    if data.get("cancelled_today"):
+        lines.append(f"❌ Анульовано сьогодні: {data['cancelled_today']}")
+    lines.append(f"\n🛬 <b>Заїзди:</b> сьогодні {data['arrivals_today']} · завтра "
+                 f"{data['arrivals_tomorrow']} · за 7 днів {data['arrivals_week']} "
+                 f"({data['tourists']} тур.)")
     if data["debt_count"]:
         lines.append(f"\n💸 <b>Борг у найближчих заїздах:</b> "
                      f"{data['debt_count']} заявок · {data['debt_total']}")
@@ -377,17 +432,19 @@ async def weekly_block() -> str | None:
     today = datetime.now(tz).date()
     week = [today - timedelta(days=i) for i in range(7)]
     try:
-        created = await fetch_days(week)
+        created = await fetch_days(week, status="all")
     except Exception:
         logger.exception("travelon weekly failed")
         return None
     active = _active(created)
+    confirmed = sum(1 for o in active if _is_confirmed(o.status))
     by_country: dict[str, int] = {}
     for o in active:
         key = o.country or "інше"
         by_country[key] = by_country.get(key, 0) + 1
     top = sorted(by_country.items(), key=lambda kv: -kv[1])[:3]
-    lines = [f"\n🧳 <b>TravelON за тиждень:</b> {len(active)} нових заявок · "
+    lines = [f"\n🧳 <b>TravelON за тиждень:</b> {len(active)} нових заявок "
+             f"(підтверджено {confirmed}) · "
              f"{_sum_by_currency((o.gross_cost, o.currency) for o in active)}"]
     if top:
         lines.append(" • топ: " + " · ".join(f"{c} ({n})" for c, n in top))
@@ -402,7 +459,7 @@ async def brief_line() -> str | None:
     today = datetime.now(tz).date()
     try:
         created, arrivals = await asyncio.wait_for(
-            asyncio.gather(fetch_days([today - timedelta(days=1)]),
+            asyncio.gather(fetch_days([today - timedelta(days=1)], status="all"),
                            fetch_days([today], by_entry_date=True)),
             timeout=75)
     except Exception:
@@ -624,15 +681,15 @@ MAX_ONDEMAND_DAYS = 92   # a quarter: fetched live if a question needs it
 
 async def _fetch_day_xml(client: "httpx.AsyncClient", day: date,
                          basis: str = "check_in") -> str | None:
-    s = day.isoformat()
     # The report filters by CREATE date by default; ?by_entry_date switches it
     # to check-in. The two cover different order sets, so coverage is tracked
-    # per basis and never mixed.
-    suffix = "?by_entry_date" if basis == "check_in" else ""
+    # per basis and never mixed. `/all`: every status, so an order cancelled
+    # after it was cached is re-read as Canceled instead of staying Confirmed.
+    url = _period_url(day, day, by_entry_date=(basis == "check_in"), status="all")
+    s = day.isoformat()
     for _ in range(2):
         try:
-            r = await client.get(f"{BASE}/{settings.travelon_token}/{s}/{s}"
-                                 f"{suffix}")
+            r = await client.get(url)
             if r.status_code == 200:
                 return r.text
         except Exception:
@@ -784,6 +841,8 @@ async def stats(db, *, user_id: int, date_from: date, date_to: date,
     """Aggregate over the LOCAL cache: orders, tourists, money.
 
     basis: check_in (who travels then — the default) | created (booked then).
+    Default: confirmed orders only; include_cancelled=True counts every status
+    (cancelled, in work, not confirmed, accepted for processing).
     group_by: provider | country | hotel | month | status.
     Filters are case-insensitive substrings, so «kalanit» finds
     «Kalanit Tour Turkey». Money is summed PER CURRENCY — orders come in EUR,
@@ -799,7 +858,9 @@ async def stats(db, *, user_id: int, date_from: date, date_to: date,
             conds.append(c.ilike(f"%{val.strip()}%"))
     rows = (await db.execute(_select(C).where(*conds))).scalars().all()
     if not include_cancelled:
-        rows = [r for r in rows if not _is_cancelled(r.status)]
+        # The cache mirrors every status; the default answer counts confirmed
+        # orders only (who really travels / what was really sold).
+        rows = [r for r in rows if _is_confirmed(r.status)]
 
     keyfn = {
         "provider": lambda r: r.provider or "(не вказано)",

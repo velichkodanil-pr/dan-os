@@ -2,6 +2,26 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-02 — TravelON report: ask for every status explicitly
+
+Proxymo documented the report API (02.11.2026): a period WITHOUT a status
+segment returns confirmed orders only (status ids 2, 3). The pulse therefore
+undercounted new orders (30.10.2026: 28 shown of 51 created) and never saw a
+cancellation, and the local order cache kept orders that were cancelled after
+caching as «Confirmed». Owner asked to fix all consumers of the report.
+
+- Pulse / weekly / brief: created days are fetched with `/all`; «Нові заявки»
+  counts every non-cancelled status, with the confirmed share in brackets.
+  New line «Анульовано сьогодні» from `/{today}/{today}/cancelled/1` (orders
+  whose last change is today, kept when cancellation-date is today).
+- Arrivals and the debt alert keep the confirmed default: those answer «who
+  really travels».
+- Order cache sync fetches `/all`, so a later cancellation overwrites the
+  cached status. `stats` now counts CONFIRMED orders by default (the same set
+  the cache held before); `include_cancelled=True` counts every status.
+- `_period_url` rejects unknown status words: the server silently treats them
+  as «confirmed».
+
 ## 2026-09-24 — Chat engine on Claude Opus 5.5
 
 Owner decision after the bot audit («D. так»): `CHAT_MODEL=claude-opus-5-5` in

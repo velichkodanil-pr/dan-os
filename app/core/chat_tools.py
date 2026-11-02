@@ -102,7 +102,10 @@ TOOL_DEFS = [
          "basis": {"type": "string", "enum": ["check_in", "created"]},
          "date_from": {"type": "string", "description": "ДД.ММ.РРРР"},
          "date_to": {"type": "string", "description": "ДД.ММ.РРРР"},
-         "include_cancelled": {"type": "boolean"}},
+         "include_cancelled": {"type": "boolean",
+                               "description": "true — усі статуси: анульовані, "
+                                              "в роботі, непідтверджені; "
+                                              "за замовчуванням лише підтверджені"}},
          "required": []}},
     {"name": "travelon_document",
      "description": "Текст документа заявки TravelON: 'insurance' — страховий "

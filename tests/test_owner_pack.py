@@ -89,7 +89,7 @@ async def test_debt_alert(monkeypatch):
     monkeypatch.setattr(settings, "travelon_token", "T")
     tomorrow = datetime.now(ZoneInfo(settings.tz_name)).date() + timedelta(days=1)
 
-    async def with_debts(days, by_entry_date=False):
+    async def with_debts(days, by_entry_date=False, *, status=""):
         assert days == [tomorrow] and by_entry_date
         return [_order(no="1", debt=500.0, cur="EUR", check_in=tomorrow),
                 _order(no="2", debt=None, check_in=tomorrow),
@@ -99,7 +99,7 @@ async def test_debt_alert(monkeypatch):
     assert "Завтра заїзд із боргом:</b> 1" in text and "500 EUR" in text
     assert "№3" not in text  # cancelled excluded
 
-    async def clean(days, by_entry_date=False):
+    async def clean(days, by_entry_date=False, *, status=""):
         return [_order(no="1", debt=0.0, check_in=tomorrow)]
     monkeypatch.setattr(travelon, "fetch_days", clean)
     assert await travelon.debt_alert_text() is None  # silence when all paid
@@ -111,8 +111,8 @@ async def test_debt_alert(monkeypatch):
 async def test_weekly_block(monkeypatch):
     monkeypatch.setattr(settings, "travelon_token", "T")
 
-    async def week(days, by_entry_date=False):
-        assert len(days) == 7 and not by_entry_date
+    async def week(days, by_entry_date=False, *, status=""):
+        assert len(days) == 7 and not by_entry_date and status == "all"
         return [_order(no="1", country="Туреччина", cost=100.0, cur="EUR"),
                 _order(no="2", country="Туреччина", cost=200.0, cur="EUR"),
                 _order(no="3", country="Єгипет", cost=300.0, cur="EUR"),
@@ -120,4 +120,5 @@ async def test_weekly_block(monkeypatch):
     monkeypatch.setattr(travelon, "fetch_days", week)
     block = await travelon.weekly_block()
     assert "3 нових заявок" in block and "600 EUR" in block
+    assert "підтверджено 3" in block
     assert "Туреччина (2)" in block
