@@ -2,6 +2,34 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-04 — TravelON report: cancellation details and rebooking (scope for a later round)
+
+Proxymo added to the order report (verified on prod 04.11.2026): on Canceled
+orders `cancelled-by` (agent | staff | supplier | system), `cancelled-by-user`,
+`cancel-reason` (requested, subject, text, reason, admin-reason); on every
+order `rebooked-from` / `rebooked-to` (nil when absent) and `status-history` /
+`status-change[]` (no backfill: the earliest entry is 03.11.2026 19:06). The
+CRM got a «rebook» action: the old order is cancelled with reason
+«Перебронювання» and a copy is created. Reason dictionary: 1 Попереднє
+бронювання, 2 Відмова агента, 3 Відмова по готелю, 4 Відмова по квиткам,
+5 Відмова по рекламнику, 6 Перебронювання, 7 Тестова, 8 Предбронь. `/all/1`
+now also returns status-only changes (auto-annulment, supplier refusal).
+
+Nothing in DAN.OS breaks (the parser reads single child tags). Owner asked
+(«роби все») to stop counting test orders and rebookings as lost sales; the
+other Travelon services were changed the same day (dashboard, franch-pulse,
+agent bot, audit registry). For DAN.OS this is NEW SCOPE — not in R7, to be
+implemented in a later round:
+
+- «Анульовано сьогодні» (pulse / brief) and order aggregates skip cancelled
+  orders whose dictionary reason is Тестова or Перебронювання, or that have
+  `rebooked-to`; optionally split the rest by `cancelled-by`.
+- Store only the dictionary reason, `cancelled-by` and the rebooking ids.
+  Never the free texts (`text` of the agent, `admin-reason` of staff) or
+  `cancelled-by-user` / `status-change/user` (names) — same privacy rule as
+  tourist data.
+- If the parser ever maps repeated tags to lists, `status-change` is one.
+
 ## 2026-11-02 — TravelON report: ask for every status explicitly
 
 Proxymo documented the report API (02.11.2026): a period WITHOUT a status
