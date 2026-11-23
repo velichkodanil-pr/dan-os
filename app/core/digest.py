@@ -94,8 +94,14 @@ async def build_digest(db, user_id: int, domain) -> str | None:
             logger.exception("digest: account %s failed", cred.account_email)
     if not emails:
         return None
+    # Both bodies are plain text built from mail headers («Name <address>»):
+    # escaped whole, or one sender breaks the HTML of the entire message.
+    from app.core.briefs import h
     ranked = await _rank_with_haiku(emails[:12])
-    if not ranked:
-        ranked = "\n".join(f"• {m['from']} — {m['subject']}" for m in emails[:12])
+    if ranked:
+        ranked = h(ranked)
+    else:
+        ranked = "\n".join(f"• {h(m['from'])} — {h(m['subject'])}"
+                           for m in emails[:12])
     from app.core.domains import label
     return f"📬 <b>Поштовий дайджест — {label(domain)}</b>\n{ranked}"

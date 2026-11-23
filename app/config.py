@@ -5,8 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r8.1"
-APP_RELEASE = "R8.1 — дайджест заявок TravelON і алерти на винятки"
+APP_VERSION = "r8.1.1"
+APP_RELEASE = ("R8.1 + хотфікс R7.1 — дайджест заявок TravelON; ритуали "
+               "не губляться: екранування, запасний текст, паузи")
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 

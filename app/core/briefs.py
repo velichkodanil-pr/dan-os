@@ -1,4 +1,10 @@
-"""Morning brief and evening check-in builders (presentation in Europe/Kyiv)."""
+"""Morning brief and evening check-in builders (presentation in Europe/Kyiv).
+
+Output is Telegram HTML. Every string that did not come from this module —
+event titles, mail senders and subjects, task titles, account labels — goes
+through h() first: one «Name <address>» sender is enough for Telegram to
+reject the whole brief (2026-11-22)."""
+import html as _html
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -13,6 +19,11 @@ from app.models import MemoryItem, Task
 logger = logging.getLogger(__name__)
 
 WEEKDAYS = ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"]
+
+
+def h(value) -> str:
+    """Escape external text for Telegram HTML (quotes stay readable)."""
+    return _html.escape(str(value if value is not None else ""), quote=False)
 
 
 def _fmt_event_time(raw: str, all_day: bool) -> str:
@@ -55,7 +66,7 @@ async def morning_brief(db: AsyncSession, user_id: int, domain,
     if accounts:
         multi = len(accounts) > 1
         for cred in accounts:
-            tag = f" ·{cred.label}" if multi else ""
+            tag = f" ·{h(cred.label)}" if multi else ""
             access = None
             try:
                 access = await google_client.access_for(db, cred)
@@ -67,14 +78,14 @@ async def morning_brief(db: AsyncSession, user_id: int, domain,
             try:
                 for e in (await google_client.calendar_today(access))[:8]:
                     cal_lines.append(
-                        f" • {_fmt_event_time(e['start'], e['all_day'])} — {e['summary']}{tag}")
+                        f" • {_fmt_event_time(e['start'], e['all_day'])} — {h(e['summary'])}{tag}")
             except google_client.CalendarAccessError:
                 cal_broken.append(cred.account_email)
             except Exception:
                 logger.exception("brief calendar: %s failed", cred.account_email)
             try:
                 for m in await google_client.gmail_recent(access, limit=3 if multi else 5):
-                    mail_lines.append(f" • {m['from']}: {m['subject']}{tag}")
+                    mail_lines.append(f" • {h(m['from'])}: {h(m['subject'])}{tag}")
             except Exception:
                 logger.exception("brief mail: %s failed", cred.account_email)
 
@@ -100,17 +111,17 @@ async def morning_brief(db: AsyncSession, user_id: int, domain,
     elif accounts and not cal_broken:
         lines.append("📆 Календар: подій немає")
     if cal_broken:
-        lines.append("⚠️ Календар недоступний: " + ", ".join(cal_broken)
+        lines.append("⚠️ Календар недоступний: " + h(", ".join(cal_broken))
                      + "\nПерепідключи /connect_google — і постав галочку «Календар»")
     if mail_lines:
         lines.append("📬 <b>Пошта за ніч:</b>")
         lines += mail_lines[:8]
     if overdue:
         lines.append("🔴 <b>Прострочено:</b>")
-        lines += [f" • {t.title}" for t in overdue[:5]]
+        lines += [f" • {h(t.title)}" for t in overdue[:5]]
     if today_due:
         lines.append("✅ <b>Задачі на сьогодні:</b>")
-        lines += [f" • {t.title}" for t in today_due[:8]]
+        lines += [f" • {h(t.title)}" for t in today_due[:8]]
     if travelon_line:
         lines.append(travelon_line)
     if today_data.get("candidates"):
@@ -207,7 +218,7 @@ async def evening_summary(db: AsyncSession, user_id: int, domain) -> str | None:
              f"Виконано сьогодні: {done_today} · відкрито всього: {open_cnt}"]
     if tomorrow:
         lines.append("📌 <b>Найближче:</b>")
-        lines += [f" • {t.title}" for t in tomorrow[:5]]
+        lines += [f" • {h(t.title)}" for t in tomorrow[:5]]
     return "\n".join(lines)
 
 

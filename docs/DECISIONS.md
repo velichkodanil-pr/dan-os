@@ -2,6 +2,33 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R7.1: a ritual must arrive, and a failing one must back off
+
+The 2026-11-22 brief was lost to one unescaped «Name <address>» mail sender
+and then rebuilt every 30 seconds for six hours. Owner asked to fix it
+(out-of-round hotfix, like 2026-09-06 and 2026-09-24) and to push it
+(«Так, пуш у main»). It landed on top of R8 / R8.1, which other sessions
+shipped the same afternoon; build identity `r8.1.1`.
+
+- **Escape at the source, always.** Builders that emit Telegram HTML escape
+  every string they did not write themselves — mail headers, calendar titles,
+  his own task/goal/memory text, model output, supplier names. Model output
+  counts as external: the coverage prompt itself shows «<що додати>».
+- **A fallback, not a second parser.** If Telegram still rejects the markup,
+  the message is resent once as plain text with only Telegram's own tags
+  removed. We do not try to «repair» HTML; a readable message without bold
+  beats a perfect one that never arrives. Applies to rituals (R8.1's booking
+  digest and alerts included), reminders and owner alerts — the messages
+  nobody asked for, so nobody notices they are missing.
+- **Retrying is not free.** A ritual pauses 5/15/60/60 minutes between
+  failures and stops after 5 a day, then tells the owner once — name and the
+  manual command, never the error (it can quote mail). The state is in
+  `app_state`, not memory, so a restart does not reset the count. R8.1's
+  interval jobs already claim before running, so they keep their own rule.
+- **No pins changed.** Production built `aiogram 3.31.0`; the current release
+  does not import on Python 3.12.0 (local only). Recorded in NEXT as a
+  decision for the owner, not silently pinned in a hotfix.
+
 ## 2026-11-23 — R8.1 TravelON booking feed: digest + exception alerts
 
 Owner: every new order sends «Ваше бронювання № … готове!» to info@ (~40 a

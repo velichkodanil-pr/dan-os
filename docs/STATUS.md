@@ -1,13 +1,52 @@
 # STATUS
 
-_Last verified: 2026-08-21. R6.1C is DEPLOYED and verified live. R6.1D is
-PUSHED to `main` (`d944524`) — confirm the Railway build with `/health`.
-R7 is CODE COMPLETE and NOT deployed._
+_Last verified: 2026-11-23 against Railway deployments and logs. Before this
+commit production ran `ba7f6e1` (deployed 2026-11-23 14:28 UTC, Railway
+`004263d7` SUCCESS): R8 and R8.1 are DEPLOYED (not verified live); R6.1D, R7
+and the out-of-round hotfixes of 2026-09-24 and 2026-11-02 were deployed
+earlier. R7.1 is PUSHED with this commit on top of R8.1 — confirm that
+`/health/live` reports `r8.1.1`._
 
-_2026-11-23: R8.1 (TravelON booking digest + exception alerts) CODE COMPLETE,
-NOT deployed — see DECISIONS 2026-11-23 and NEXT._
+_R8.1 (TravelON booking digest + exception alerts): see DECISIONS 2026-11-23
+and NEXT._
 
-## R8 — Home power status (Deye): CODE COMPLETE (2026-11-23)
+## R7.1 — Rituals cannot be lost to markup: PUSHED 2026-11-23 (on top of R8.1)
+
+2026-11-22: the 07:30 brief never arrived. A mail sender «Joyce Tours
+<receivable@joyce-tours.net>» went into the brief unescaped, Telegram rejected
+the HTML («can't parse entities: Unsupported start tag»), and the scheduler
+rebuilt and resent the brief every tick from 07:30 to 13:07 Kyiv — at least
+496 attempts, each one calling Calendar, Gmail and the TravelON report.
+
+- **Escaping at the source.** Every string that did not come from our own code
+  is escaped before it enters Telegram HTML: brief (event titles, mail
+  senders and subjects, account labels, task titles), evening summary, memory
+  candidates in the check-in, digest (the Haiku ranking AND the plain
+  fallback), weekly report (open questions, Haiku suggestions, goal and habit
+  titles), TravelON debt alert / pulse / weekly block (hotel and country
+  names), reminder task titles. `briefs.h()` is the shared helper. (R8 / R8.1
+  already escaped their own output.)
+- **A net under it** (`app/telegram/safe_send.py`): ritual sends (the R8.1
+  booking digest and alerts included), reminders and owner alerts go through
+  `send_html()`. If Telegram still rejects the markup, the same message is
+  resent once as plain text — Telegram's own tags removed, entities decoded,
+  everything else (an email address in <>) kept. Other Telegram errors
+  propagate unchanged. The R8 power card keeps its own send/edit path.
+- **Backoff, a cap and one alert** (`scheduler.py`): after a failure the
+  ritual pauses 5 → 15 → 60 → 60 min; the 5th failure in a day ends attempts
+  until tomorrow and sends ONE owner message (ritual name + the manual command,
+  never the error text). State in `app_state` as `ritual_fail_<key>` (JSON),
+  so it survives restarts; a success clears it; a new day starts clean. Every
+  failure is audited as `ritual.failed` (`retry` / `gave_up`). Covers the
+  R8.1 `bookings_digest` ritual too; R8.1 interval jobs keep their
+  claim-before-run rule.
+- No migration (`app_state` is an existing key/value table). `APP_VERSION`
+  is `r8.1.1`.
+- Tests: `tests/test_r71.py` — 12 cases, driven by the real 22.11 sender: six
+  hours of 30-second ticks against a broken brief make exactly 5 attempts and
+  1 alert (the old code made ~700).
+
+## R8 — Home power status (Deye): DEPLOYED 2026-11-23 (not verified live)
 
 Owner ask (23.11.2026): Deye Cloud «відключення / відновлення мережі» mails are
 noise in Telegram, but «чи є зараз світло» matters — one pinned card, «Зелений
@@ -31,7 +70,12 @@ noise in Telegram, but «чи є зараз світло» matters — one pinne
   both in `test_r61d.py` and failing identically on the unchanged tree
   (pre-existing, date-dependent), not R8.
 
-## R7 — English coach: CODE COMPLETE, NOT DEPLOYED
+## R7 — English coach: DEPLOYED (not verified live)
+
+In production since at least 2026-09-06 (it was already on `main` under every
+deploy from `b89b84b` on). No sign in the logs that the owner has used it:
+from 2026-10-22 to 2026-11-23 the webhook received 4 updates in total, the last
+on 2026-10-28.
 
 «Додай кнопку, навчаємось англійської. Веди прогрес, щоб продовжували кожен
 раз. План навчання розроби.» Confirmed parameters: **B1**, **10–15 хв щодня**,
@@ -95,7 +139,11 @@ that changes what tomorrow looks like.
   Migration verified four ways: fresh, from the prod revision, downgrade +
   replay, and a partial apply with one table missing.
 
-## R6.1D — Order aggregates from our own data: PUSHED (`d944524`)
+## R6.1D — Order aggregates from our own data: DEPLOYED (`d944524`)
+
+The nightly cache sync runs in production every day at 04:30 Kyiv
+(2026-11-23: 2 805 orders, 0 days failed). Since 2026-11-02 it fetches every
+status (see DECISIONS).
 
 «Скільки туристів заброньовано в Туреччину з приймаючою Kalanit» had no tool
 at all. `travelon_order` answers ONE order, `travelon_pulse` a fixed metric
@@ -148,8 +196,10 @@ OBS, the `travelon-supplier-cabinets` skill) are explicitly out of scope.
   (418 / 1 050) because it is a different question.
 - **Tests:** **368 passed** (27 new in `tests/test_r61d.py`). Migration
   `b8c2d3e4f5a6` verified fresh, from the current prod revision, and on replay.
-
-Not deployed.
+- Known since 2026-09-24: `test_15_stats_tool_answers_the_kalanit_question`
+  and `test_26a_no_token_still_answers_from_cache_but_says_so` fail because
+  their fixtures are August 2026 orders and the tool's default window is
+  «today forward». Date-dependent test data, not a product bug; still open.
 
 ---
 

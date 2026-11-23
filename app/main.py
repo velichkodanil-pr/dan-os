@@ -16,6 +16,7 @@ from app.core.audit import audit
 from app.core.domains import ALLOWED_DOMAINS, label as domain_label
 from app.telegram import bot as botmod
 from app.telegram.bot import router as telegram_router
+from app.telegram.safe_send import send_html
 from app.webapp.routes import router as webapp_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -47,14 +48,14 @@ async def _send_reminder(user_id: int, html: str, task_id: str = "") -> None:
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="☑️ Виконано", callback_data=f"dn:{task_id}"),
         ]])
-    await bot.send_message(user_id, html, reply_markup=kb)
+    await send_html(bot, user_id, html, reply_markup=kb)
 
 
 async def _alert_owner(html: str) -> None:
     """Provider outages (no credits, rejected key) → one message to the owner."""
     if bot is None or not settings.owner_telegram_id:
         return
-    await bot.send_message(int(settings.owner_telegram_id), html)
+    await send_html(bot, int(settings.owner_telegram_id), html)
 
 
 @asynccontextmanager

@@ -13,6 +13,7 @@ operational minimum (order no, status, dates, hotel, country, tourist COUNT,
 totals) and keep nothing else. Read-only: this module never writes to Travelon.
 """
 import asyncio
+import html as _html
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -326,6 +327,11 @@ async def pulse_data(db=None, max_age: int = 600) -> dict | None:
     return data
 
 
+def _h(value) -> str:
+    """Hotel and country names come from suppliers; escape them for HTML."""
+    return _html.escape(str(value if value is not None else ""), quote=False)
+
+
 async def pulse_text(db=None) -> str | None:
     """Pulse card for /travelon (HTML). None when not configured."""
     if not configured():
@@ -349,7 +355,7 @@ async def pulse_text(db=None) -> str | None:
         lines.append(f"\n💸 <b>Борг у найближчих заїздах:</b> "
                      f"{data['debt_count']} заявок · {data['debt_total']}")
         for d in data["debtors"][:5]:
-            lines.append(f" • {d['when']} №{d['order_no']} · {d['where']} · "
+            lines.append(f" • {d['when']} №{d['order_no']} · {_h(d['where'])} · "
                          f"{d['amount']}")
         if data["debt_count"] > 5:
             lines.append(f" • … і ще {data['debt_count'] - 5}")
@@ -416,7 +422,7 @@ async def debt_alert_text() -> str | None:
     total = _sum_by_currency((o.debt, o.currency) for o in debtors)
     lines = [f"🚨 <b>Завтра заїзд із боргом:</b> {len(debtors)} заявок · {total}"]
     for o in debtors[:10]:
-        lines.append(f" • №{o.order_no} · {o.country or o.hotel or '—'} · "
+        lines.append(f" • №{o.order_no} · {_h(o.country or o.hotel or '—')} · "
                      f"{_fmt_debt(o)}")
     if len(debtors) > 10:
         lines.append(f" • … і ще {len(debtors) - 10}")
@@ -447,7 +453,7 @@ async def weekly_block() -> str | None:
              f"(підтверджено {confirmed}) · "
              f"{_sum_by_currency((o.gross_cost, o.currency) for o in active)}"]
     if top:
-        lines.append(" • топ: " + " · ".join(f"{c} ({n})" for c, n in top))
+        lines.append(" • топ: " + " · ".join(f"{_h(c)} ({n})" for c, n in top))
     return "\n".join(lines)
 
 

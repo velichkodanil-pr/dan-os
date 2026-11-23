@@ -205,12 +205,13 @@ async def weekly_block(db: AsyncSession, user_id: int, domain: str) -> str | Non
     overview = await habits_overview(db, user_id, domain)
     if not goals and not overview:
         return None
+    from app.core.briefs import h as _esc  # titles are his text, output is HTML
     lines: list[str] = []
     if goals:
         lines.append("\n🎯 <b>Цілі в роботі:</b>")
-        lines += [f" • {g.title}" for g in goals[:5]]
+        lines += [f" • {_esc(g.title)}" for g in goals[:5]]
     if overview:
         lines.append("\n🏃 <b>Звички за тиждень:</b>")
-        lines += [f" • {h['title']}: {h['week_count']}/{h['week_days']}"
+        lines += [f" • {_esc(h['title'])}: {h['week_count']}/{h['week_days']}"
                   for h in overview[:8]]
     return "\n".join(lines)

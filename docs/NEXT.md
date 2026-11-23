@@ -1,10 +1,36 @@
 # NEXT — the one authorized round
 
-## Round 8.1 — TravelON booking digest + alerts (CURRENT, ships on top of R8)
+## Round 7.1 — Rituals cannot be lost to markup (CURRENT, pushed)
+
+Out-of-round hotfix asked for on 2026-11-23 after the 2026-11-22 brief was
+lost; rebased onto R8.1 (`ba7f6e1`) before the push. No migration, no new env.
+
+1. (done — reviewed and pushed on the owner's «Так, пуш у main»)
+2. `/health/live` must report `r8.1.1`.
+3. In Telegram: `/brief`. It must arrive even when the inbox holds a
+   «Name <address>» sender (that is the 22.11 case); the address shows as text.
+4. Next morning the 07:30 brief arrives by itself. In the Railway log a failing
+   ritual now reads «failed (attempt N of 5); next try after …», never a
+   wall of identical tracebacks.
+
+### Known limits (deliberate)
+
+- A message that needed the plain-text fallback loses its bold headers — it
+  arrives readable, not pretty. The source escaping makes this rare.
+- Command replies and chat answers are unchanged: they already escaped their
+  content; only rituals, reminders and owner alerts use `send_html()`. The R8
+  power card keeps its own send/edit path.
+- `test_r61d` still has its two date-dependent failures (see STATUS).
+- `requirements.txt` has no upper pins: production built `aiogram 3.31.0` on
+  2026-11-04, while today's `aiogram 3.34` does not import on Python 3.12.0.
+  Railway's Python is newer, so builds are expected to be fine, but pinning is
+  worth a decision.
+
+## Round 8.1 — TravelON booking digest + alerts (DEPLOYED 2026-11-23; owner check open)
 
 Owner request 23.11.2026. No migration, no new env required.
 
-1. Deploy. `/health/live` should report `r8.1`.
+1. (done — deployed; production reported `r8.1` before R7.1 landed)
 2. In Telegram: `/bookings` — today's orders so far; `/bookings 24` — the last
    24 hours. Compare the count with the «бронювання готове» mails of the day.
 3. 20:30 Kyiv: the digest arrives on its own (`BOOKINGS_DIGEST_TIME`).
@@ -16,9 +42,9 @@ Owner request 23.11.2026. No migration, no new env required.
    (3000), `BOOKINGS_ALERT_HOURS` (08:00-22:00), `BOOKINGS_ALERT_INTERVAL_MIN`
    (10; 0 disables).
 
-## Round 8 — Home power status (CURRENT)
+## Round 8 — Home power status (DEPLOYED 2026-11-23; owner check open)
 
-1. Deploy (no migration; state is one `app_state` row).
+1. (done — deployed; no migration, state is one `app_state` row)
 2. Within ~2 min a card appears in the DAN.OS chat and is pinned. It needs a
    Google account assigned to 🏠 Особисте that receives Deye mail
    (`/accounts`).
@@ -35,12 +61,13 @@ Owner request 23.11.2026. No migration, no new env required.
 5. Tunables: POWER_POLL_SECONDS (120), POWER_DEBOUNCE_MINUTES (3),
    POWER_PUSH (true), POWER_MAIL_FROM (empty disables).
 
-## Round 7 — English coach (code complete)
+## Round 7 — English coach (DEPLOYED; owner check still open)
 
-R6.1D is already on `main` (`d944524`); R7 sits directly on top of it.
+In production since at least 2026-09-06. The owner walk-through below has not
+happened yet:
 
-1. Review `feat(r7): english coach — daily session, conversation, progress`.
-2. Deploy. Migration `c9d3e4f5a6b7` adds THREE empty tables — no backfill.
+1. (done — deployed)
+2. (done — migration `c9d3e4f5a6b7` ran in production)
 3. Optional env: `ENGLISH_TIME` (default `20:00`) — the evening nudge. Empty
    disables it. Nothing else to configure; the coach uses `CHAT_MODEL`.
 4. In Telegram: `/domain personal`, then `/english`.
@@ -62,13 +89,11 @@ R6.1D is already on `main` (`d944524`); R7 sits directly on top of it.
 - Level is fixed at B1 and minutes at 12 until he asks otherwise; both are
   columns, so changing them is an UPDATE, not a migration.
 
-## Round 6.1D — Order aggregates (PUSHED, verify live)
+## Round 6.1D — Order aggregates (DEPLOYED; owner check still open)
 
-Pushed as `d944524`. Migration `b8c2d3e4f5a6` adds the cache tables — no
-backfill. Remaining owner steps:
+Deployed; the nightly sync runs every day. Remaining owner steps:
 
-1. Confirm the Railway build finished: `/health` should report `r6.1d` or
-   newer.
+1. (done — production reports `r7`)
 2. (done — the commit is on `main`)
 3. Optionally run `/travelon_sync` to pre-warm; not required — the bot fills
    any window it needs on demand the first time it is asked.
@@ -118,6 +143,16 @@ already passes the gate; only the confirmation flow is missing.
 Monthly TravelON analytics, task auto-carryover proposals, /reply v2 (thread
 context), memory browser in the Mini App, a vault/password-manager connector
 (explicitly out of scope for R6.1A).
+
+2026-11-23 architecture proposal «for the whole life» (owner page:
+https://claude.ai/artifact/JfMw3byL9A2VEiTB4Cd9T8), awaiting the owner's four
+decisions (finance/health domains, what MCP may write, owner-only vs family,
+order). Proposed order (round numbers to be assigned — R8 / R8.1 are now
+power status and the booking digest): attention budget (P0–P3, daily cap,
+👍/👎) → DAN.OS as an MCP server for Claude → module contract → deadlines +
+tech-ops → life graph → commitments + meeting prep → journal, reviews,
+decision log → travel → money (own domain). None of it is authorized until
+he picks it.
 
 ## Out of scope
 

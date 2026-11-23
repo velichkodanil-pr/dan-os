@@ -25,6 +25,7 @@ from app.core.policy import PolicyDenied
 from app.core.transcription import TranscriptionError, get_transcriber
 from app.models import EnglishProfile
 from app.telegram.cards import proposal_card, task_created_card, today_card
+from app.telegram.safe_send import send_html
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -59,7 +60,7 @@ async def send_brief(user_id: int) -> None:
             sections.append(section)
     if len(sections) == 1:
         sections.append("\nСьогодні нічого термінового — усі домени спокійні ✅")
-    await bot_instance.send_message(user_id, "\n".join(sections))
+    await send_html(bot_instance, user_id, "\n".join(sections))
 
 
 async def send_checkin(user_id: int) -> None:
@@ -76,9 +77,9 @@ async def send_checkin(user_id: int) -> None:
         all_undone += [(dom, h) for h in habits if not h["done_today"]]
         all_candidates += [(dom, c) for c in candidates]
     head = "🌙 <b>Вечірній підсумок</b>"
-    await bot_instance.send_message(
-        user_id, head + ("\n" + "\n".join(summaries) if summaries
-                         else "\nСьогодні порожньо."))
+    await send_html(
+        bot_instance, user_id, head + ("\n" + "\n".join(summaries) if summaries
+                                       else "\nСьогодні порожньо."))
     if all_undone:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
@@ -92,8 +93,9 @@ async def send_checkin(user_id: int) -> None:
         await bot_instance.send_message(
             user_id, f"🧠 Розберемо пам'ять — кандидатів: {len(all_candidates)}")
         for dom, item in all_candidates:
-            await bot_instance.send_message(
-                user_id, f"🧠 [{domain_label(dom)}] {item.content}",
+            await send_html(
+                bot_instance, user_id,
+                f"🧠 [{domain_label(dom)}] {briefs.h(item.content)}",
                 reply_markup=_memory_kb(item.id))
 
 
@@ -108,7 +110,7 @@ async def send_digest(user_id: int) -> None:
         if text:
             blocks.append(text)
     if blocks:
-        await bot_instance.send_message(user_id, "\n\n".join(blocks))
+        await send_html(bot_instance, user_id, "\n\n".join(blocks))
 
 
 async def send_weekly(user_id: int) -> None:
@@ -122,7 +124,7 @@ async def send_weekly(user_id: int) -> None:
             sections.append(section)
     if len(sections) == 1:
         sections.append("\nЦього тижня активності по доменах не було.")
-    await bot_instance.send_message(user_id, "\n".join(sections))
+    await send_html(bot_instance, user_id, "\n".join(sections))
 
 
 async def _sync_travelon_cache(user_id: int, ahead: int | None = None) -> dict:
@@ -166,7 +168,7 @@ async def send_debt_alert(user_id: int) -> None:
     from app.core import travelon
     text = await travelon.debt_alert_text()
     if text:
-        await bot_instance.send_message(user_id, text)
+        await send_html(bot_instance, user_id, text)
 
 
 async def send_bookings_digest(user_id: int) -> None:
@@ -181,7 +183,7 @@ async def send_bookings_digest(user_id: int) -> None:
         text = await bookings.digest_text(
             start, end, title=bookings.window_title(start, end), db=db)
     if text:
-        await bot_instance.send_message(user_id, text)
+        await send_html(bot_instance, user_id, text)
 
 
 async def send_bookings_alerts(user_id: int) -> None:
@@ -192,7 +194,7 @@ async def send_bookings_alerts(user_id: int) -> None:
     async with database.session() as db:
         text = await bookings.poll_alerts(db)
     if text:
-        await bot_instance.send_message(user_id, text)
+        await send_html(bot_instance, user_id, text)
 
 
 async def send_english_nudge(user_id: int) -> None:

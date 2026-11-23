@@ -103,12 +103,15 @@ async def weekly_coverage_report(db: AsyncSession, user_id: int,
             logger.exception("travelon weekly block failed")
 
     if gaps:
+        # Questions are his own words and suggestions are model text (the
+        # prompt even shows «<що додати>»): both escaped for Telegram HTML.
+        from app.core.briefs import h
         gap_texts = [g.question for g in gaps]
         lines.append(f"\n🕳 <b>Питання без відповіді ({len(gaps)}):</b>")
-        lines += [f" • {g[:100]}" for g in gap_texts[:5]]
+        lines += [f" • {h(g[:100])}" for g in gap_texts[:5]]
         suggestions = await _suggest_with_haiku(gap_texts)
         if suggestions:
-            lines.append("\n💡 <b>Що варто додати в базу знань:</b>\n" + suggestions)
+            lines.append("\n💡 <b>Що варто додати в базу знань:</b>\n" + h(suggestions))
         else:
             lines.append("\n💡 Додай документи чи пересилки на ці теми — і я закрию прогалини.")
         for g in gaps:
