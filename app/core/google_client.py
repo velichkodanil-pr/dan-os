@@ -697,3 +697,38 @@ async def gmail_recent(access_token: str, hours: int = 16, limit: int = 5) -> li
             out.append({"from": sender[:40], "subject": hdrs.get("Subject", "(без теми)")[:70],
                         "snippet": data.get("snippet", "")[:100]})
     return out
+
+
+async def gmail_messages(access_token: str, query: str,
+                         limit: int = 50) -> list[dict]:
+    """R8: id / internalDate / subject / snippet of messages matching `query`
+    (whole mailbox, archived included). Metadata only — no bodies. Used by the
+    deterministic power-status job; nothing here goes to a model."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers=headers, params={"q": query, "maxResults": limit})
+        if resp.status_code in (401, 403):
+            raise GmailAccessError(str(resp.status_code),
+                                   api_disabled="has not been used in project"
+                                   in resp.text or "is disabled" in resp.text)
+        if resp.status_code != 200:
+            logger.error("gmail list failed: %s", resp.status_code)
+            return []
+        for ref in resp.json().get("messages", [])[:limit]:
+            m = await client.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{ref['id']}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": ["Subject"]})
+            if m.status_code != 200:
+                continue
+            data = m.json()
+            hdrs = {h["name"]: h["value"]
+                    for h in data.get("payload", {}).get("headers", [])}
+            out.append({"id": ref["id"],
+                        "internal_ms": int(data.get("internalDate") or 0),
+                        "subject": hdrs.get("Subject", ""),
+                        "snippet": data.get("snippet", "")})
+    return out

@@ -4,6 +4,30 @@ _Last verified: 2026-08-21. R6.1C is DEPLOYED and verified live. R6.1D is
 PUSHED to `main` (`d944524`) — confirm the Railway build with `/health`.
 R7 is CODE COMPLETE and NOT deployed._
 
+## R8 — Home power status (Deye): CODE COMPLETE (2026-11-23)
+
+Owner ask (23.11.2026): Deye Cloud «відключення / відновлення мережі» mails are
+noise in Telegram, but «чи є зараз світло» matters — one pinned card, «Зелений
+вогонь ЕЛЕКТРО Є».
+
+- `app/core/power.py` — deterministic, no model. Every 120 s reads
+  `from:noreply@deye.cloud` in PERSONAL-domain Gmail accounts (archived mail
+  included — a Gmail filter takes them out of the inbox), regex-parses station
+  / SN / on-off (UA + RU + EN), folds them into `app_state["power_state"]`
+  (JSON, no migration), edits ONE pinned card in place, and sends one SILENT
+  push when the overall state changes and has held for 3 min (blinks never
+  push; the first observation never pushes).
+- Card: 🟢 ЕЛЕКТРО Є / 🔴 ЕЛЕКТРО НЕМА (+ duration) / 🟡 ЧАСТКОВО / ⚪ невідомо,
+  per-station line, «сьогодні без світла», «перевірено HH:MM», ⚠️ when mail
+  could not be read for 15 min. `/power` = card + 7-day total.
+- Stage 2 (`app/core/deye_api.py`, optional): Deye Cloud OpenAPI adds 🔋 SOC,
+  ☀️ PV, 🏠 load per station and «⚪ інвертор не на зв'язку» when the
+  inverter stopped reporting. Active only with DEYE_APP_ID / DEYE_APP_SECRET /
+  DEYE_EMAIL / DEYE_PASSWORD_SHA256; token in memory only.
+- Tests: `tests/test_r8_power.py` (17). Full suite: 434 passed, 2 failed —
+  both in `test_r61d.py` and failing identically on the unchanged tree
+  (pre-existing, date-dependent), not R8.
+
 ## R7 — English coach: CODE COMPLETE, NOT DEPLOYED
 
 «Додай кнопку, навчаємось англійської. Веди прогрес, щоб продовжували кожен

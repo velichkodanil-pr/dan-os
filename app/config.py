@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r7"
-APP_RELEASE = "R7 — англійська: щоденна сесія, розмова, прогрес"
+APP_VERSION = "r8"
+APP_RELEASE = "R8 — світло: статус мережі з Deye у закріпі"
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -65,6 +65,22 @@ class Settings(BaseSettings):
     # day was actually missed — a reminder that fires after a finished
     # session is how a habit tracker gets muted. Empty disables it.
     english_time: str = "20:00"
+
+    # R8: home power status. Deye Cloud mails «grid lost / restored» per
+    # station; DAN.OS turns them into ONE pinned status card (personal domain,
+    # deterministic, no model). Empty POWER_MAIL_FROM disables the job.
+    power_mail_from: str = "noreply@deye.cloud"
+    power_poll_seconds: int = 120
+    power_debounce_minutes: int = 3   # blinks shorter than this never push
+    power_push: bool = True           # silent push on a settled change
+    # R8 stage 2 (optional): Deye Cloud OpenAPI for battery / PV / load and
+    # «inverter offline». All four must be set; the token lives in memory only.
+    deye_app_id: str = ""
+    deye_app_secret: str = ""
+    deye_email: str = ""
+    deye_password_sha256: str = ""
+    deye_base_url: str = "https://eu1-developer.deyecloud.com/v1.0"
+    deye_offline_minutes: int = 20
 
     # Cowork knowledge channel: enables POST /admin/ingest when set
     admin_token: str = ""

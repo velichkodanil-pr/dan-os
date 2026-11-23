@@ -115,7 +115,8 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
 
 
 async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-                run_debts=None, run_tv_sync=None, run_english=None) -> None:
+                run_debts=None, run_tv_sync=None, run_english=None,
+                run_power=None) -> None:
     while True:
         try:
             await _fire_due(send_message)
@@ -123,15 +124,23 @@ async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
                                run_debts, run_tv_sync, run_english)
         except Exception:
             logger.exception("scheduler tick failed")
+        # R8: power status is not a daily ritual — it self-throttles to
+        # POWER_POLL_SECONDS and must never block reminders if it breaks.
+        if run_power is not None:
+            try:
+                await run_power()
+            except Exception:
+                logger.exception("power tick failed")
         await asyncio.sleep(POLL_SECONDS)
 
 
 def start(send_message, run_brief, run_checkin, run_digest, run_weekly,
-          run_debts=None, run_tv_sync=None, run_english=None) -> None:
+          run_debts=None, run_tv_sync=None, run_english=None,
+          run_power=None) -> None:
     global _task
     _task = asyncio.create_task(
         _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-              run_debts, run_tv_sync, run_english))
+              run_debts, run_tv_sync, run_english, run_power))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

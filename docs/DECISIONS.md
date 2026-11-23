@@ -2,6 +2,24 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R8 home power status from Deye mails
+
+- Source of truth for «є світло» = Deye Cloud's own grid lost / restored mails
+  (event-driven, already arriving), not polling the inverter. The OpenAPI is
+  an optional enrichment (SOC / PV / load / offline detection), never the
+  grid-state source — it is the one path that can tell «inverter offline»
+  from «all quiet».
+- Personal domain only; no model ever sees the mails; station names are
+  escaped before rendering.
+- State in `app_state` JSON (no new table): it is a single small document per
+  owner and the history is capped at 35 days.
+- Push policy (owner-approved default): pinned card edited silently on every
+  change; ONE silent push when the overall state has held ≥3 min.
+- The Gmail side (filter: skip inbox + label «Deye» for connection mails only;
+  alarms such as Grid_Phase_Wrong stay in the inbox) keeps them out of the
+  digest and brief, which read `in:inbox` only.
+- Telegram commands cannot be Cyrillic, so the command is `/power`.
+
 ## 2026-11-04 — TravelON report: cancellation details and rebooking (scope for a later round)
 
 Proxymo added to the order report (verified on prod 04.11.2026): on Canceled

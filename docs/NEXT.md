@@ -1,6 +1,25 @@
 # NEXT — the one authorized round
 
-## Round 7 — English coach (CURRENT, code complete)
+## Round 8 — Home power status (CURRENT)
+
+1. Deploy (no migration; state is one `app_state` row).
+2. Within ~2 min a card appears in the DAN.OS chat and is pinned. It needs a
+   Google account assigned to 🏠 Особисте that receives Deye mail
+   (`/accounts`).
+3. `/power` — the same card + 7-day total.
+4. Optional stage 2: create an app at developer.deyecloud.com, then set Railway
+   variables DEYE_APP_ID, DEYE_APP_SECRET, DEYE_EMAIL, DEYE_PASSWORD_SHA256
+   (sha256 hex of the Deye Cloud password). Battery / PV / load lines appear
+   on the next refresh. Field names were checked against the official
+   swagger (eu1-developer.deyecloud.com/v2/api-docs, 23.11.2026):
+   station/list → id, name, batterySOC, generationPower, connectionStatus
+   (NORMAL / ALL_OFFLINE / PARTIAL_OFFLINE / NO_DEVICE), lastUpdateTime;
+   station/latest → batterySOC, generationPower, consumptionPower,
+   wirePower, gridPower, batteryPower, lastUpdateTime (date-time).
+5. Tunables: POWER_POLL_SECONDS (120), POWER_DEBOUNCE_MINUTES (3),
+   POWER_PUSH (true), POWER_MAIL_FROM (empty disables).
+
+## Round 7 — English coach (code complete)
 
 R6.1D is already on `main` (`d944524`); R7 sits directly on top of it.
 

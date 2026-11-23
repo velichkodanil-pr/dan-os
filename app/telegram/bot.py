@@ -193,6 +193,43 @@ async def send_english_nudge(user_id: int) -> None:
         )
 
 
+class _PowerSender:
+    """Telegram side of the R8 power card (adapter only — logic is in core)."""
+
+    def __init__(self, chat_id: int):
+        self.chat_id = chat_id
+
+    async def send(self, text: str, silent: bool = True) -> int:
+        msg = await bot_instance.send_message(self.chat_id, text,
+                                              disable_notification=silent)
+        return msg.message_id
+
+    async def edit(self, message_id: int, text: str) -> bool:
+        try:
+            await bot_instance.edit_message_text(text, chat_id=self.chat_id,
+                                                 message_id=message_id)
+            return True
+        except Exception as e:  # aiogram TelegramBadRequest
+            if "not modified" in str(e):
+                return True
+            logger.info("power card edit failed (%s) — will repost", type(e).__name__)
+            return False
+
+    async def pin(self, message_id: int) -> None:
+        await bot_instance.pin_chat_message(self.chat_id, message_id,
+                                            disable_notification=True)
+
+
+async def run_power(force: bool = False) -> None:
+    """Scheduler hook (every 30 s; core throttles to POWER_POLL_SECONDS)."""
+    if bot_instance is None or not settings.owner_telegram_id:
+        return
+    from app.core import power
+    async with database.session() as db:
+        await power.tick(db, _PowerSender(int(settings.owner_telegram_id)),
+                         force=force)
+
+
 def _conflict_kb(new_id) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆕 Нове замінює старе", callback_data=f"cf:{new_id}:n")],
@@ -1663,6 +1700,18 @@ async def _en_send_card(target, prof, db) -> bool:
     return True
 
 
+@router.message(Command("power"))
+async def cmd_power(message: Message) -> None:
+    """R8: is there grid power at home right now (Deye stations)."""
+    if not _is_owner(message):
+        return
+    from app.core import power
+    await run_power(force=True)   # refresh first: pinned card + fresh mail
+    async with database.session() as db:
+        text = await power.status_text(db)
+    await message.answer(text)
+
+
 @router.message(Command("english"))
 async def cmd_english(message: Message) -> None:
     """The English hub: where he is in the plan and what he can do right now."""
@@ -1828,6 +1877,7 @@ _COMMAND_HELP = (
     "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
     "/habit · /habits\n"
     "<b>Англійська:</b> /english · /english_stop\n"
+    "<b>Дім:</b> /power — чи є світло (закріп оновлюється сам)\n"
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
     "/drive_all · /kb_security_scan · /kb_quarantine\n"
     "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
