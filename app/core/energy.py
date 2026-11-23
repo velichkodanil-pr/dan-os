@@ -235,12 +235,33 @@ async def sun_today(lat: float | None, lng: float | None, day: str) -> float | N
         return None
 
 
+_SUN_CACHE: dict = {}          # (lat, lng) -> (monotonic, value)
+_SUN_BACKOFF = {"until": 0.0}
+
+
 async def sun_now(lat: float | None, lng: float | None) -> float | None:
-    """Current shortwave radiation, W/m²."""
+    """Current shortwave radiation, W/m². Cached 15 min; after a failure the
+    lookup pauses 30 min so a slow API never stretches every tick."""
+    import time
     if lat is None or lng is None:
         return None
+    now = time.monotonic()
+    hit = _SUN_CACHE.get((lat, lng))
+    if hit and now - hit[0] < 900:
+        return hit[1]
+    if now < _SUN_BACKOFF["until"]:
+        return None
+    value = await _sun_now_fetch(lat, lng)
+    if value is None:
+        _SUN_BACKOFF["until"] = now + 1800
+    else:
+        _SUN_CACHE[(lat, lng)] = (now, value)
+    return value
+
+
+async def _sun_now_fetch(lat: float, lng: float) -> float | None:
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get("https://api.open-meteo.com/v1/forecast", params={
                 "latitude": lat, "longitude": lng, "current": "shortwave_radiation",
                 "timezone": settings.tz_name})
@@ -488,7 +509,8 @@ async def run(state: dict, now_ms: int, live: dict, grid_status: dict,
         except Exception:
             logger.exception("energy: capacity step failed")
         try:
-            if not off and lv.soc is not None and lv.soc >= 97:
+            if (not off and lv.soc is not None and lv.soc >= 97
+                    and 9 <= local(now_ms).hour < 17):
                 sun = await sun_now(lv.lat, lv.lng)
                 spare = surplus_watts(lv, sun)
                 if surplus_due(state, name, spare, now_ms):
