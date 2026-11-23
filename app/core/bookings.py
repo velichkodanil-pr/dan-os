@@ -23,6 +23,7 @@ texts are not parsed at all. What persists in app_state is order numbers,
 agency ids and dates — no personal data.
 """
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -77,6 +78,7 @@ class FeedOrder:
     rebooked_to: str
     cancelled_on: date | None
     cancel_reason: str               # dictionary reason only, never free text
+    people_key: str = ""             # hash of the tourist list — never names
 
     @property
     def cancelled(self) -> bool:
@@ -110,6 +112,16 @@ def _is_test(order_el, reason: str) -> bool:
     return bool(customers) and all(
         _text(c, "name").upper() == "STAFF" and _text(c, "surname").upper() == "STAFF"
         for c in customers)
+
+
+def _people_key(order_el) -> str:
+    """A short hash of the tourist list, so two orders can be compared for
+    «same people» without keeping a single name (store-minimum)."""
+    names = sorted(f"{_text(c, 'surname').upper()} {_text(c, 'name').upper()}"
+                   for c in order_el.findall("customers/customer"))
+    if not names:
+        return ""
+    return hashlib.sha256("|".join(names).encode()).hexdigest()[:16]
 
 
 def _created_at(order_el, tz: ZoneInfo) -> datetime | None:
@@ -164,6 +176,7 @@ def parse_feed(xml_text: str) -> list[FeedOrder]:
             rebooked_to=_text(o, "rebooked-to"),
             cancelled_on=cancelled_on,
             cancel_reason=reason,
+            people_key=_people_key(o),
         ))
     return out
 
@@ -214,22 +227,43 @@ def _short_agency(name: str) -> str:
     return n if len(n) <= 40 else n[:39] + "…"
 
 
-def _delta(cur: int, prev: int) -> str:
-    if prev == 0:
+def _delta(cur: int, prev: int | None) -> str:
+    if not prev:
         return ""
     pct = round((cur - prev) * 100 / prev)
     return f" ({'+' if pct >= 0 else ''}{pct}% до тижня тому)"
 
 
+NO_HOTEL = "без готелю"   # insurance-only, ticket-only without a charter name
+
+
 def possible_duplicates(orders: list[FeedOrder]) -> list[list[FeedOrder]]:
-    """Same agency, hotel, check-in and amount within one window."""
+    """The SAME tourists in the same hotel and check-in, more than once.
+    Same price alone is not a duplicate: on 23.11.2026 a TAT agency booked
+    eight families into one hotel and date — identical prices, different
+    people (checked against the CRM)."""
     groups: dict[tuple, list[FeedOrder]] = {}
     for o in orders:
-        if not (o.agency_id and o.hotel and o.check_in and o.gross):
+        if not (o.people_key and o.hotel and o.check_in):
             continue
-        groups.setdefault((o.agency_id, o.hotel.upper(), o.check_in,
-                           round(o.gross, 2)), []).append(o)
+        groups.setdefault((o.people_key, o.hotel.upper(), o.check_in),
+                          []).append(o)
     return [g for g in groups.values() if len(g) > 1]
+
+
+SERIES_MIN = 3
+
+
+def series(orders: list[FeedOrder]) -> list[list[FeedOrder]]:
+    """One agency booking several different families into the same hotel
+    and check-in — a group sale, worth seeing as one line."""
+    groups: dict[tuple, list[FeedOrder]] = {}
+    for o in orders:
+        if o.agency_id and o.hotel and o.check_in:
+            groups.setdefault((o.agency_id, o.hotel.upper(), o.check_in),
+                              []).append(o)
+    out = [g for g in groups.values() if len(g) >= SERIES_MIN]
+    return sorted(out, key=lambda g: -len(g))
 
 
 def sales(orders: list[FeedOrder]) -> list[FeedOrder]:
@@ -246,32 +280,49 @@ def lost(orders: list[FeedOrder], start: datetime, end: datetime) -> list[FeedOr
             and o.cancelled_on is not None and d0 <= o.cancelled_on <= d1]
 
 
+def _countries(new: list[FeedOrder]) -> str:
+    by_country: dict[str, int] = {}
+    for o in new:
+        k = o.country or NO_HOTEL
+        by_country[k] = by_country.get(k, 0) + 1
+    top = sorted(by_country.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = [kv for kv in top if kv[0] != NO_HOTEL][:5]
+    rest = sum(n for k, n in top if k != NO_HOTEL and (k, n) not in shown)
+    parts = [f"{html.escape(c)} {n}" for c, n in shown]
+    if rest:
+        parts.append(f"решта {rest}")
+    if by_country.get(NO_HOTEL):
+        parts.append(f"{NO_HOTEL} {by_country[NO_HOTEL]}")
+    return "🌍 " + " · ".join(parts)
+
+
+def _money(orders: list[FeedOrder]) -> str:
+    return travelon._sum_by_currency((o.gross, o.currency) for o in orders)
+
+
 def build_digest(cur: list[FeedOrder], prev: list[FeedOrder] | None,
                  cancelled: list[FeedOrder] | None, *, title: str,
-                 new_agencies: list[FeedOrder] | None = None) -> str:
+                 new_agencies: list[FeedOrder] | None = None,
+                 day: list[FeedOrder] | None = None,
+                 day_prev: list[FeedOrder] | None = None) -> str:
+    """`cur`/`prev` = the window and the same window a week earlier;
+    `day`/`day_prev` (optional) = the day so far, for the running total."""
     new = sales(cur)
     tests = sum(1 for o in cur if o.is_test)
     rebooks = sum(1 for o in cur if o.is_rebooking and not o.is_test)
     lines = [f"📊 <b>{html.escape(title)}</b>"]
     if not new:
-        lines.append("Нових заявок не було.")
+        lines.append("Нових заявок не було."
+                     + (f" Тиждень тому за цей час: {len(sales(prev))}."
+                        if prev else ""))
     else:
-        prev_n = len(sales(prev)) if prev is not None else 0
         confirmed = sum(1 for o in new if travelon._is_confirmed(o.status))
         lines.append(
-            f"🆕 <b>Нових заявок: {len(new)}</b>{_delta(len(new), prev_n)} · "
-            f"туристів {sum(o.tourists for o in new)}")
-        lines.append("💶 Брутто: " + travelon._sum_by_currency(
-            (o.gross, o.currency) for o in new)
-            + f" · підтверджено {confirmed} з {len(new)}")
-
-        by_country: dict[str, int] = {}
-        for o in new:
-            by_country[o.country or "інше"] = by_country.get(o.country or "інше", 0) + 1
-        top = sorted(by_country.items(), key=lambda kv: (-kv[1], kv[0]))
-        rest = sum(n for _, n in top[5:])
-        lines.append("🌍 " + " · ".join(f"{html.escape(c)} {n}" for c, n in top[:5])
-                     + (f" · інше {rest}" if rest else ""))
+            f"🆕 <b>Нових заявок: {len(new)}</b>"
+            f"{_delta(len(new), len(sales(prev)) if prev is not None else None)}"
+            f" · туристів {sum(o.tourists for o in new)}")
+        lines.append(f"💶 Сума: {_money(new)} · підтверджено {confirmed} з {len(new)}")
+        lines.append(_countries(new))
 
         by_agency: dict[str, list[FeedOrder]] = {}
         for o in new:
@@ -306,13 +357,18 @@ def build_digest(cur: list[FeedOrder], prev: list[FeedOrder] | None,
                 f"{html.escape(big.where)} · {big.tourists} тур. · "
                 f"{html.escape(_short_agency(big.agency))}")
 
-        dups = possible_duplicates(new)
-        for g in dups[:3]:
+        for g in series(new)[:3]:
             o = g[0]
             lines.append(
-                "⚠️ Можливий дубль: " + ", ".join(f"№{x.order_no}" for x in g)
-                + f" — {html.escape(o.hotel)}, {o.check_in:%d.%m}, "
-                f"{travelon._fmt_money(o.gross, o.currency)}")
+                f"👥 Серія: {html.escape(_short_agency(o.agency))} — {len(g)} "
+                f"заявок, {html.escape(o.hotel)}, заїзд {o.check_in:%d.%m}, "
+                f"{sum(x.tourists for x in g)} тур.")
+        for g in possible_duplicates(new)[:3]:
+            o = g[0]
+            lines.append(
+                "⚠️ Можливий дубль (ті самі туристи): "
+                + ", ".join(f"№{x.order_no}" for x in g)
+                + f" — {html.escape(o.hotel)}, {o.check_in:%d.%m}")
 
     if cancelled is not None:
         if cancelled:
@@ -320,15 +376,23 @@ def build_digest(cur: list[FeedOrder], prev: list[FeedOrder] | None,
             for o in cancelled:
                 r = o.cancel_reason or "без причини"
                 reasons[r] = reasons.get(r, 0) + 1
+            money = _money(cancelled)
             lines.append(
-                f"❌ Анульовано: {len(cancelled)} · " + travelon._sum_by_currency(
-                    (o.gross, o.currency) for o in cancelled)
+                f"❌ Анульовано: {len(cancelled)}"
+                + (f" · {money}" if money != "—" else "")
                 + " · " + ", ".join(f"{html.escape(r)} {n}" for r, n in
                                     sorted(reasons.items(), key=lambda kv: -kv[1])[:3]))
         else:
             lines.append("❌ Анульовано: 0")
     else:
         lines.append("❌ Ануляції зараз не вдалося прочитати.")
+
+    if day is not None:
+        dn = sales(day)
+        lines.append(
+            f"\n📈 <b>За день: {len(dn)} заявок</b>"
+            f"{_delta(len(dn), len(sales(day_prev)) if day_prev is not None else None)}"
+            f" · туристів {sum(o.tourists for o in dn)} · {_money(dn)}")
 
     extra = []
     if rebooks:
@@ -341,17 +405,27 @@ def build_digest(cur: list[FeedOrder], prev: list[FeedOrder] | None,
 
 
 async def digest_text(start: datetime, end: datetime, *, title: str,
-                      db=None) -> str | None:
-    """None when not configured. Never raises: a failed report is said."""
+                      db=None, day_start: datetime | None = None) -> str | None:
+    """None when not configured. Never raises: a failed report is said.
+    With `day_start` earlier than `start`, one fetch covers the whole day and
+    the message ends with the running day total."""
     if not travelon.configured():
         return None
     week = timedelta(days=7)
-    cur, prev, changed = await asyncio.gather(
-        fetch_created(start, end), fetch_created(start - week, end - week),
+    with_day = day_start is not None and day_start < start
+    first = day_start if with_day else start
+    cur_all, prev_all, changed = await asyncio.gather(
+        fetch_created(first, end), fetch_created(first - week, end - week),
         fetch_changed(start, end, status="cancelled"), return_exceptions=True)
-    if isinstance(cur, BaseException):
-        logger.error("bookings digest failed: %s", type(cur).__name__)
+    if isinstance(cur_all, BaseException):
+        logger.error("bookings digest failed: %s", type(cur_all).__name__)
         return "📊 Дайджест заявок: звіт TravelON зараз недоступний."
+    prev_all = None if isinstance(prev_all, BaseException) else prev_all
+
+    def in_window(orders, lo):
+        return [o for o in orders if o.created_at and o.created_at >= lo]
+    cur = in_window(cur_all, start)
+    prev = in_window(prev_all, start - week) if prev_all is not None else None
     new_ag = None
     if db is not None:
         try:
@@ -359,14 +433,50 @@ async def digest_text(start: datetime, end: datetime, *, title: str,
         except Exception:
             logger.exception("bookings: new-agency check failed")
     return build_digest(
-        cur, None if isinstance(prev, BaseException) else prev,
+        cur, prev,
         None if isinstance(changed, BaseException) else lost(changed, start, end),
-        title=title, new_agencies=new_ag)
+        title=title, new_agencies=new_ag,
+        day=cur_all if with_day else None,
+        day_prev=prev_all if with_day else None)
+
+
+def parse_slots(raw: str) -> list[tuple[int, int]]:
+    out = []
+    for t in (x.strip() for x in raw.split(",") if x.strip()):
+        try:
+            hh, mm = (int(x) for x in t.split(":"))
+        except ValueError:
+            continue
+        out.append((hh % 24, mm))
+    return sorted(set(out))
+
+
+def slot_window(end: datetime, raw_slots: str) -> tuple[datetime, datetime]:
+    """(start, day_start) for a digest ending at `end`: start = the previous
+    slot (wrapping over midnight), day_start = 00:00 of the day the window
+    belongs to — the 00:00 digest closes the PREVIOUS day."""
+    slots = parse_slots(raw_slots) or [(end.hour, end.minute)]
+    candidates = []
+    for back in (0, 1):
+        d = end.date() - timedelta(days=back)
+        for hh, mm in slots:
+            t = end.replace(year=d.year, month=d.month, day=d.day, hour=hh,
+                            minute=mm, second=0, microsecond=0)
+            if t < end - timedelta(minutes=1):
+                candidates.append(t)
+    start = max(candidates) if candidates else end - timedelta(hours=24)
+    day = (end - timedelta(minutes=1))
+    day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(start, end - timedelta(hours=24)), day_start
 
 
 def window_title(start: datetime, end: datetime) -> str:
-    if start.date() == end.date():
-        return f"Заявки {start:%d.%m}, {start:%H:%M}–{end:%H:%M}"
+    """«Заявки 23.11, 12:00–15:00»; a window ending at midnight reads 24:00
+    of the day it closes."""
+    last = end - timedelta(minutes=1)
+    to = "24:00" if (end.hour, end.minute) == (0, 0) and end > start else f"{end:%H:%M}"
+    if start.date() == last.date():
+        return f"Заявки {start:%d.%m}, {start:%H:%M}–{to}"
     return f"Заявки за добу: {start:%d.%m %H:%M} – {end:%d.%m %H:%M}"
 
 

@@ -31,9 +31,12 @@ lost; rebased onto R8.1 (`ba7f6e1`) before the push. No migration, no new env.
 Owner request 23.11.2026. No migration, no new env required.
 
 1. (done — deployed; production reported `r8.1` before R7.1 landed)
-2. In Telegram: `/bookings` — today's orders so far; `/bookings 24` — the last
-   24 hours. Compare the count with the «бронювання готове» mails of the day.
-3. 20:30 Kyiv: the digest arrives on its own (`BOOKINGS_DIGEST_TIME`).
+2. (done 23.11 16:33 — `/bookings` matched the CRM list exactly: 43 created,
+   40 sales + 2 tests + 1 rebooking, 97 tourists, 72 036 EUR, +74% vs 16.11)
+3. r8.1.2: digests arrive at 12:00, 15:00, 18:00, 21:00 and 00:00 Kyiv
+   (`BOOKINGS_DIGEST_TIMES`), each «since the previous slot» + the day so far.
+   A slot found more than 50 min late (deploy, outage) is skipped, not replayed.
+   First live check: the 18:00 digest on 23.11.
 4. Alerts: every 10 min from 08:00 to 22:00 — only big amounts, big groups,
    last-minute departures, new agencies, big cancellations. The «new agency»
    rule switches on by itself a few minutes after the first poll (history scan).

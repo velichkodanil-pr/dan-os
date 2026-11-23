@@ -13,6 +13,7 @@ and silence until tomorrow. The failure state lives in app_state as
 `ritual_fail_<key>` (JSON), so it survives restarts like everything else here.
 """
 import asyncio
+import functools
 import html as _html
 import json
 import logging
@@ -40,6 +41,18 @@ def ritual_due(last_run_date: str | None, now_local: datetime, time_str: str) ->
         return False
     target = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
     return now_local >= target and last_run_date != now_local.date().isoformat()
+
+
+def slot_missed(now_local: datetime, time_str: str, grace_min: int) -> bool:
+    """Pure: is it too late for this slot today? Booking digests are a
+    sequence of windows — a slot found long after its time (a deploy, an
+    outage) is skipped instead of firing several stale digests at once."""
+    try:
+        hh, mm = (int(x) for x in time_str.split(":"))
+    except ValueError:
+        return True
+    target = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return (now_local - target).total_seconds() > grace_min * 60
 
 
 def interval_due(last_run_iso: str | None, now_utc: datetime, minutes: int) -> bool:
@@ -113,7 +126,10 @@ def after_failure(state: dict, now_local: datetime) -> dict:
 def give_up_text(key: str, attempts: int) -> str:
     """The one alert after the last attempt. Says what and what to do; never
     the error itself (it can quote mail or data)."""
-    if key.startswith("digest_"):
+    if key.startswith("bookings_digest_"):
+        name = f"Дайджест бронювань {key.removeprefix('bookings_digest_')}"
+        cmd = "/bookings"
+    elif key.startswith("digest_"):
         name, cmd = f"Дайджест пошти {key.removeprefix('digest_')}", None
     else:
         name, cmd = RITUAL_NAMES.get(key, (key, None))
@@ -211,12 +227,21 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
     if run_english is not None and settings.english_time.strip():
         rituals.append(("english", settings.english_time.strip(),
                         run_english, None))
-    # R8.1: the daily booking digest (deterministic, no LLM).
-    if run_bookings_digest is not None and settings.bookings_digest_time.strip():
-        rituals.append(("bookings_digest", settings.bookings_digest_time.strip(),
-                        run_bookings_digest, None))
+    # R8.1: booking digests every few hours (owner: 12:00…00:00 every 3 h).
+    # Deterministic, no LLM. Each slot is its own ritual and knows its time,
+    # so the window is «since the previous slot» even when it fires late.
+    late_ok: dict[str, int] = {}
+    if run_bookings_digest is not None:
+        for t in [x.strip() for x in settings.bookings_digest_times.split(",")
+                  if x.strip()]:
+            key = f"bookings_digest_{t}"
+            rituals.append((key, t, functools.partial(run_bookings_digest,
+                                                      slot=t), None))
+            late_ok[key] = settings.bookings_digest_grace_min
     for key, time_str, fn, weekday in rituals:
         if weekday is not None and now_local.weekday() != weekday:
+            continue
+        if key in late_ok and slot_missed(now_local, time_str, late_ok[key]):
             continue
         async with database.session() as db:
             state = await db.get(AppState, f"last_{key}")

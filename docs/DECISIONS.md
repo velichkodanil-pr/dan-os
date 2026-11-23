@@ -2,6 +2,43 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R8.1.2: booking digest every 3 hours; series, not duplicates
+
+Owner checked the first live `/bookings` («працює») and asked for the digest
+to arrive by itself «кожні 3 години з 12 дня до 12 ночі», and for Claude to
+verify the numbers against reality.
+
+- **Verified against the CRM list** (travelon.to/book/bundle/index, created
+  23.11, all statuses) at 16:33: 43 orders = 40 sales + 2 tests («STAFF
+  STAFF», 75033/75036) + 1 rebooking (75019 ← 74998); tourists 97 and sum
+  72 036.25 EUR + 61.90 USD to the cent; 16.11 had 23 orders by 16:33 →
+  +74%, as shown. Confirmed 17 at 16:33 vs 18 in the CRM ~15 min later — a
+  status change, not a counting error. Cancellations (13) not cross-checked:
+  the CRM list has no cancellation-date filter.
+- **The «Вартість брутто» in the e-mail is NOT the report's gross-cost.** The
+  mail shows the client price (75024: 2 595.24); the report and the CRM «Sum»
+  column show the agency price (2 257.85, TAT networks −13%). The digest
+  follows the CRM, so the label is now «Сума», not «Брутто».
+- **Duplicates were false positives.** «Same agency + hotel + check-in +
+  amount» flagged 75020/75022/75024, 75027/75028/75030/75031 and 75018/75023;
+  every one had different tourists (checked in the CRM). A duplicate now
+  means the SAME tourist list (a 16-hex hash of sorted surname+name, computed
+  in memory, never the names) in the same hotel and check-in. Same agency +
+  hotel + check-in with ≥3 different families is shown as «👥 Серія» — a
+  group sale worth seeing as one line.
+- Country line: empty country = «без готелю» (insurance/ticket-only), the
+  tail = «решта» (was «інше» twice). Cancellation sums are omitted when the
+  report gives none (cancelled orders carry 0) instead of printing «—».
+- **Schedule**: `BOOKINGS_DIGEST_TIMES=12:00,15:00,18:00,21:00,00:00`, one
+  ritual per slot (`bookings_digest_<time>`), each covering «since the
+  previous slot» (12:00 covers 00:00–12:00; 00:00 covers 21:00–24:00 and
+  closes the previous day) plus «📈 За день» with the week-ago delta. One
+  fetch per digest covers the day; no extra report load. Slots more than
+  `BOOKINGS_DIGEST_GRACE_MIN` (50) late are skipped — a deploy at 16:40 must
+  not fire the 12:00 and 15:00 digests at once. The 00:00 push is the owner's
+  explicit choice (the 22:00–08:00 quiet rule is for the agent bot and the
+  alerts).
+
 ## 2026-11-23 — R7.1: a ritual must arrive, and a failing one must back off
 
 The 2026-11-22 brief was lost to one unescaped «Name <address>» mail sender

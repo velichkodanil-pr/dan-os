@@ -171,17 +171,26 @@ async def send_debt_alert(user_id: int) -> None:
         await send_html(bot_instance, user_id, text)
 
 
-async def send_bookings_digest(user_id: int) -> None:
-    """R8.1 daily ritual: the last 24 hours of TravelON orders in one message
-    — instead of ~40 «бронювання готове» e-mails. Deterministic, no LLM."""
-    from datetime import datetime, timedelta
+async def send_bookings_digest(user_id: int, slot: str | None = None) -> None:
+    """R8.1 ritual: TravelON orders since the previous digest slot, plus the
+    day so far — instead of ~40 «бронювання готове» e-mails. Deterministic,
+    no LLM. `slot` = the scheduled time («15:00»); the window ends there even
+    if the tick fires a little later."""
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     from app.core import bookings
-    end = datetime.now(ZoneInfo(settings.tz_name)).replace(second=0, microsecond=0)
-    start = end - timedelta(days=1)
+    now = datetime.now(ZoneInfo(settings.tz_name)).replace(second=0, microsecond=0)
+    end = now
+    if slot:
+        hh, mm = (int(x) for x in slot.split(":"))
+        end = now.replace(hour=hh, minute=mm)
+        if end > now:          # cannot happen from the scheduler; be safe
+            end = now
+    start, day_start = bookings.slot_window(end, settings.bookings_digest_times)
     async with database.session() as db:
         text = await bookings.digest_text(
-            start, end, title=bookings.window_title(start, end), db=db)
+            start, end, title=bookings.window_title(start, end), db=db,
+            day_start=day_start)
     if text:
         await send_html(bot_instance, user_id, text)
 
@@ -327,7 +336,8 @@ async def cmd_start(message: Message) -> None:
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
         "• /english — англійська 🇬🇧: щоденна сесія ~12 хв, розмовна практика й план на 12 тижнів (домен 🏠 Особисте)\n"
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
-        "• /bookings — дайджест заявок за сьогодні (/bookings 24 — за добу)\n"
+        "• /bookings — дайджест заявок за сьогодні (/bookings 24 — за добу); "
+        "сам приходить о 12, 15, 18, 21 і 00\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
         "• /wiki — база знань сторінками (партнери, процеси, умови) · /wiki_build\n"
@@ -808,7 +818,8 @@ async def cmd_order(message: Message) -> None:
 @router.message(Command("bookings"))
 async def cmd_bookings(message: Message) -> None:
     """R8.1: the booking digest on demand. /bookings = today so far,
-    /bookings 24 = the last 24 hours (what the evening ritual sends)."""
+    /bookings 24 = the last 24 hours. The rituals send «since the previous
+    slot» every few hours (BOOKINGS_DIGEST_TIMES)."""
     if not _is_owner(message):
         return
     from datetime import datetime, timedelta

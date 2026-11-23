@@ -5,9 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r8.1.1"
-APP_RELEASE = ("R8.1 + хотфікс R7.1 — дайджест заявок TravelON; ритуали "
-               "не губляться: екранування, запасний текст, паузи")
+APP_VERSION = "r8.1.2"
+APP_RELEASE = ("R8.1.2 — дайджест заявок кожні 3 год (12–00), серії замість "
+               "хибних дублів; ритуали не губляться")
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -87,7 +87,10 @@ class Settings(BaseSettings):
     # готове» e-mails, plus alerts on exceptions only. Empty time disables
     # the digest; interval 0 disables the alerts. Thresholds compare an
     # APPROXIMATE EUR value (EUR, USD); other currencies never trigger them.
-    bookings_digest_time: str = "20:30"
+    # Owner 23.11.2026: «кожні 3 години з 12 дня до 12 ночі». Each digest
+    # covers the time since the previous slot, plus the day so far.
+    bookings_digest_times: str = "12:00,15:00,18:00,21:00,00:00"
+    bookings_digest_grace_min: int = 50  # a slot missed by more is skipped
     bookings_alert_interval_min: int = 10
     bookings_alert_hours: str = "08:00-22:00"  # Kyiv; no pushes at night
     bookings_alert_big_eur: float = 5000

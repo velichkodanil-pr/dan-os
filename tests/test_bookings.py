@@ -20,12 +20,14 @@ def _order(no, *, created="23.11.2026", hour="12:00:00", status="Confirmed",
            country="Туреччина", city="Аланія", hotel="MERYAN HOTEL",
            check_in="29.06.2027", gross="2296.21", cur="EUR", pax=2,
            staff=False, reason="", rebooked_from="", rebooked_to="",
-           cancelled=""):
+           cancelled="", family=None):
+    # every order gets its own family unless `family` makes two the same
+    fam = family or f"FAM{no}"
     people = "".join(
-        f"<customer><name>{'STAFF' if staff else 'IVAN'}</name>"
-        f"<surname>{'STAFF' if staff else 'TEST'}</surname>"
+        f"<customer><name>{'STAFF' if staff else f'IVAN{i}'}</name>"
+        f"<surname>{'STAFF' if staff else fam}</surname>"
         f"<passport>XX000000</passport><dob>01.01.1990</dob></customer>"
-        for _ in range(pax))
+        for i in range(pax))
     cancel = (f"<cancellation-date>{cancelled}</cancellation-date>"
               f"<cancel-reason><requested>false</requested><text nil=\"true\"/>"
               f"<reason>{reason}</reason></cancel-reason>") if cancelled else ""
@@ -100,7 +102,7 @@ def test_rebooking_cancellation_is_not_lost():
 
 # ---------- digest ----------
 
-def test_digest_counts_sales_only_and_flags_duplicates():
+def test_digest_counts_sales_only_series_not_duplicates():
     cur = bookings.parse_feed(DAY)
     prev = bookings.parse_feed(_xml(*(_order(str(i), created="16.11.2026")
                                       for i in range(10))))
@@ -113,7 +115,12 @@ def test_digest_counts_sales_only_and_flags_duplicates():
     assert "туристів 14" in text
     assert "Туреччина 4 · Єгипет 1" in text
     assert "КОМАРОВА ОЛЕКСАНДРА АНДРІЇВНА (TAT) 4" in text
-    assert "Можливий дубль: №75027, №75028" in text
+    # 23.11.2026 live: same agency + hotel + date + price, DIFFERENT families
+    # = a group sale, not a duplicate
+    assert "Можливий дубль" not in text
+    assert ("👥 Серія: КОМАРОВА ОЛЕКСАНДРА АНДРІЇВНА (TAT) — 4 заявок, "
+            "MERYAN HOTEL, заїзд 29.06, 11 тур.") in text
+    assert "💶 Сума: 13 629 EUR" in text
     assert "№75025" in text and "Найбільша: №75025" in text
     assert "Анульовано: 1" in text and "Відмова агента 1" in text
     assert "перебронювань 1, тестових 2" in text
@@ -306,3 +313,84 @@ def test_token_never_in_digest(monkeypatch):
     text = bookings.build_digest(bookings.parse_feed(DAY), [], [], title="x")
     assert "SECRET-TOKEN" not in text
     assert travelon.configured()
+
+
+def test_duplicate_means_same_tourists():
+    orders = bookings.parse_feed(_xml(
+        _order("1", family="KOVAL"), _order("2", family="KOVAL", gross="2310"),
+        _order("3", family="SHEVCHENKO")))
+    dups = bookings.possible_duplicates(bookings.sales(orders))
+    assert [[o.order_no for o in g] for g in dups] == [["1", "2"]]
+    text = bookings.build_digest(orders, None, [], title="t")
+    assert "Можливий дубль (ті самі туристи): №1, №2" in text
+    assert "KOVAL" not in text            # names never reach the message
+    # the hash is all that is kept, and it is not a name
+    assert all(len(o.people_key) == 16 and "KOVAL" not in o.people_key
+               for o in orders)
+
+
+def test_countries_label_no_hotel_and_rest():
+    orders = bookings.parse_feed(_xml(
+        _order("1"), _order("2"), _order("3", country="", city="", hotel=""),
+        *(_order(str(10 + i), country=c) for i, c in enumerate(
+            ["Єгипет", "Греція", "Чехія", "ОАЕ", "Болгарія", "Кіпр", "Іспанія"]))))
+    line = bookings._countries(bookings.sales(orders))
+    assert line.startswith("🌍 Туреччина 2 · ")
+    assert "решта 3" in line and line.endswith("без готелю 1")
+    assert "інше" not in line
+
+
+def test_cancellations_without_amounts_show_no_dash():
+    gone = bookings.parse_feed(_xml(_order(
+        "1", status="Canceled", cancelled="23.11.2026", reason="Відмова по готелю",
+        gross="0")))
+    text = bookings.build_digest([], None, gone, title="t")
+    assert "❌ Анульовано: 1 · Відмова по готелю 1" in text
+
+
+def test_day_total_line():
+    day = bookings.parse_feed(DAY)
+    window = [o for o in day if o.created_at >= datetime(2026, 11, 23, 14, 20, tzinfo=TZ)]
+    text = bookings.build_digest(window, [], [], title="t", day=day,
+                                 day_prev=bookings.parse_feed(_xml(_order("9"))))
+    assert "Нових заявок: 3</b>" in text          # 75027, 75028, 75032
+    assert "📈 <b>За день: 5 заявок</b> (+400% до тижня тому) · туристів 14" in text
+
+
+def test_slot_window_every_three_hours():
+    slots = "12:00,15:00,18:00,21:00,00:00"
+    at = lambda d, h: datetime(2026, 11, d, h, 0, tzinfo=TZ)
+    assert bookings.slot_window(at(23, 15), slots) == (at(23, 12), at(23, 0))
+    # the first slot of the day covers the morning since midnight
+    assert bookings.slot_window(at(23, 12), slots) == (at(23, 0), at(23, 0))
+    # the midnight slot closes the PREVIOUS day
+    assert bookings.slot_window(at(24, 0), slots) == (at(23, 21), at(23, 0))
+    assert bookings.window_title(at(23, 21), at(24, 0)) == "Заявки 23.11, 21:00–24:00"
+    assert bookings.window_title(at(23, 12), at(23, 15)) == "Заявки 23.11, 12:00–15:00"
+
+
+def test_scheduler_slots_skip_stale_and_name_failures():
+    now = datetime(2026, 11, 23, 16, 40, tzinfo=TZ)
+    assert scheduler.slot_missed(now, "15:00", 50)          # deploy at 16:40
+    assert not scheduler.slot_missed(now.replace(hour=15, minute=20), "15:00", 50)
+    assert not scheduler.slot_missed(now.replace(hour=0, minute=1), "00:00", 50)
+    msg = scheduler.give_up_text("bookings_digest_15:00", 5)
+    assert "Дайджест бронювань 15:00" in msg and "/bookings" in msg
+
+
+@pytest.mark.asyncio
+async def test_slot_rituals_fire_once_with_their_slot(db, monkeypatch):
+    calls = []
+
+    async def fake(owner, slot=None):
+        calls.append(slot)
+    monkeypatch.setattr(settings, "bookings_digest_times", "12:00,15:00,00:00")
+    async def nop(*a, **k):
+        return None
+    for now in (datetime(2026, 11, 23, 16, 40, tzinfo=TZ),     # deploy: all stale
+                datetime(2026, 11, 24, 0, 0, 30, tzinfo=TZ),   # midnight
+                datetime(2026, 11, 24, 0, 1, 0, tzinfo=TZ),    # next tick: done
+                datetime(2026, 11, 24, 12, 0, 30, tzinfo=TZ)):
+        await scheduler._run_rituals(nop, nop, nop, nop, run_bookings_digest=fake,
+                                     now_local=now)
+    assert [c for c in calls if c] == ["00:00", "12:00"]
