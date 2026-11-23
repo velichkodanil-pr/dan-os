@@ -399,9 +399,17 @@ async def grid_presence(sns: list[str]) -> dict[str, dict]:
             logger.info("deye device/latest grid keys: %s", ", ".join(gk)[:600] or "none")
         out[sn] = {"grid": grid_from_values(values),
                    "state": row.get("deviceState"),
-                   "ts": _epoch(row.get("collectionTime"))}
+                   "ts": _epoch(row.get("collectionTime")),
+                   "diag": {k: values[k][0] for k in ("GridVoltageL1L2", "GridRelayStatus",
+                                                      "GridFrequency", "TotalGridPower")
+                            if k in values}}
     if out:
         _grid_cache.update(at=time.monotonic(), data=out)
+        sig = "; ".join(f"{sn} grid={r['grid']} state={r['state']} {r['diag']}"
+                        for sn, r in sorted(out.items()))
+        if sig != _grid_keys_logged.get("last"):
+            _grid_keys_logged["last"] = sig
+            logger.info("deye grid readings: %s", sig[:700])
     return out
 
 

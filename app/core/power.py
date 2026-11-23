@@ -393,6 +393,10 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
         logger.info("power: deye api %s (%d station(s))",
                     "ok" if live else "unavailable", len(live))
         state["deye_ok"] = bool(live)
+    match = [sorted(live), sorted(st["name"].casefold() for st in state["stations"].values())]
+    if live and match != state.get("diag_names"):
+        state["diag_names"] = match
+        logger.info("power: deye stations %s, mail stations %s", match[0], match[1])
     text = render_card(state, now_ms, live)
     await _sync_pin(state, sender, text)
 
