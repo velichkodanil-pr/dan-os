@@ -342,8 +342,14 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
     state["last_try_ms"] = now_ms
     events = await fetch_events(db, owner, state)
     if events is not None:
+        n_new = len([e for e in events if e.msg_id not in set(state["seen"])])
         apply_events(state, events)
         state["polled_ms"] = now_ms
+        if n_new:
+            logger.info("power: %d new event(s), overall=%s", n_new, overall(state)[0])
+    elif not state.get("warned_no_mail"):
+        logger.warning("power: no readable PERSONAL Gmail account — card not updated")
+        state["warned_no_mail"] = True
     prune(state, now_ms)
     if not state["stations"] and events is None:
         await save(db, state)   # nothing to show yet and no mailbox — stay quiet
@@ -351,11 +357,16 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
 
     from app.core import deye_api
     live = await deye_api.live() if deye_api.enabled() else {}
+    if deye_api.enabled() and bool(live) != state.get("deye_ok"):
+        logger.info("power: deye api %s (%d station(s))",
+                    "ok" if live else "unavailable", len(live))
+        state["deye_ok"] = bool(live)
     text = render_card(state, now_ms, live)
     await _sync_pin(state, sender, text)
 
     target = decide_push(state, now_ms)
     if target is not None:
+        logger.info("power: overall changed to %s — push", target)
         if settings.power_push:
             try:
                 await sender.send(push_text(state, target, now_ms), silent=True)
@@ -380,6 +391,7 @@ async def _sync_pin(state: dict, sender: Sender, text: str) -> None:
         await sender.pin(mid)
         state["pin"] = {"message_id": mid}
         state["pin_text"] = text
+        logger.info("power: status card posted and pinned")
     except Exception:
         logger.exception("power: pinned card update failed")
 
