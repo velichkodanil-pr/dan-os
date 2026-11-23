@@ -117,6 +117,14 @@ TOOL_DEFS = [
      "input_schema": {"type": "object", "properties": {
          "order_no": {"type": "string"},
          "kind": {"type": "string"}}, "required": ["order_no", "kind"]}},
+    {"name": "home_power",
+     "description": "Світло й енергія вдома (станції Deye «Дом», «Баня»): чи є "
+                    "мережа і з якого часу, заряд батарей, на скільки вистачить, "
+                    "сонце й споживання зараз, скільки годин без світла сьогодні "
+                    "і за 7 днів. Використовуй на «чи є світло», «скільки "
+                    "батареї», «на скільки вистачить», «скільки сьогодні не "
+                    "було світла».",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
 ]
 
 _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
@@ -125,7 +133,8 @@ _POLICY = {"wiki_index": "wiki.read", "wiki_page": "wiki.read",
            "get_tasks": "today.read", "travelon_pulse": "travelon.read",
            "travelon_order": "travelon.read",
            "travelon_document": "travelon.read",
-           "travelon_stats": "travelon.read"}
+           "travelon_stats": "travelon.read",
+           "home_power": "power.read"}
 
 # §10: TravelON tools are a domain-scoped capability, not a general one. They
 # are hidden from the model outside the travelon domain (tools_for_domain) AND
@@ -141,6 +150,14 @@ _TRAVELON_WRONG_DOMAIN = {
             "пульс/заявки, хай Данило перемкне домен: /domain travelon."}
 
 
+# R8.2: home power is PERSONAL — the mirror image of the TravelON gate.
+_PERSONAL_TOOLS = {"home_power"}
+_PERSONAL_WRONG_DOMAIN = {
+    "error": "wrong_domain",
+    "note": "Дані про світло й енергію вдома доступні лише в особистому "
+            "домені. Хай Данило перемкне: /domain personal (або просто /power)."}
+
+
 def tools_for_domain(domain) -> list[dict]:
     """Tool definitions offered to the model for THIS domain.
 
@@ -154,8 +171,11 @@ def tools_for_domain(domain) -> list[dict]:
     except DomainError:
         active = None
     if active is Domain.TRAVELON:
-        return list(TOOL_DEFS)
-    return [t for t in TOOL_DEFS if t["name"] not in _TRAVELON_TOOLS]
+        return [t for t in TOOL_DEFS if t["name"] not in _PERSONAL_TOOLS]
+    if active is Domain.PERSONAL:
+        return [t for t in TOOL_DEFS if t["name"] not in _TRAVELON_TOOLS]
+    return [t for t in TOOL_DEFS
+            if t["name"] not in _TRAVELON_TOOLS | _PERSONAL_TOOLS]
 
 
 async def _t_wiki_index(db, user_id, domain, args):
@@ -382,7 +402,41 @@ async def _t_travelon_document(db, user_id, domain, args):
     return {"found": True, "chars": len(text), "text": text}
 
 
-_EXECUTORS = {"wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
+async def _t_home_power(db, user_id, domain, args):
+    """Deterministic snapshot; the card text is what the owner sees pinned."""
+    import re
+    from datetime import datetime, timezone
+    from app.core import deye_api, energy, power
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    state = await power.load(db)
+    live = await deye_api.live() if deye_api.enabled() else {}
+    stations = []
+    for st in state.get("stations", {}).values():
+        key = st["name"].casefold()
+        lv = live.get(key)
+        row = {"station": st["name"], "grid": "є" if st["status"] == "on" else "немає",
+               "since": power._at(st["since_ms"], now_ms)}
+        if lv is not None:
+            cap = energy.battery_kwh().get(key)
+            hrs = energy.runtime_hours(cap, lv.soc, lv.load_w, lv.pv_w) if cap else None
+            row.update({"battery_soc": lv.soc,
+                        "soc_estimated_from_voltage": energy.voltage_soc(key),
+                        "runtime_hours": round(hrs, 1) if hrs else None,
+                        "pv_kw": None if lv.pv_w is None else round(lv.pv_w / 1000, 2),
+                        "load_kw": None if lv.load_w is None else round(lv.load_w / 1000, 2),
+                        "inverter_online": lv.online})
+        stations.append(row)
+    day_start = power._day_start_ms(now_ms)
+    t_min, t_cnt = power.off_minutes(state, day_start, now_ms)
+    w_min, w_cnt = power.off_minutes(state, day_start - 6 * power.DAY_MS, now_ms)
+    card = re.sub(r"<[^>]+>", "", power.render_card(state, now_ms, live))
+    return {"stations": stations, "card": card,
+            "off_today_min": t_min, "outages_today": t_cnt,
+            "off_7d_min": w_min, "outages_7d": w_cnt}
+
+
+_EXECUTORS = {"home_power": _t_home_power,
+              "wiki_index": _t_wiki_index, "wiki_page": _t_wiki_page,
               "search_knowledge": _t_search_knowledge,
               "get_calendar": _t_get_calendar,
               "get_recent_mail": _t_get_recent_mail,
@@ -469,6 +523,9 @@ async def run_tool(db: AsyncSession, user_id: int, domain, name: str,
     if name in _TRAVELON_TOOLS and active is not Domain.TRAVELON:
         logger.info("tool %s: refused, active domain is not travelon", name)
         return json.dumps(_TRAVELON_WRONG_DOMAIN, ensure_ascii=False)
+    if name in _PERSONAL_TOOLS and active is not Domain.PERSONAL:
+        logger.info("tool %s: refused, active domain is not personal", name)
+        return json.dumps(_PERSONAL_WRONG_DOMAIN, ensure_ascii=False)
     # R6.1A.1: ARGUMENTS are provider input. A search query, a mail query or a
     # page name goes straight out to Gmail / Calendar / the embedder, so it is
     # scanned before the executor runs — not only on the way back.

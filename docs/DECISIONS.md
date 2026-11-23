@@ -2,6 +2,24 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R8.2 energy features
+
+- Battery capacities and the voltage-SOC list live in config
+  (POWER_BATTERY_KWH «дом:32,баня:10», POWER_VOLTAGE_SOC «баня»). A station
+  without a BMS link is display-only: «≈» SOC, runtime marked ≈, never a
+  pre-charge target.
+- Savings = (consumption − purchase) × household tariff 4.32 UAH/kWh
+  (Cabinet decision kept it through 30.04.2027); grid export is shown, not
+  valued — no green-tariff contract is known.
+- Surplus is estimated from installed kWp × irradiance, not from actual PV:
+  with a full battery the inverter curtails PV, so actual generation hides
+  the surplus.
+- Pre-charge writes the inverter's time-of-use table — the first L3 write to
+  hardware. Preview + button each time; restore on schedule; refuses when TOU
+  is off or the table format is unknown. Automatic proposals before scheduled
+  outages wait for the owner's queue/operator (later round).
+- Alarm text is translated by Haiku (Deye's own reason/solution, scanned
+  first); without a model the short known-code hint or the original is shown.
 ## 2026-11-23 — R8.1.2: booking digest every 3 hours; series, not duplicates
 
 Owner checked the first live `/bookings` («працює») and asked for the digest

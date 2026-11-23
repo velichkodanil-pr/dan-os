@@ -26,6 +26,7 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "calendar.read": ("L0", True, False),
     "wiki.read": ("L0", True, False),
     "travelon.read": ("L0", True, False),  # read-only XML report, never writes
+    "power.read": ("L0", True, False),  # R8.2 home power / Deye, read-only
     # L1 — internal writes: automatic (undo-able)
     "raw_event.create": ("L1", True, False),
     "memory.candidate_create": ("L1", True, False),
@@ -54,6 +55,9 @@ _RULES: dict[str, tuple[str, bool, bool]] = {
     "calendar.create": ("L3", True, True),  # new event, own calendar, no invitees
     "calendar.write": ("L3", False, True),  # editing/deleting events stays denied
     "email.draft": ("L3", True, True),  # draft-only (preview+confirm); SENDING stays denied
+    # R8.2: inverter time-of-use write (grid pre-charge) — preview + button,
+    # original table restored on schedule; voltage-SOC stations excluded.
+    "inverter.control": ("L3", True, True),
     "email.send": ("L4", False, True),
     "crm.write": ("L4", False, True),
     "post.publish": ("L4", False, True),

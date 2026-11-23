@@ -10,6 +10,39 @@ earlier. R7.1 is PUSHED with this commit on top of R8.1 — confirm that
 _R8.1 (TravelON booking digest + exception alerts): see DECISIONS 2026-11-23
 and NEXT._
 
+
+## R8.2 — Energy on top of the power card: CODE COMPLETE, PUSHED 2026-11-23
+
+Owner ask: «Роби все» on the list of inverter ideas. Batteries (owner,
+23.11.2026): Дом — Felicity 2×16 kWh with BMS link; Баня — 4×2.5 kWh LiFePO4,
+BMS NOT linked to the inverter (SOC estimated from voltage → shown «≈», never
+controlled).
+
+- `app/core/energy.py` (runs inside power.tick, own keys in power_state):
+  runtime «вистачить/запас ~X год при Y кВт» per station; low-battery alerts
+  during an outage at 30 % (silent) / 15 % (rings), once per outage; daily
+  report at ENERGY_REPORT_TIME (21:00): generation, consumption, from/to grid,
+  savings in UAH (own energy × POWER_TARIFF_UAH 4.32), hours without power,
+  panel check (kWh per kWh/m² of Open-Meteo sun vs own median, 5-day
+  calibration), capacity estimate from outage discharge (ΔSOC ≥ 20 %);
+  surplus push (battery ≥ 97 %, installed kWp × irradiance − load ≥ 3 kW,
+  09–17, cooldown 3 h); Deye inverter alarms every 10 min with Deye's own
+  reason/solution translated by Haiku after a secret scan (first run records
+  existing alarms silently).
+- `app/core/precharge.py` + `/precharge [год] [станція] | stop`: grid
+  pre-charge to 100 % by editing the inverter's time-of-use slots — preview +
+  ✅ button (policy `inverter.control`, L3, audited), original table restored
+  on time (3 tries, then an alert). Own app_state row with a row lock.
+- `/energy [month]`, chat tool `home_power` (PERSONAL only, refused elsewhere),
+  Mini App tab ⚡ Дім (personal domain): stations now + today's curve.
+- `deye_api`: history (day / frames), station + device alarms, TOU read /
+  update, order status; logs the field names of each endpoint once per
+  process («deye shape …») to check against the swagger.
+- Tests: `tests/test_r82_energy.py` (18). Full suite 477 passed, 2 failed —
+  the pre-existing date-dependent `test_r61d` pair.
+- NOT verified live yet: field names of station/history and alertList, TOU
+  read format (precharge refuses anything it cannot parse).
+
 ## R7.1 — Rituals cannot be lost to markup: PUSHED 2026-11-23 (on top of R8.1)
 
 2026-11-22: the 07:30 brief never arrived. A mail sender «Joyce Tours

@@ -237,8 +237,8 @@ class _PowerSender:
         self.chat_id = chat_id
 
     async def send(self, text: str, silent: bool = True) -> int:
-        msg = await bot_instance.send_message(self.chat_id, text,
-                                              disable_notification=silent)
+        msg = await send_html(bot_instance, self.chat_id, text,
+                              disable_notification=silent)
         return msg.message_id
 
     async def edit(self, message_id: int, text: str) -> bool:
@@ -1775,6 +1775,89 @@ async def cmd_power(message: Message) -> None:
     await message.answer(text)
 
 
+@router.message(Command("energy"))
+async def cmd_energy(message: Message) -> None:
+    """R8.2: today's energy (+ week; `/energy month` adds month-to-date)."""
+    if not _is_owner(message):
+        return
+    import copy
+    from datetime import datetime, timezone
+    from app.core import deye_api, energy, power
+    if not deye_api.enabled():
+        await message.answer("Deye API не підключено (змінні DEYE_* у Railway).")
+        return
+    period = "month" if "month" in (message.text or "").lower() or \
+        "місяць" in (message.text or "").lower() else "day"
+    await message.answer("⏳ Збираю дані Deye…")
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    async with database.session() as db:
+        state = copy.deepcopy(await power.load(db))  # read-only: the tick owns writes
+    live = await deye_api.live()
+    day_start = power._day_start_ms(now_ms)
+    t_min, _ = power.off_minutes(state, day_start, now_ms)
+    w_min, _ = power.off_minutes(state, day_start - 6 * power.DAY_MS, now_ms)
+    text = await energy.build_report(state, now_ms, t_min, w_min, live, period=period)
+    await send_html(bot_instance, message.chat.id, text)
+
+
+def _pc_kb(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Зарядити", callback_data=f"pc:ok:{token}"),
+        InlineKeyboardButton(text="❌ Ні", callback_data="pc:no"),
+    ]])
+
+
+@router.message(Command("precharge"))
+async def cmd_precharge(message: Message) -> None:
+    """R8.2: grid pre-charge to 100 % for N hours (preview → button).
+    /precharge [години] [станція] · /precharge stop"""
+    if not _is_owner(message):
+        return
+    from datetime import datetime, timezone
+    from app.core import power, precharge
+    args = (message.text or "").split()[1:]
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    async with database.session() as db:
+        if args and args[0].lower() in ("stop", "стоп"):
+            pc = await precharge.load(db)
+            text = await precharge.stop(pc)
+            await precharge.save(db, pc)
+            await message.answer(text)
+            return
+        hours = next((int(a) for a in args if a.isdigit()), 2)
+        name = next((a for a in args if not a.isdigit()), None)
+        stations = (await power.load(db)).get("stations", {})
+        pc = await precharge.load(db)
+        res = await precharge.preview(pc, stations, name, hours, now_ms)
+        await precharge.save(db, pc)
+    await message.answer(res["text"], reply_markup=_pc_kb(res["token"]) if res["ok"] else None)
+
+
+async def _pc_callback(cb: CallbackQuery, parts: list[str]) -> None:
+    from datetime import datetime, timezone
+    from app.core import precharge
+    from app.core.audit import audit
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    async with database.session() as db:
+        pc = await precharge.load(db)
+        if len(parts) > 2 and parts[1] == "ok":
+            text = await precharge.apply(pc, parts[2], now_ms)
+            if pc.get("precharge"):
+                await audit(db, actor="owner", action="inverter.precharge", policy_level="L3",
+                            resource_type="inverter", resource_id=pc["precharge"]["name"],
+                            order=pc["precharge"].get("order"))
+        else:
+            pc.pop("precharge_pending", None)
+            text = "Скасовано — розклад не змінювали."
+        await precharge.save(db, pc)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.message.answer(text)
+
+
 @router.message(Command("english"))
 async def cmd_english(message: Message) -> None:
     """The English hub: where he is in the plan and what he can do right now."""
@@ -1940,7 +2023,8 @@ _COMMAND_HELP = (
     "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
     "/habit · /habits\n"
     "<b>Англійська:</b> /english · /english_stop\n"
-    "<b>Дім:</b> /power — чи є світло (закріп оновлюється сам)\n"
+    "<b>Дім:</b> /power — чи є світло (закріп оновлюється сам) · /energy "
+    "[month] · /precharge [год] | stop\n"
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
     "/drive_all · /kb_security_scan · /kb_quarantine\n"
     "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
@@ -2050,6 +2134,9 @@ async def on_callback(cb: CallbackQuery) -> None:
         return
     if action == "en":  # English coach buttons — values are not UUIDs
         await _en_callback(cb, user_id, parts)
+        return
+    if action == "pc":  # R8.2 inverter pre-charge — token, not a UUID
+        await _pc_callback(cb, parts)
         return
     if action == "dom":  # domain-switch button — value is not a UUID
         try:

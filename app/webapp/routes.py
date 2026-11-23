@@ -105,6 +105,8 @@ async def overview(x_telegram_init_data: str = Header(default="")) -> dict:
         "kb_docs": kb_docs,
         # TravelON tab only in the travelon domain (isolation, §13)
         "travelon": bool(settings.travelon_token) and domain == Domain.TRAVELON,
+        # ⚡ home power tab only in the personal domain (R8.2)
+        "power": domain == Domain.PERSONAL and bool(settings.power_mail_from),
         "domain": domain.value,
         "domain_label": domain_label(domain),
     }
@@ -123,6 +125,53 @@ async def travelon_tab(x_telegram_init_data: str = Header(default="")) -> dict:
             return {"configured": False, "data": None, "wrong_domain": True}
         data = await travelon.pulse_data(db)
     return {"configured": True, "data": data}
+
+
+_POWER_CACHE: dict = {"at": 0.0, "data": None}
+
+
+@router.get("/webapp/api/power")
+async def power_tab(x_telegram_init_data: str = Header(default="")) -> dict:
+    """⚡ tab (R8.2): stations now + today's curve. Personal domain only."""
+    import time
+    from datetime import timezone
+    from app.core import deye_api, energy, power
+    user_id = _auth(x_telegram_init_data)
+    async with database.session() as db:
+        if await get_active_domain(db, user_id) != Domain.PERSONAL:
+            return {"ok": False, "wrong_domain": True}
+        state = await power.load(db)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    live = await deye_api.live() if deye_api.enabled() else {}
+    stations = []
+    for st in sorted(state.get("stations", {}).values(), key=lambda x: x["name"]):
+        key = st["name"].casefold()
+        lv = live.get(key)
+        row = {"name": st["name"], "grid": st["status"],
+               "since": power._at(st["since_ms"], now_ms)}
+        if lv is not None:
+            cap = energy.battery_kwh().get(key)
+            hrs = energy.runtime_hours(cap, lv.soc, lv.load_w, lv.pv_w) if cap else None
+            row.update({"soc": lv.soc, "approx": energy.voltage_soc(key),
+                        "runtime": energy.hm(hrs) if hrs else None,
+                        "pv": lv.pv_w, "load": lv.load_w, "grid_w": lv.grid_w,
+                        "battery_w": lv.battery_w, "online": lv.online})
+        stations.append(row)
+    if time.monotonic() - _POWER_CACHE["at"] > 600 or _POWER_CACHE["data"] is None:
+        day = energy.local(now_ms).date().isoformat()
+        curves = {}
+        for name in deye_api.station_names():
+            pts = await deye_api.frames(name, day)
+            curves[name] = [[int(p["ts"]), p["pv"], p["load"], p["soc"]] for p in pts][-300:]
+        _POWER_CACHE.update(at=time.monotonic(), data=curves)
+    day_start = power._day_start_ms(now_ms)
+    off_min, off_cnt = power.off_minutes(state, day_start, now_ms)
+    ov, since = power.overall(state)
+    return {"ok": True, "overall": ov,
+            "since": power._at(since, now_ms) if since else "",
+            "stations": stations, "curves": _POWER_CACHE["data"] or {},
+            "off_today": power.dur(off_min) if off_min else "0", "outages": off_cnt,
+            "tariff": settings.power_tariff_uah}
 
 
 class ActRequest(BaseModel):

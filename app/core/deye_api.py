@@ -24,6 +24,23 @@ _listing: dict[str, dict] = {}      # station name (casefold) -> station/list ro
 _cache: dict[str, "StationLive"] = {}
 _cache_at: float = 0.0
 CACHE_SECONDS = 240
+_shapes_logged: set[str] = set()
+
+
+def _log_shape(path: str, data: dict) -> None:
+    """Once per process: which fields Deye actually returned (names only, no
+    values) — lets a deploy be checked against the swagger from the logs."""
+    if path in _shapes_logged or not isinstance(data, dict):
+        return
+    _shapes_logged.add(path)
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    keys = sorted(k for k in body.keys() if k not in ("requestId",))
+    for list_key in ("stationDataItems", "stationAlertItems", "alertList",
+                     "timeUseSettingItems", "stationList"):
+        rows = body.get(list_key)
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            keys.append(f"{list_key}[0]:" + ",".join(sorted(rows[0].keys())))
+    logger.info("deye shape %s: %s", path, "; ".join(keys)[:900])
 
 
 @dataclass
@@ -36,6 +53,12 @@ class StationLive:
     battery_w: float | None = None    # + charge / - discharge (sign as Deye gives)
     updated_ts: float | None = None   # epoch seconds of the inverter's last data
     online: bool | None = None        # station/list connectionStatus (NORMAL)
+    charge_w: float | None = None
+    discharge_w: float | None = None
+    station_id: str = ""
+    capacity_kwp: float | None = None  # installed PV, station/list
+    lat: float | None = None
+    lng: float | None = None
 
 
 def enabled() -> bool:
@@ -86,6 +109,8 @@ def parse_latest(name: str, data: dict) -> StationLive:
         grid_w=_num(body, "wirePower", "gridPower"),
         battery_w=_num(body, "batteryPower"),
         updated_ts=_epoch(body.get("lastUpdateTime") or body.get("updateTime")),
+        charge_w=_num(body, "chargePower"),
+        discharge_w=_num(body, "dischargePower"),
     )
 
 
@@ -100,6 +125,11 @@ def merge_listing(lv: StationLive, row: dict) -> StationLive:
         lv.pv_w = _num(row, "generationPower")
     if lv.updated_ts is None:
         lv.updated_ts = _epoch(row.get("lastUpdateTime"))
+    if row.get("id") is not None:
+        lv.station_id = str(row["id"])
+    lv.capacity_kwp = _num(row, "installedCapacity")
+    lv.lat = _num(row, "locationLat")
+    lv.lng = _num(row, "locationLng")
     return lv
 
 
@@ -170,6 +200,7 @@ async def live() -> dict[str, StationLive]:
             for key, sid in _stations.items():
                 data = await _post(client, "/station/latest", {"stationId": int(sid)
                                                                if sid.isdigit() else sid})
+                _log_shape("/station/latest", data)
                 live_row = parse_latest(key, data) if _ok(data) else StationLive(name=key)
                 fresh[key] = merge_listing(live_row, _listing.get(key, {}))
         _cache.clear()
@@ -179,6 +210,145 @@ async def live() -> dict[str, StationLive]:
         logger.warning("deye api unavailable: %s", type(e).__name__)
         _token = "" if "token" in str(e) else _token
     return _cache
+
+
+# ---------- R8.2: history, alerts, time-of-use ----------
+
+async def call(path: str, payload: dict) -> dict | None:
+    """One authenticated POST; None when disabled or on any failure (logged
+    by type only). A refused token is dropped so the next call re-logs in."""
+    global _token
+    if not enabled():
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            await _ensure_token(client)
+            if not _stations:
+                await _list_stations(client)
+            data = await _post(client, path, payload)
+    except Exception as e:
+        logger.warning("deye %s unavailable: %s", path, type(e).__name__)
+        _token = "" if "token" in str(e) else _token
+        return None
+    _log_shape(path, data)
+    if not _ok(data):
+        logger.warning("deye %s refused: code %s", path, data.get("code"))
+        if str(data.get("code")) not in ("1000000",):
+            _token = ""
+        return None
+    return data
+
+
+def station_id(name: str) -> int | None:
+    sid = _stations.get(name.casefold())
+    return int(sid) if sid and sid.isdigit() else None
+
+
+def station_names() -> list[str]:
+    return list(_stations.keys())
+
+
+def _items(data: dict | None, key: str) -> list[dict]:
+    if not data:
+        return []
+    rows = data.get(key)
+    if rows is None and isinstance(data.get("data"), dict):
+        rows = data["data"].get(key)
+    return [r for r in (rows or []) if isinstance(r, dict)]
+
+
+def parse_daily(row: dict) -> dict:
+    """One StationDataItem at day granularity -> kWh figures."""
+    return {"day": row.get("day"), "month": row.get("month"), "year": row.get("year"),
+            "generation": _num(row, "generationValue") or 0.0,
+            "consumption": _num(row, "consumptionValue") or 0.0,
+            "purchase": _num(row, "purchaseValue") or 0.0,
+            "grid": _num(row, "gridValue") or 0.0,
+            "charge": _num(row, "chargeValue") or 0.0,
+            "discharge": _num(row, "dischargeValue") or 0.0}
+
+
+async def daily(name: str, start: str, end: str) -> list[dict]:
+    """Daily energy (kWh) for [start, end) — dates yyyy-MM-dd, max 31 days."""
+    sid = station_id(name)
+    if sid is None:
+        return []
+    data = await call("/station/history", {"stationId": sid, "granularity": 2,
+                                           "startAt": start, "endAt": end})
+    return [parse_daily(r) for r in _items(data, "stationDataItems")]
+
+
+async def frames(name: str, day: str) -> list[dict]:
+    """Intra-day power curve (granularity 1) for one date yyyy-MM-dd."""
+    sid = station_id(name)
+    if sid is None:
+        return []
+    data = await call("/station/history", {"stationId": sid, "granularity": 1,
+                                           "startAt": day})
+    out = []
+    for r in _items(data, "stationDataItems"):
+        ts = _epoch(r.get("timeStamp"))
+        if ts is None:
+            continue
+        out.append({"ts": ts, "pv": _num(r, "generationPower"),
+                    "load": _num(r, "consumptionPower"),
+                    "soc": _num(r, "batterySOC"), "grid": _num(r, "wirePower")})
+    return out
+
+
+async def station_alerts(name: str, start_s: int, end_s: int) -> list[dict]:
+    sid = station_id(name)
+    if sid is None:
+        return []
+    data = await call("/station/alertList", {"stationId": sid, "startTimestamp": start_s,
+                                             "endTimestamp": end_s, "page": 1, "size": 50})
+    return _items(data, "stationAlertItems")
+
+
+async def device_alerts(sn: str, start_s: int, end_s: int) -> list[dict]:
+    data = await call("/device/alertList", {"deviceSn": sn, "deviceType": "INVERTER",
+                                            "startTimestamp": start_s,
+                                            "endTimestamp": end_s, "page": 1, "size": 50})
+    return _items(data, "alertList")
+
+
+async def tou_read(sn: str) -> dict | None:
+    """{'action': str, 'items': [...]} or None."""
+    data = await call("/config/tou", {"deviceSn": sn})
+    if data is None:
+        return None
+    return {"action": str(data.get("touAction") or ""),
+            "items": _items(data, "timeUseSettingItems")}
+
+
+async def tou_update(sn: str, items: list[dict]) -> int | None:
+    """Writes the inverter's time-of-use table. Returns the async order id.
+    Callers MUST have the owner's explicit confirmation (policy L3)."""
+    data = await call("/order/sys/tou/update", {"deviceSn": sn,
+                                               "timeUseSettingItems": items})
+    if data is None:
+        return None
+    oid = data.get("orderId")
+    return int(oid) if oid is not None else None
+
+
+async def order_status(order_id: int) -> dict | None:
+    """GET /order/{id} — status of an async control order."""
+    global _token
+    if not enabled():
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            await _ensure_token(client)
+            resp = await client.get(
+                settings.deye_base_url.rstrip("/") + f"/order/{int(order_id)}",
+                headers={"Authorization": f"Bearer {_token}"})
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception as e:
+        logger.warning("deye order status unavailable: %s", type(e).__name__)
+        return None
 
 
 def reset() -> None:

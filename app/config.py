@@ -5,9 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r8.1.2"
-APP_RELEASE = ("R8.1.2 — дайджест заявок кожні 3 год (12–00), серії замість "
-               "хибних дублів; ритуали не губляться")
+APP_VERSION = "r8.2"
+APP_RELEASE = ("R8.2 — енергія: запас батареї, алерти розряду, звіт і економія, "
+               "панелі, ємність, надлишок сонця, аварії Deye, дозаряд, ⚡ у Mini App")
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -82,6 +82,19 @@ class Settings(BaseSettings):
     deye_password_sha256: str = ""
     deye_base_url: str = "https://eu1-developer.deyecloud.com/v1.0"
     deye_offline_minutes: int = 20
+    # R8.2: energy features on top of the Deye API.
+    # Usable battery per station (name:kWh, names as in Deye Cloud).
+    power_battery_kwh: str = "дом:32,баня:10"
+    power_battery_min_soc: int = 10          # inverter cut-off, for runtime math
+    # Stations whose SOC the inverter estimates from voltage (no BMS link):
+    # shown as «≈», never used to control charging.
+    power_voltage_soc: str = "баня"
+    power_low_soc: str = "30,15"             # outage alerts; the last one rings
+    power_tariff_uah: float = 4.32           # household tariff, UAH/kWh
+    energy_report_time: str = "21:00"        # daily energy report; empty = off
+    power_surplus_kw: float = 3.0            # «battery full, sun to spare» push
+    power_alerts_minutes: int = 10           # inverter alarm polling
+    precharge_max_hours: int = 6
 
     # R8.1: TravelON booking feed — a daily digest instead of ~40 «бронювання
     # готове» e-mails, plus alerts on exceptions only. Empty time disables

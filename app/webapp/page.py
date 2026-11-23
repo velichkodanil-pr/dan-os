@@ -78,6 +78,7 @@ PAGE_HTML = """<!doctype html>
   <button data-tab="review"><span class="ico">🗂</span>Розбір<span id="revBadge"></span></button>
   <button data-tab="memory"><span class="ico">🧠</span>Пам'ять</button>
   <button data-tab="biz" id="bizTab" style="display:none"><span class="ico">🧳</span>Бізнес</button>
+  <button data-tab="pow" id="powTab" style="display:none"><span class="ico">⚡</span>Дім</button>
 </nav>
 <script>
 const tg = window.Telegram.WebApp;
@@ -132,6 +133,54 @@ async function loadBiz() {
   } catch (e) { BIZ = { configured: true, data: null }; }
   BIZ_LOADING = false;
   render();
+}
+
+let POW = null, POW_LOADING = false;
+async function loadPow() {
+  if (POW_LOADING) return;
+  POW_LOADING = true; render();
+  try { const r = await fetch('/webapp/api/power', { headers: HDRS }); POW = await r.json(); }
+  catch (e) { POW = { ok: false }; }
+  POW_LOADING = false; render();
+}
+
+const kwf = w => (w === null || w === undefined) ? '—' : (w / 1000).toFixed(1) + ' кВт';
+
+function curveSvg(pts) {
+  if (!pts || pts.length < 2) return '<div class="sub">Графіка за сьогодні ще немає</div>';
+  const W = 320, H = 120, t0 = pts[0][0], t1 = pts[pts.length - 1][0] || t0 + 1;
+  const maxW = Math.max(500, ...pts.map(p => Math.max(p[1] || 0, p[2] || 0)));
+  const x = t => ((t - t0) / (t1 - t0) * W).toFixed(1);
+  const y = v => (H - (v || 0) / maxW * (H - 10)).toFixed(1);
+  const line = (i, col) => '<polyline fill="none" stroke="' + col + '" stroke-width="2" points="' +
+    pts.map(p => x(p[0]) + ',' + y(p[i])).join(' ') + '"/>';
+  const soc = '<polyline fill="none" stroke="#2e9e5b" stroke-dasharray="4 3" stroke-width="1.5" points="' +
+    pts.filter(p => p[3] !== null).map(p => x(p[0]) + ',' + (H - (p[3] || 0) / 100 * (H - 10)).toFixed(1)).join(' ') + '"/>';
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '">' +
+    line(1, '#f2b33d') + line(2, '#6ab3f3') + soc + '</svg>' +
+    '<div class="sub">☀️ сонце · 🏠 споживання · 🔋 заряд (пунктир) · макс ' + (maxW / 1000).toFixed(1) + ' кВт</div>';
+}
+
+function renderPow() {
+  if (POW_LOADING || !POW) return '<div class="empty">⚡ Питаю інвертори…</div>';
+  if (!POW.ok) return '<div class="empty">' + (POW.wrong_domain ? 'Вкладка доступна в особистому домені' : 'Дані зараз недоступні') + '</div>';
+  const head = {on: '🟢 ЕЛЕКТРО Є', off: '🔴 ЕЛЕКТРО НЕМА', partial: '🟡 ЧАСТКОВО', unknown: '⚪ СТАН НЕВІДОМИЙ'}[POW.overall];
+  let h = `<div class="card"><div class="title" style="font-size:20px">${head}</div>
+    <div class="sub">${POW.since ? 'з ' + esc(POW.since) + ' · ' : ''}без світла сьогодні: ${esc(POW.off_today)}</div></div>`;
+  for (const s of POW.stations) {
+    const soc = s.soc === undefined || s.soc === null ? '—' : (s.approx ? '≈' : '') + Math.round(s.soc) + '%';
+    const off = s.online === false ? '<div class="sub due-over">⚪ інвертор не на зв\'язку</div>' : '';
+    h += `<h2>${esc(s.name)} · ${s.grid === 'on' ? '🟢 мережа є' : '🔴 мережі нема'} з ${esc(s.since)}</h2>
+      <div class="grid">
+        <div class="stat"><div class="num">${soc}</div><div class="lbl">батарея${s.runtime ? ' · ~' + esc(s.runtime) : ''}</div></div>
+        <div class="stat"><div class="num">${kwf(s.pv)}</div><div class="lbl">☀️ сонце</div></div>
+        <div class="stat"><div class="num">${kwf(s.load)}</div><div class="lbl">🏠 споживання</div></div>
+        <div class="stat"><div class="num">${kwf(s.grid_w)}</div><div class="lbl">🔌 мережа</div></div>
+      </div>${off}
+      <div class="card" style="margin-top:8px">${curveSvg((POW.curves || {})[s.name.toLowerCase()])}</div>`;
+  }
+  h += `<div class="empty" style="padding:12px"><a href="#" style="color:var(--link)" onclick="POW=null;loadPow();return false">оновити</a> · звіт: /energy · дозаряд: /precharge</div>`;
+  return h;
 }
 
 function taskCard(t, showDue) {
@@ -242,11 +291,13 @@ function render() {
   const view = document.getElementById('view');
   view.innerHTML = TAB === 'today' ? renderToday()
                  : TAB === 'review' ? renderReview()
-                 : TAB === 'biz' ? renderBiz() : renderMemory();
+                 : TAB === 'biz' ? renderBiz()
+                 : TAB === 'pow' ? renderPow() : renderMemory();
   const n = DATA.approvals.length + DATA.memory_candidates.length;
   document.getElementById('revBadge').innerHTML =
     n ? `<span class="badge">${n}</span>` : '';
   if (DATA.travelon) document.getElementById('bizTab').style.display = '';
+  if (DATA.power) document.getElementById('powTab').style.display = '';
   document.querySelectorAll('nav button').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === TAB));
 }
@@ -255,7 +306,8 @@ document.getElementById('nav').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   TAB = b.dataset.tab;
-  if (TAB === 'biz' && !BIZ) loadBiz(); else render();
+  if (TAB === 'biz' && !BIZ) loadBiz();
+  else if (TAB === 'pow' && !POW) loadPow(); else render();
 });
 load();
 </script>

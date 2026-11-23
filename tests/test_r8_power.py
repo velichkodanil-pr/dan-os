@@ -230,7 +230,8 @@ def test_deye_latest_mapping_and_offline_line():
     assert (lv.soc, lv.pv_w, lv.load_w, lv.updated_ts) == (64, 1234.0, 800, T0 // 1000)
     st = power.empty_state()
     power.apply_events(st, [ev(1, T0, "A", "Дом", "on")])
-    assert "🔋 Дом 64% · ☀️ 1.2 кВт · 🏠 0.8 кВт" in power.render_card(st, T0 + MIN, {"дом": lv})
+    assert ("🔋 Дом 64% · сонце покриває споживання · ☀️ 1.2 кВт · 🏠 0.8 кВт"
+            in power.render_card(st, T0 + MIN, {"дом": lv}))
     late = T0 + (settings.deye_offline_minutes + 5) * MIN
     assert "інвертор не на зв'язку з 09:08" in power.render_card(st, late, {"дом": lv})
 

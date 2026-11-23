@@ -229,6 +229,7 @@ def render_card(state: dict, now_ms: int, live: dict | None = None,
         lines.append(" · ".join(cells))
         if ov == "off":
             lines.append("Живимось від батарей.")
+    from app.core import energy
     for st in sorted(state["stations"].values(), key=lambda s: s["name"]):
         lv = (live or {}).get(st["name"].casefold())
         if lv is None:
@@ -241,9 +242,7 @@ def render_card(state: dict, now_ms: int, live: dict | None = None,
             lines.append(f"⚪ {html.escape(st['name'])}: інвертор не на зв'язку{since_txt}"
                          " — статус може бути застарілим")
             continue
-        soc = "—" if lv.soc is None else f"{lv.soc:.0f}%"
-        lines.append(f"🔋 {html.escape(st['name'])} {soc} · ☀️ {_kw(lv.pv_w)} · "
-                     f"🏠 {_kw(lv.load_w)}")
+        lines.append(energy.battery_line(st["name"], lv, st["status"] == "off"))
     if ov != "unknown":
         t_min, t_cnt = off_minutes(state, _day_start_ms(now_ms), now_ms)
         lines.append(f"Сьогодні без світла: {dur(t_min) if t_min else '0'}"
@@ -374,7 +373,32 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
                 logger.exception("power: push failed")
         state["notified"] = target
         state["notified_since_ms"] = overall(state)[1]
+
+    # R8.2: energy features + a pending pre-charge restore. Isolated — a
+    # failure here never costs the card or the grid push above.
+    async def _send(text: str, silent: bool = True) -> None:
+        await sender.send(text, silent=silent)
+    if live:
+        grid_status = {st["name"].casefold(): (st["status"], st["since_ms"])
+                       for st in state["stations"].values()}
+        sn_by_name = {st["name"].casefold(): sn for sn, st in state["stations"].items()
+                      if sn.isdigit()}
+        try:
+            from app.core import energy
+            await energy.run(state, now_ms, live, grid_status, _send, sn_by_name)
+        except Exception:
+            logger.exception("power: energy pass failed")
     await save(db, state)
+    try:
+        from app.core import precharge
+        pc = await precharge.load(db)
+        if pc.get("precharge"):
+            await precharge.tick(pc, now_ms, _send)
+            await precharge.save(db, pc)
+        else:
+            await db.commit()   # release the row lock
+    except Exception:
+        logger.exception("power: precharge pass failed")
     return state
 
 

@@ -1,6 +1,19 @@
 # NEXT — the one authorized round
 
-## Round 7.1 — Rituals cannot be lost to markup (CURRENT, pushed)
+## Round 8.2 — Energy (CURRENT, pushed)
+
+1. Check Railway logs for `deye shape` lines — every endpoint's real field
+   names; fix the mapping if one differs from the swagger.
+2. In Telegram: the pinned card now has 🔋 lines with «запас/вистачить».
+3. `/energy` now, `/energy month`; the automatic report comes at 21:00.
+4. `/precharge 1` on a day with grid — check the preview (slots, times), press
+   ✅, confirm in the Deye app that grid charge is on, and that the table is
+   restored after an hour.
+5. Open the Mini App in the personal domain → ⚡ Дім.
+6. Open question for the owner: outage queue (черга) and operator, so
+   pre-charge can be PROPOSED automatically before scheduled outages.
+
+## Round 7.1 — Rituals cannot be lost to markup (pushed)
 
 Out-of-round hotfix asked for on 2026-11-23 after the 2026-11-22 brief was
 lost; rebased onto R8.1 (`ba7f6e1`) before the push. No migration, no new env.
