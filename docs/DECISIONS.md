@@ -2,6 +2,16 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R8.2.1 grid presence from the inverter, not only mail
+
+Owner: «Дом не оновлюється, хоча я бачу в додатку Deye». Deye sent «grid
+lost» for both stations at 09:08 / 09:10 and no «restored» mail for Дом. The
+inverter's own grid voltage (/device/latest, keys matching «grid»+«volt»,
+≥150 V present, ≤30 V absent) is now the primary signal when the API is
+configured; a reading that contradicts the current status becomes a synthetic
+event stamped with the collection time. Offline inverters and unclear
+voltages change nothing. Mail stays the fallback and the history source.
+
 ## 2026-11-23 — R8.2 energy features
 
 - Battery capacities and the voltage-SOC list live in config

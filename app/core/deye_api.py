@@ -351,6 +351,60 @@ async def order_status(order_id: int) -> dict | None:
         return None
 
 
+# ---------- grid presence from the inverter itself (R8.2.1) ----------
+
+_grid_cache: dict = {"at": 0.0, "data": {}}
+_grid_keys_logged = {"done": False}
+
+
+def grid_from_values(values: dict[str, tuple[str, str]]) -> bool | None:
+    """Grid voltage measure points → True (grid present) / False (absent) /
+    None (no grid voltage reported). Keys differ by model («Grid Voltage L1»,
+    «Grid Voltage L1-L2», …), so match on the words, not the exact key."""
+    volts = []
+    for key, (val, unit) in values.items():
+        k = key.casefold()
+        if "grid" in k and "volt" in k and "load" not in k and "gen" not in k:
+            try:
+                volts.append(abs(float(val)))
+            except (TypeError, ValueError):
+                continue
+    if not volts:
+        return None
+    if max(volts) >= 150:
+        return True
+    if max(volts) <= 30:
+        return False
+    return None
+
+
+async def grid_presence(sns: list[str]) -> dict[str, dict]:
+    """{sn: {"grid": bool|None, "state": 1 online|2 alert|3 offline,
+    "ts": collection time s}} from /device/latest; cached like live()."""
+    if not sns or not enabled():
+        return {}
+    if _grid_cache["data"] and time.monotonic() - _grid_cache["at"] < CACHE_SECONDS:
+        return _grid_cache["data"]
+    data = await call("/device/latest", {"deviceList": list(sns), "deviceType": "INVERTER"})
+    out: dict[str, dict] = {}
+    for row in _items(data, "deviceDataList"):
+        sn = str(row.get("deviceSn") or "")
+        values = {}
+        for d in row.get("dataList") or []:
+            if isinstance(d, dict) and d.get("key"):
+                values[str(d["key"])] = (d.get("value"), d.get("unit"))
+        if not _grid_keys_logged["done"]:
+            _grid_keys_logged["done"] = True
+            gk = sorted(k for k in values if "grid" in k.casefold() or "volt" in k.casefold())
+            logger.info("deye device/latest grid keys: %s", ", ".join(gk)[:600] or "none")
+        out[sn] = {"grid": grid_from_values(values),
+                   "state": row.get("deviceState"),
+                   "ts": _epoch(row.get("collectionTime"))}
+    if out:
+        _grid_cache.update(at=time.monotonic(), data=out)
+    return out
+
+
 def reset() -> None:
     """Tests only."""
     global _token, _token_exp, _cache_at
@@ -358,3 +412,4 @@ def reset() -> None:
     _stations.clear()
     _listing.clear()
     _cache.clear()
+    _grid_cache.update(at=0.0, data={})

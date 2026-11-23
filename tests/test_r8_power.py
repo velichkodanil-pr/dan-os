@@ -250,3 +250,32 @@ def test_deye_listing_fills_gaps_and_flags_offline():
 
 def test_deye_disabled_without_all_four_vars():
     assert not deye_api.enabled()
+
+
+# ---------- R8.2.1: inverter grid voltage overrides a missing mail ----------
+
+def test_grid_from_values():
+    assert deye_api.grid_from_values({"Grid Voltage L1": ("228.1", "V")}) is True
+    assert deye_api.grid_from_values({"Grid Voltage L1-L2": ("0", "V"),
+                                      "Grid Voltage L2-L3": ("0.4", "V")}) is False
+    assert deye_api.grid_from_values({"Load Voltage L1": ("230", "V")}) is None
+    assert deye_api.grid_from_values({"Battery Voltage": ("52", "V")}) is None
+
+
+def test_grid_events_follow_inverter_not_stale_mail():
+    st = power.empty_state()
+    power.apply_events(st, [ev(1, T0, "2602222277", "Дом", "off"),
+                            ev(2, T0, "2601253438", "Баня", "off")])
+    presence = {"2602222277": {"grid": True, "state": 1, "ts": (T0 + 60 * MIN) / 1000},
+                "2601253438": {"grid": None, "state": 1, "ts": None},
+                "999": {"grid": True, "state": 1, "ts": None}}
+    evs = power.grid_events(st, presence, T0 + 70 * MIN)
+    assert [(e.sn, e.status, e.ts_ms) for e in evs] == [("2602222277", "on", T0 + 60 * MIN)]
+    power.apply_events(st, evs)
+    assert st["stations"]["2602222277"]["status"] == "on"
+    assert st["history"][0][2] == T0 + 60 * MIN
+    # an offline inverter is no news
+    assert power.grid_events(st, {"2602222277": {"grid": False, "state": 3, "ts": None}},
+                             T0 + 80 * MIN) == []
+    # a late «restored» mail for the same change is a no-op
+    assert not power.apply_events(st, [ev(9, T0 + 75 * MIN, "2602222277", "Дом", "on")])

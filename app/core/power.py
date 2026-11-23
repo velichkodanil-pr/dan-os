@@ -122,6 +122,25 @@ def apply_events(state: dict, events: list[PowerEvent]) -> bool:
     return changed
 
 
+def grid_events(state: dict, presence: dict[str, dict], now_ms: int) -> list[PowerEvent]:
+    """Inverter readings that contradict the current station status → events
+    stamped with the reading time. Offline inverters and unclear voltages are
+    ignored (no news is not «grid lost»)."""
+    out = []
+    for sn, rec in (presence or {}).items():
+        st = state["stations"].get(sn)
+        if st is None or rec.get("grid") is None or rec.get("state") == 3:
+            continue
+        status = "on" if rec["grid"] else "off"
+        if status == st["status"]:
+            continue
+        ts = int((rec.get("ts") or now_ms / 1000) * 1000)
+        ts = min(max(ts, st["since_ms"] + 1), now_ms)
+        out.append(PowerEvent(msg_id=f"api:{sn}:{ts}", ts_ms=ts, sn=sn,
+                              station=st["name"], status=status))
+    return out
+
+
 def prune(state: dict, now_ms: int) -> None:
     cutoff = now_ms - HISTORY_DAYS * DAY_MS
     state["history"] = [iv for iv in state["history"]
@@ -356,6 +375,20 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
 
     from app.core import deye_api
     live = await deye_api.live() if deye_api.enabled() else {}
+    # R8.2.1: the inverter's own grid voltage is the primary signal — Deye's
+    # mails can be late or missing (23.11: no «restored» mail for Дом). An
+    # API reading that differs from the mail state becomes a synthetic event,
+    # so history, the card and the push all follow it.
+    sns = [sn for sn in state["stations"] if sn.isdigit()]
+    if sns and deye_api.enabled():
+        try:
+            api_events = grid_events(state, await deye_api.grid_presence(sns), now_ms)
+            if api_events:
+                apply_events(state, api_events)
+                for e in api_events:
+                    logger.info("power: grid %s for %s from inverter voltage", e.status, e.station)
+        except Exception:
+            logger.exception("power: grid presence check failed")
     if deye_api.enabled() and bool(live) != state.get("deye_ok"):
         logger.info("power: deye api %s (%d station(s))",
                     "ok" if live else "unavailable", len(live))
