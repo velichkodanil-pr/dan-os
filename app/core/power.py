@@ -122,6 +122,22 @@ def apply_events(state: dict, events: list[PowerEvent]) -> bool:
     return changed
 
 
+def station_presence(state: dict, by_station: dict[str, list[str]],
+                     readings: dict[str, dict]) -> dict[str, dict]:
+    """Per mail-station key (SN from the mails): grid from ALL the station's
+    inverters, not only the device that happened to send the mail."""
+    from app.core import deye_api
+    out = {}
+    for sn, st in state["stations"].items():
+        sns = list(by_station.get(st["name"].casefold(), [])) or [sn]
+        if sn.isdigit() and sn not in sns:
+            sns.append(sn)
+        grid = deye_api.station_grid(sns, readings)
+        ts = max((readings[x].get("ts") or 0 for x in sns if x in readings), default=0)
+        out[sn] = {"grid": grid, "state": 1 if grid is not None else 3, "ts": ts or None}
+    return out
+
+
 def grid_events(state: dict, presence: dict[str, dict], now_ms: int) -> list[PowerEvent]:
     """Inverter readings that contradict the current station status → events
     stamped with the reading time. Offline inverters and unclear voltages are
@@ -379,10 +395,14 @@ async def tick(db, sender: Sender, now_ms: int | None = None,
     # mails can be late or missing (23.11: no «restored» mail for Дом). An
     # API reading that differs from the mail state becomes a synthetic event,
     # so history, the card and the push all follow it.
-    sns = [sn for sn in state["stations"] if sn.isdigit()]
-    if sns and deye_api.enabled():
+    if state["stations"] and deye_api.enabled():
         try:
-            api_events = grid_events(state, await deye_api.grid_presence(sns), now_ms)
+            by_station = await deye_api.station_inverters()
+            sns = sorted({sn for v in by_station.values() for sn in v}
+                         | {sn for sn in state["stations"] if sn.isdigit()})
+            readings = await deye_api.grid_presence(sns)
+            api_events = grid_events(state, station_presence(state, by_station, readings),
+                                     now_ms)
             if api_events:
                 apply_events(state, api_events)
                 for e in api_events:

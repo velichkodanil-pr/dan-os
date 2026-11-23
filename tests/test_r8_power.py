@@ -279,3 +279,27 @@ def test_grid_events_follow_inverter_not_stale_mail():
                              T0 + 80 * MIN) == []
     # a late «restored» mail for the same change is a no-op
     assert not power.apply_events(st, [ev(9, T0 + 75 * MIN, "2602222277", "Дом", "on")])
+
+
+def test_station_grid_uses_any_online_inverter():
+    readings = {"A": {"grid": False, "state": 3, "ts": 1},       # offline logger
+                "B": {"grid": True, "state": 1, "ts": 2},
+                "C": {"grid": False, "state": 1, "ts": 3}}
+    assert deye_api.station_grid(["A", "B"], readings) is True
+    assert deye_api.station_grid(["A", "C"], readings) is False
+    assert deye_api.station_grid(["A"], readings) is None
+    st = power.empty_state()
+    power.apply_events(st, [ev(1, T0, "A", "Дом", "off")])
+    pres = power.station_presence(st, {"дом": ["B"]}, readings)
+    assert pres["A"]["grid"] is True
+    evs = power.grid_events(st, pres, T0 + 60 * MIN)
+    assert evs and evs[0].sn == "A" and evs[0].status == "on"
+
+
+def test_partial_offline_station_is_alive():
+    lv = deye_api.merge_listing(deye_api.StationLive(name="дом"),
+                                {"id": 1, "name": "Дом", "connectionStatus": "PARTIAL_OFFLINE"})
+    assert lv.online is True
+    lv = deye_api.merge_listing(deye_api.StationLive(name="дом"),
+                                {"id": 1, "name": "Дом", "connectionStatus": "ALL_OFFLINE"})
+    assert lv.online is False

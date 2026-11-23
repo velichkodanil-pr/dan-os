@@ -118,7 +118,10 @@ def merge_listing(lv: StationLive, row: dict) -> StationLive:
     """Fill gaps from the station/list row and take its connection status."""
     status = str(row.get("connectionStatus") or "").upper()
     if status:
-        lv.online = status == "NORMAL"
+        # PARTIAL_OFFLINE = one device of the station (e.g. a spare logger or
+        # a second inverter) is offline while the station still reports —
+        # the station is alive (23.11: Дом showed «не на зв'язку» wrongly).
+        lv.online = status not in ("ALL_OFFLINE", "NO_DEVICE")
     if lv.soc is None:
         lv.soc = _num(row, "batterySOC")
     if lv.pv_w is None:
@@ -378,6 +381,45 @@ def grid_from_values(values: dict[str, tuple[str, str]]) -> bool | None:
     return None
 
 
+_devices: dict = {"at": 0.0, "by_station": {}}
+
+
+async def station_inverters() -> dict[str, list[str]]:
+    """{station name casefold: [inverter SN, …]} from /station/device,
+    refreshed hourly. A station can have several inverters / loggers."""
+    if _devices["by_station"] and time.monotonic() - _devices["at"] < 3600:
+        return _devices["by_station"]
+    if not _stations:
+        await call("/station/list", {"page": 1, "size": 50})
+    ids = {int(sid): name for name, sid in _stations.items() if sid.isdigit()}
+    if not ids:
+        return {}
+    data = await call("/station/device", {"stationIds": list(ids), "page": 1, "size": 100})
+    out: dict[str, list[str]] = {}
+    for row in _items(data, "deviceListItems"):
+        if str(row.get("deviceType") or "").upper() != "INVERTER":
+            continue
+        name = ids.get(int(row.get("stationId") or 0))
+        if name and row.get("deviceSn"):
+            out.setdefault(name, []).append(str(row["deviceSn"]))
+    if out:
+        _devices.update(at=time.monotonic(), by_station=out)
+        logger.info("deye inverters per station: %s",
+                    "; ".join(f"{k}={','.join(v)}" for k, v in sorted(out.items())))
+    return out
+
+
+def station_grid(sns: list[str], readings: dict[str, dict]) -> bool | None:
+    """One station's grid from its inverters: offline ones are no news; any
+    online inverter seeing grid → True; all online ones without it → False."""
+    seen = [readings[sn]["grid"] for sn in sns
+            if sn in readings and readings[sn].get("state") != 3
+            and readings[sn].get("grid") is not None]
+    if not seen:
+        return None
+    return any(seen)
+
+
 async def grid_presence(sns: list[str]) -> dict[str, dict]:
     """{sn: {"grid": bool|None, "state": 1 online|2 alert|3 offline,
     "ts": collection time s}} from /device/latest; cached like live()."""
@@ -421,3 +463,4 @@ def reset() -> None:
     _listing.clear()
     _cache.clear()
     _grid_cache.update(at=0.0, data={})
+    _devices.update(at=0.0, by_station={})
