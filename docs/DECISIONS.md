@@ -2,6 +2,49 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-23 — R8.1 TravelON booking feed: digest + exception alerts
+
+Owner: every new order sends «Ваше бронювання № … готове!» to info@ (~40 a
+day, 43 on 20.11); he follows what is booked but will not read each e-mail.
+Agreed scheme («Давай», «Роби все»): a daily digest in Telegram plus alerts on
+exceptions only. Out-of-round owner request, like the 2026-09-24 hotfixes; no
+schema change (state lives in `app_state`).
+
+- **Source is the report, not the mailbox.** The e-mail is a rendering of the
+  order; the report also has cancellations, rebookings and the agency id. The
+  Gmail filter that already archives these mails stays as is.
+- **Digest** (`app/core/bookings.py`, ritual `bookings_digest`, default 20:30
+  Kyiv, last 24 h; `/bookings` = today so far, `/bookings 24` = 24 h). New
+  orders = created in the window minus tests minus rebooking copies, ANY
+  current status — the week-ago window is counted the same way, so the % is
+  fair. Lines: count + tourists, gross per currency + confirmed share, top
+  countries, agencies (top 3), new agencies, booking depth (90+ days / 14
+  days), biggest order, possible duplicates (same agency + hotel + check-in +
+  amount), cancellations with dictionary reasons, and what was excluded.
+- **Alerts** (interval job, every 10 min, 08:00–22:00 Kyiv — the standing
+  quiet-hours rule): orders whose last change is since the previous poll
+  (30-min overlap). Once per order per kind (new / cancel): gross ≥ 5000 EUR,
+  group ≥ 8 tourists, departure within 3 days, first order of an agency in
+  120 days, cancellation ≥ 3000 EUR. Thresholds compare an APPROXIMATE EUR
+  value (EUR; USD × 0.86); UAH orders never trigger them. All in env.
+- **Test orders** = every tourist «STAFF STAFF» (seen live on 23.11: 75033,
+  75036) or reason «Тестова». **Rebookings**: copies (`rebooked-from`) are not
+  sales; the cancelled original (`rebooked-to` or reason «Перебронювання») is
+  not a loss. This implements the 2026-11-04 decision for the new feed only;
+  pulse / brief / cache are unchanged.
+- **New agency** needs history: on the first poll a background scan of 120
+  days of created orders seeds `app_state.bookings_agencies` (agency id → first
+  seen). Until it succeeds the rule is off rather than calling everyone new.
+- **Time windows**: the report reads URL datetimes as fixed UTC+3; windows
+  are converted explicitly, padded by an hour and cut in code on
+  create-date/create-hour (Kyiv local).
+- Deterministic, no LLM. Store-minimum: names are read only to recognise
+  «STAFF STAFF»; app_state keeps order numbers, agency ids and dates.
+- Deferred (owner may ask later): plan-vs-fact against «Main Budget» sheets,
+  margin in the digest (needs net/gross review, as in R6.1D), weekly trend.
+- Known, unrelated: `tests/test_r61d.py` test_15 and test_26a fail on clean
+  `main` too (cache stats return 0 instead of 9) — to look at separately.
+
 ## 2026-11-23 — R8 home power status from Deye mails
 
 - Source of truth for «є світло» = Deye Cloud's own grid lost / restored mails

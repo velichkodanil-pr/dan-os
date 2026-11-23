@@ -169,6 +169,32 @@ async def send_debt_alert(user_id: int) -> None:
         await bot_instance.send_message(user_id, text)
 
 
+async def send_bookings_digest(user_id: int) -> None:
+    """R8.1 daily ritual: the last 24 hours of TravelON orders in one message
+    — instead of ~40 «бронювання готове» e-mails. Deterministic, no LLM."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from app.core import bookings
+    end = datetime.now(ZoneInfo(settings.tz_name)).replace(second=0, microsecond=0)
+    start = end - timedelta(days=1)
+    async with database.session() as db:
+        text = await bookings.digest_text(
+            start, end, title=bookings.window_title(start, end), db=db)
+    if text:
+        await bot_instance.send_message(user_id, text)
+
+
+async def send_bookings_alerts(user_id: int) -> None:
+    """R8.1 interval job: only the orders worth a look (big amount, big group,
+    departure within days, first order of an agency, big cancellation).
+    Silent when there is nothing — and between 22:00 and 08:00."""
+    from app.core import bookings
+    async with database.session() as db:
+        text = await bookings.poll_alerts(db)
+    if text:
+        await bot_instance.send_message(user_id, text)
+
+
 async def send_english_nudge(user_id: int) -> None:
     """Evening English nudge. Silent when the day is already done, and silent
     when there is no profile yet — a reminder for a habit he never started is
@@ -299,6 +325,7 @@ async def cmd_start(message: Message) -> None:
         "• /goal і /habit — цілі та звички (тренер) · /goals · /habits\n"
         "• /english — англійська 🇬🇧: щоденна сесія ~12 хв, розмовна практика й план на 12 тижнів (домен 🏠 Особисте)\n"
         "• /travelon — пульс TravelON 🧳 · «заявка 59266» чи /order — картка заявки\n"
+        "• /bookings — дайджест заявок за сьогодні (/bookings 24 — за добу)\n"
         "• 🚨 щодня о 10:00 попереджу, якщо завтра заїзд із боргом\n"
         "• /drive_all — проіндексувати ВЕСЬ Drive (усі акаунти) · /drive — одну папку\n"
         "• /wiki — база знань сторінками (партнери, процеси, умови) · /wiki_build\n"
@@ -774,6 +801,29 @@ async def cmd_order(message: Message) -> None:
     import html as _html
     await message.answer(_html.escape(travelon.order_card(order)) if order
                          else f"Заявку №{order_no} не знайшов — перевір номер.")
+
+
+@router.message(Command("bookings"))
+async def cmd_bookings(message: Message) -> None:
+    """R8.1: the booking digest on demand. /bookings = today so far,
+    /bookings 24 = the last 24 hours (what the evening ritual sends)."""
+    if not _is_owner(message):
+        return
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from app.core import bookings, travelon
+    if not travelon.configured():
+        await message.answer("🧳 TravelON не підключено.")
+        return
+    end = datetime.now(ZoneInfo(settings.tz_name)).replace(second=0, microsecond=0)
+    arg = (message.text or "").split(maxsplit=1)[1:]
+    start = (end - timedelta(days=1) if arg and arg[0].strip() == "24"
+             else end.replace(hour=0, minute=0))
+    await message.answer("📊 Збираю заявки…")
+    async with database.session() as db:
+        text = await bookings.digest_text(
+            start, end, title=bookings.window_title(start, end), db=db)
+    await message.answer(text or "Не вдалося отримати звіт, спробуй пізніше.")
 
 
 @router.message(Command("travelon"))
@@ -1881,7 +1931,7 @@ _COMMAND_HELP = (
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "
     "/drive_all · /kb_security_scan · /kb_quarantine\n"
     "<b>Пошта й календар:</b> /reply · /accounts · /connect_google\n"
-    "<b>Бізнес:</b> /travelon · /order · /travelon_sync\n"
+    "<b>Бізнес:</b> /travelon · /bookings · /order · /travelon_sync\n"
     "<b>Інше:</b> /app · /voice · /start"
 )
 # Names people reach for that are HTTP endpoints of the service, not commands

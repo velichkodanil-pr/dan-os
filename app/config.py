@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r8"
-APP_RELEASE = "R8 — світло: статус мережі з Deye у закріпі"
+APP_VERSION = "r8.1"
+APP_RELEASE = "R8.1 — дайджест заявок TravelON і алерти на винятки"
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -81,6 +81,18 @@ class Settings(BaseSettings):
     deye_password_sha256: str = ""
     deye_base_url: str = "https://eu1-developer.deyecloud.com/v1.0"
     deye_offline_minutes: int = 20
+
+    # R8.1: TravelON booking feed — a daily digest instead of ~40 «бронювання
+    # готове» e-mails, plus alerts on exceptions only. Empty time disables
+    # the digest; interval 0 disables the alerts. Thresholds compare an
+    # APPROXIMATE EUR value (EUR, USD); other currencies never trigger them.
+    bookings_digest_time: str = "20:30"
+    bookings_alert_interval_min: int = 10
+    bookings_alert_hours: str = "08:00-22:00"  # Kyiv; no pushes at night
+    bookings_alert_big_eur: float = 5000
+    bookings_alert_group: int = 8
+    bookings_alert_lastminute_days: int = 3
+    bookings_alert_cancel_eur: float = 3000
 
     # Cowork knowledge channel: enables POST /admin/ingest when set
     admin_token: str = ""

@@ -32,6 +32,17 @@ def ritual_due(last_run_date: str | None, now_local: datetime, time_str: str) ->
     return now_local >= target and last_run_date != now_local.date().isoformat()
 
 
+def interval_due(last_run_iso: str | None, now_utc: datetime, minutes: int) -> bool:
+    """Pure decision for a repeating job (testable). minutes <= 0 = disabled."""
+    if minutes <= 0:
+        return False
+    try:
+        last = datetime.fromisoformat(last_run_iso) if last_run_iso else None
+    except ValueError:
+        last = None
+    return last is None or (now_utc - last).total_seconds() >= minutes * 60 - 5
+
+
 async def _fire_due(send_message) -> None:
     async with database.session() as db:
         due = (await db.execute(
@@ -68,9 +79,30 @@ async def _fire_due(send_message) -> None:
         await db.commit()
 
 
+async def _run_interval(key: str, minutes: int, fn) -> None:
+    """A repeating owner job (R8.1 booking alerts). Claimed BEFORE running:
+    a failing job retries on its next interval instead of every 30 s tick."""
+    owner = settings.owner_telegram_id
+    if not owner or fn is None:
+        return
+    now = datetime.now(timezone.utc)
+    async with database.session() as db:
+        state = await db.get(AppState, f"last_{key}")
+        if not interval_due(state.value if state else None, now, minutes):
+            return
+        state = state or AppState(key=f"last_{key}")
+        state.value = now.isoformat()
+        db.add(state)
+        await db.commit()
+    try:
+        await fn(owner)
+    except Exception:
+        logger.exception("interval job %s failed; next try in %s min", key, minutes)
+
+
 async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
                        run_debts=None, run_tv_sync=None,
-                       run_english=None) -> None:
+                       run_english=None, run_bookings_digest=None) -> None:
     owner = settings.owner_telegram_id
     if not owner:
         return
@@ -94,6 +126,10 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
     if run_english is not None and settings.english_time.strip():
         rituals.append(("english", settings.english_time.strip(),
                         run_english, None))
+    # R8.1: the daily booking digest (deterministic, no LLM).
+    if run_bookings_digest is not None and settings.bookings_digest_time.strip():
+        rituals.append(("bookings_digest", settings.bookings_digest_time.strip(),
+                        run_bookings_digest, None))
     for key, time_str, fn, weekday in rituals:
         if weekday is not None and now_local.weekday() != weekday:
             continue
@@ -116,12 +152,17 @@ async def _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
 
 async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
                 run_debts=None, run_tv_sync=None, run_english=None,
-                run_power=None) -> None:
+                run_power=None, run_bookings_digest=None,
+                run_bookings_alerts=None) -> None:
     while True:
         try:
             await _fire_due(send_message)
             await _run_rituals(run_brief, run_checkin, run_digest, run_weekly,
-                               run_debts, run_tv_sync, run_english)
+                               run_debts, run_tv_sync, run_english,
+                               run_bookings_digest)
+            await _run_interval("bookings_alerts",
+                                settings.bookings_alert_interval_min,
+                                run_bookings_alerts)
         except Exception:
             logger.exception("scheduler tick failed")
         # R8: power status is not a daily ritual — it self-throttles to
@@ -136,11 +177,13 @@ async def _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
 
 def start(send_message, run_brief, run_checkin, run_digest, run_weekly,
           run_debts=None, run_tv_sync=None, run_english=None,
-          run_power=None) -> None:
+          run_power=None, run_bookings_digest=None,
+          run_bookings_alerts=None) -> None:
     global _task
     _task = asyncio.create_task(
         _loop(send_message, run_brief, run_checkin, run_digest, run_weekly,
-              run_debts, run_tv_sync, run_english, run_power))
+              run_debts, run_tv_sync, run_english, run_power,
+              run_bookings_digest, run_bookings_alerts))
     logger.info("Reminder scheduler started (poll every %ss)", POLL_SECONDS)
 
 

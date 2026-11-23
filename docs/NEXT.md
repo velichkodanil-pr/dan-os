@@ -1,5 +1,21 @@
 # NEXT — the one authorized round
 
+## Round 8.1 — TravelON booking digest + alerts (CURRENT, ships on top of R8)
+
+Owner request 23.11.2026. No migration, no new env required.
+
+1. Deploy. `/health/live` should report `r8.1`.
+2. In Telegram: `/bookings` — today's orders so far; `/bookings 24` — the last
+   24 hours. Compare the count with the «бронювання готове» mails of the day.
+3. 20:30 Kyiv: the digest arrives on its own (`BOOKINGS_DIGEST_TIME`).
+4. Alerts: every 10 min from 08:00 to 22:00 — only big amounts, big groups,
+   last-minute departures, new agencies, big cancellations. The «new agency»
+   rule switches on by itself a few minutes after the first poll (history scan).
+5. Tune after a week: `BOOKINGS_ALERT_BIG_EUR` (5000), `BOOKINGS_ALERT_GROUP`
+   (8), `BOOKINGS_ALERT_LASTMINUTE_DAYS` (3), `BOOKINGS_ALERT_CANCEL_EUR`
+   (3000), `BOOKINGS_ALERT_HOURS` (08:00-22:00), `BOOKINGS_ALERT_INTERVAL_MIN`
+   (10; 0 disables).
+
 ## Round 8 — Home power status (CURRENT)
 
 1. Deploy (no migration; state is one `app_state` row).

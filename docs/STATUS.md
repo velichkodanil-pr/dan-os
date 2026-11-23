@@ -4,6 +4,9 @@ _Last verified: 2026-08-21. R6.1C is DEPLOYED and verified live. R6.1D is
 PUSHED to `main` (`d944524`) — confirm the Railway build with `/health`.
 R7 is CODE COMPLETE and NOT deployed._
 
+_2026-11-23: R8.1 (TravelON booking digest + exception alerts) CODE COMPLETE,
+NOT deployed — see DECISIONS 2026-11-23 and NEXT._
+
 ## R8 — Home power status (Deye): CODE COMPLETE (2026-11-23)
 
 Owner ask (23.11.2026): Deye Cloud «відключення / відновлення мережі» mails are
