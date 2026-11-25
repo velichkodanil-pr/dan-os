@@ -1775,6 +1775,19 @@ async def cmd_power(message: Message) -> None:
     await message.answer(text)
 
 
+@router.message(Command("usage"))
+async def cmd_usage(message: Message) -> None:
+    """R9: what the bot costs — `/usage` (7 days) or `/usage 30`."""
+    if not _is_owner(message):
+        return
+    from app.core import usage
+    args = (message.text or "").split()[1:]
+    days = next((int(a) for a in args if a.isdigit()), 7)
+    async with database.session() as db:
+        text = await usage.report(db, days)
+    await send_html(bot_instance, message.chat.id, text)
+
+
 @router.message(Command("energy"))
 async def cmd_energy(message: Message) -> None:
     """R8.2: today's energy (+ week; `/energy month` adds month-to-date)."""
@@ -2023,6 +2036,7 @@ _COMMAND_HELP = (
     "<b>Задачі й день:</b> /today · /brief · /checkin · /goal · /goals · "
     "/habit · /habits\n"
     "<b>Англійська:</b> /english · /english_stop\n"
+    "<b>Вартість:</b> /usage [днів] — токени й $ по функціях і моделях\n"
     "<b>Дім:</b> /power — чи є світло (закріп оновлюється сам) · /energy "
     "[month] · /precharge [год] | stop\n"
     "<b>Знання:</b> /kb · /wiki · /wiki_build · /wiki_lint · /drive · "

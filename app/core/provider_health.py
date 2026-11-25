@@ -144,6 +144,9 @@ async def post(client: httpx.AsyncClient, provider: str, url: str,
         status = resp.status_code
         if 200 <= status < 300:
             await _on_success(provider)
+            # R9: numbers-only token & cost meter; never raises
+            from app.core import usage
+            await usage.capture(provider, url, kwargs, resp)
             return resp
         kind = classify(provider, status, resp.text)
         if kind is not None:

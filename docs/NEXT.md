@@ -1,6 +1,13 @@
 # NEXT — the one authorized round
 
-## Round 8.2 — Energy (CURRENT, pushed)
+## Round 9 — Token & cost meter (CURRENT, pushed)
+
+1. After deploy: `/usage` — empty at first, fills with every model call.
+2. After a day: `/usage 1` — which feature costs what; tune CHAT_MODEL /
+   context window if the chat dominates.
+3. USAGE_ALERT_USD_DAY (default 5) — one alert a day above it.
+
+## Round 8.2 — Energy (pushed)
 
 1. Check Railway logs for `deye shape` lines — every endpoint's real field
    names; fix the mapping if one differs from the swagger.

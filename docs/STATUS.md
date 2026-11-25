@@ -11,6 +11,14 @@ _R8.1 (TravelON booking digest + exception alerts): see DECISIONS 2026-11-23
 and NEXT._
 
 
+
+## R9 — Token & cost meter: CODE COMPLETE, PUSHED 2026-11-25
+
+`app/core/usage.py`, hook in `provider_health.post`, table `token_usage`
+(migration d4e5f6a7b8c9), `/usage [days]`, daily alert above $5. Tests:
+`tests/test_r9_usage.py` (7). Full suite 495 passed, 2 failed — the
+pre-existing date-dependent `test_r61d` pair.
+
 ## R8.2 — Energy on top of the power card: CODE COMPLETE, PUSHED 2026-11-23
 
 Owner ask: «Роби все» on the list of inverter ideas. Batteries (owner,

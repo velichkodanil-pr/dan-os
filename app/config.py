@@ -5,9 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Build identity. One constant, updated per round — /health/live and /start
 # read it instead of carrying a hardcoded round number that goes stale.
-APP_VERSION = "r8.2"
-APP_RELEASE = ("R8.2 — енергія: запас батареї, алерти розряду, звіт і економія, "
-               "панелі, ємність, надлишок сонця, аварії Deye, дозаряд, ⚡ у Mini App")
+APP_VERSION = "r9"
+APP_RELEASE = ("R9 — лічильник токенів і вартості: /usage, ліміт на день")
 SCANNER_BUILD = 2   # app.core.secret_policy.SCANNER_VERSION, surfaced in /health
 
 
@@ -95,6 +94,8 @@ class Settings(BaseSettings):
     power_surplus_kw: float = 3.0            # «battery full, sun to spare» push
     power_alerts_minutes: int = 10           # inverter alarm polling
     precharge_max_hours: int = 6
+    # R9: token & cost meter — one owner alert a day above this spend (USD).
+    usage_alert_usd_day: float = 5.0
 
     # R8.1: TravelON booking feed — a daily digest instead of ~40 «бронювання
     # готове» e-mails, plus alerts on exceptions only. Empty time disables

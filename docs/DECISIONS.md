@@ -2,6 +2,25 @@
 
 Approved decisions on top of `docs/product/DAN_OS_Plan_v1.1.md`. Newest first.
 
+## 2026-11-25 — R9 token & cost meter
+
+Owner: «Додай лічильник токенів для глибокого розуміння вартості роботи».
+- Hook in `provider_health.post` (the one door for every Anthropic / OpenAI
+  call): after a 2xx, `usage.capture` books one `token_usage` row — provider,
+  model, feature (caller module from the stack; relays such as
+  `extraction.haiku_text` and `embeddings` are skipped so the cost lands on
+  the asker), input / output / cache read / cache write tokens, web
+  searches, cost in USD. Numbers only — never prompt, reply or content.
+- Explicitly cross-domain, owner-only, deterministic (like /accounts): it is
+  a report about the bot, not about a domain's data.
+- Prices: Claude API list prices Nov 2026 (Opus 5.5 $4/$20, cache read $0.20,
+  write $5; Sonnet 5.5 $2/$10; Haiku 5.5 $0.10/$0.50 ≤100k prompt, $0.50/$2.50
+  above; Haiku 4.5 $1/$5), web search $10/1000. OpenAI audio is approximate
+  (flag `approx`). Unknown models cost 0 and are flagged ≈.
+- The meter never breaks a call (failures logged and swallowed).
+- `/usage [days]`; one owner alert a day above USAGE_ALERT_USD_DAY ($5).
+- Migration d4e5f6a7b8c9 (idempotent; replay checked).
+
 ## 2026-11-23 — R8.2.1 grid presence from the inverter, not only mail
 
 Owner: «Дом не оновлюється, хоча я бачу в додатку Deye». Deye sent «grid

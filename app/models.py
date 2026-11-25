@@ -536,3 +536,24 @@ class EnglishSession(Base):
     turns: Mapped[int] = mapped_column(Integer, default=0)
     mistakes: Mapped[dict] = mapped_column(JSONB, default=list)  # list[{wrong,right,why}]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TokenUsage(Base):
+    """R9: one row per successful model / provider call — numbers only.
+
+    Technical metadata for cost analysis: no prompt, no reply, no content.
+    Owner-only and explicitly cross-domain like /accounts (a cost report is
+    about the bot, not about any domain's data)."""
+    __tablename__ = "token_usage"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    provider: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(64), default="")
+    feature: Mapped[str] = mapped_column(String(48), default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write: Mapped[int] = mapped_column(Integer, default=0)
+    web_searches: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    approx: Mapped[bool] = mapped_column(Boolean, default=False)
